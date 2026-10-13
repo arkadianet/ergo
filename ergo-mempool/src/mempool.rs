@@ -234,6 +234,14 @@ impl Mempool {
         self.invalidation.contains(tx_id)
     }
 
+    /// Should an inventory of `tx_id` advertised by `peer` be skipped? True
+    /// when the id failed in a way its proofs cannot change, or when bytes
+    /// delivered by this same peer failed a proof-dependent check.
+    pub fn is_invalidated_from(&self, tx_id: &TxId, peer: crate::types::PeerId) -> bool {
+        self.invalidation
+            .contains_for_peer(tx_id, peer, std::time::Instant::now())
+    }
+
     /// Invalidate a transaction named by block validation using the same bounded
     /// descendant removal and revocation semantics as a failed pool recheck.
     pub fn invalidate(&mut self, id: TxId, now: std::time::Instant) -> Vec<MempoolAction> {
@@ -875,6 +883,7 @@ impl Mempool {
                         &mut self.invalidation,
                         &mut self.unresolved,
                         s.tx_id,
+                        admission::FailureOrigin::Delivered(source.peer()),
                         c_bytes,
                         &error,
                         now,
@@ -1122,7 +1131,10 @@ impl Mempool {
         // drain exhaust the local budget and strand its own tail. Reachable only
         // with `staging_enabled`.
         if !matches!(source, TxSource::DemotedFromBlock) {
-            self.budgets.charge(source.budget_source(), cost.consumed());
+            self.budgets.charge(
+                source.budget_source(),
+                admission::accounted_cost(cost.consumed()),
+            );
         }
         res.map_err(PackageValidationError::Validation)
     }
@@ -1229,8 +1241,10 @@ impl Mempool {
             let mut inc_cost: u64 = 0;
             let mut inc_seen: HashSet<TxId> = HashSet::new();
             let mut removed_incumbents: Vec<TxId> = Vec::new();
+            let mut removed_outputs: HashSet<ergo_primitives::digest::Digest32> = HashSet::new();
             for c in &conflicts {
                 for e in staged.remove_with_descendants_debiting(c, max_depth, bounds) {
+                    removed_outputs.extend(e.outputs.iter().copied());
                     if inc_seen.insert(e.tx_id) {
                         inc_fee = inc_fee.saturating_add(e.fee);
                         inc_size += e.size_bytes as usize;
@@ -1249,6 +1263,15 @@ impl Mempool {
             // aggregate absolute fee (the anti-pinning teeth). BOTH required.
             if !(pkg_weight > inc_weight && pkg_fee > inc_fee) {
                 return None; // clone discarded — live pool untouched
+            }
+            // No member may spend an output of a tx the package removes: that
+            // box would exist nowhere after the swap.
+            if members.iter().any(|m| {
+                m.input_box_ids
+                    .iter()
+                    .any(|input| removed_outputs.contains(input))
+            }) {
+                return None;
             }
             // Accepted: the closure is already removed from `staged`.
             evicted = removed_incumbents;
@@ -1832,6 +1855,7 @@ impl Mempool {
                     &mut self.invalidation,
                     &mut self.unresolved,
                     id,
+                    admission::FailureOrigin::Recheck,
                     &bytes,
                     &err,
                     now,

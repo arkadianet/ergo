@@ -275,7 +275,7 @@ pub(super) fn admit(
     }
     let mut outputs = state.mempool.pool_output_overlay();
     for entry in &private_entries {
-        for (id, output) in entry.outputs.iter().zip(&entry.output_boxes) {
+        for (id, output) in entry.outputs.iter().zip(entry.output_boxes.iter()) {
             outputs.insert(*id, output.clone());
         }
     }

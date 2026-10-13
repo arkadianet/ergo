@@ -4420,6 +4420,39 @@ mod tests {
     }
 
     #[test]
+    fn apply_rejects_an_insert_of_an_existing_box_and_keeps_state() {
+        let (mut store, _directory) = fresh_store();
+        let existing = [0x42; 32];
+        store
+            .initialize_genesis(&[(existing, vec![1, 2, 3])])
+            .unwrap();
+        let root = store.root_digest();
+        let mut to_insert: UtxoInsertMap = BTreeMap::new();
+        // Same bytes, so the state root would not change if the insert were
+        // allowed to overwrite.
+        to_insert.insert(existing, vec![1, 2, 3]);
+        let emission = super::emission::EmissionTransition::prepare(
+            store.chain_state.best_full_block_id,
+            2,
+            std::iter::empty(),
+        )
+        .unwrap();
+        let result = store.apply_utxo_changes(
+            2,
+            &[2; 32],
+            &root,
+            (BTreeMap::new(), to_insert, emission),
+            None,
+            None,
+        );
+        assert!(
+            matches!(result, Err(StateError::BoxAlreadyExists(_))),
+            "{result:?}"
+        );
+        assert_eq!(store.root_digest(), root);
+    }
+
+    #[test]
     fn ibd_periodic_barrier_runs_on_nth_job_and_exit_drains_remaining_jobs() {
         let (mut store, _directory) = fresh_store();
         store.initialize_genesis(&[]).unwrap();

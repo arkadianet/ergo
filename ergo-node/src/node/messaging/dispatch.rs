@@ -676,7 +676,7 @@ fn handle_inv(state: &mut NodeState, peer: PeerId, inv: InvData, now: Instant) -
                 if state.mempool.contains(&tx_id) || state.mempool.is_private_transaction(&tx_id) {
                     return None;
                 }
-                if state.mempool.is_invalidated(&tx_id) {
+                if state.mempool.is_invalidated_from(&tx_id, peer) {
                     return None;
                 }
                 Some(*id)

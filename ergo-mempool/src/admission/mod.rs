@@ -11,13 +11,11 @@
 //! `ergo_validation::validate_transaction_parsed`; the
 //! [`MockValidator`] below is the unit-test counterpart.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use ergo_primitives::cost::{CostAccumulator, JitCost};
 use ergo_primitives::digest::Digest32;
-use ergo_ser::ergo_box::ErgoBox;
 use ergo_validation::{TxValidationCtx, TxValidationRules};
 use tracing::warn;
 
@@ -44,7 +42,7 @@ pub use mock::{MockPlan, MockStructure, MockValidator};
 pub(crate) use outcome::HeldCandidate;
 pub use outcome::{AdmissionOutcome, CheckOutcome, RejectReason};
 pub use revalidate::revalidate_pooled;
-pub(crate) use revalidate::{is_recheck_evictable, record_failed_tx};
+pub(crate) use revalidate::{is_recheck_evictable, record_failed_tx, FailureOrigin};
 
 pub(crate) use outcome::classify;
 use outcome::ReplacementDecision;
@@ -343,11 +341,10 @@ pub(crate) fn check_capturing_held<V: Validator>(
         );
     }
 
-    // Build overlay from the pool's materialized output boxes.
-    // Empty for tests that don't exercise pool-chaining; populated in
-    // production once admission threads `output_boxes` onto Entry.
-    let pool_outputs: HashMap<Digest32, ErgoBox> = cx.pool.output_map();
-    let overlay_view = PoolUtxoOverlay::new(cx.tip_ctx.utxo, &pool_outputs);
+    // Regular inputs resolve against the committed UTXO plus outputs created
+    // by pooled txs, read straight from the pool (no per-admission copy of
+    // every pooled output).
+    let overlay_view = PoolUtxoOverlay::new(cx.tip_ctx.utxo, &*cx.pool);
     let committed_view = CommittedOnly::new(cx.tip_ctx.utxo);
 
     // ── Steps 4–6 and 9–12 — validator handles deserialize, tx_id,
@@ -388,7 +385,8 @@ pub(crate) fn check_capturing_held<V: Validator>(
             // Charge whatever cost the validator consumed (skipped for demoted
             // re-admission — see `budget_exempt`).
             if !budget_exempt {
-                cx.budgets.charge(budget_source, cost.consumed());
+                cx.budgets
+                    .charge(budget_source, accounted_cost(cost.consumed()));
             }
 
             // Classify the error for routing + peer penalty.
@@ -405,6 +403,7 @@ pub(crate) fn check_capturing_held<V: Validator>(
                 cx.invalidated,
                 cx.unresolved,
                 peek_fee_value.tx_id,
+                FailureOrigin::Delivered(peer),
                 tx_bytes,
                 &err,
                 now,
@@ -415,7 +414,8 @@ pub(crate) fn check_capturing_held<V: Validator>(
 
     // Full validation spent this cost regardless of the later pool decision.
     if !budget_exempt {
-        cx.budgets.charge(budget_source, validated.consumed_cost);
+        cx.budgets
+            .charge(budget_source, accounted_cost(validated.consumed_cost));
     }
 
     // No invalidation-cache check here, deliberately. The cache is a
@@ -465,13 +465,40 @@ pub(crate) fn check_capturing_held<V: Validator>(
     let replacement = if conflicts.is_empty() {
         ReplacementDecision::NoConflict
     } else {
-        // avg = sum(conflict weights) / conflict count, in u128.
-        let sum: u128 = conflicts
+        // Everything the replacement would remove: the conflicts and their
+        // in-pool descendants (the same bounded walk the commit runs).
+        let closure = cx
+            .pool
+            .descendant_closure(&conflicts, cx.config.max_family_depth);
+        // A replacement may not spend an output of a tx it removes: that box
+        // would exist nowhere once the commit runs, leaving an entry the
+        // pool can never mine.
+        let removed_outputs: std::collections::HashSet<&Digest32> =
+            closure.iter().flat_map(|e| e.outputs.iter()).collect();
+        if validated
+            .input_box_ids
             .iter()
-            .filter_map(|id| cx.pool.get(id).map(|e| e.weight as u128))
-            .sum();
-        let avg = sum / conflicts.len() as u128;
-        if (weight as u128) > avg {
+            .any(|input| removed_outputs.contains(input))
+        {
+            return (
+                CheckOutcome::Rejected {
+                    reason: RejectReason::UnresolvedInput,
+                },
+                actions,
+            );
+        }
+        // Replace only when the new tx outranks every conflict (each weight
+        // already carries its family credit) and pays more in absolute fee
+        // than everything it removes.
+        let max_conflict_weight = conflicts
+            .iter()
+            .filter_map(|id| cx.pool.get(id).map(|e| e.weight))
+            .max()
+            .unwrap_or(0);
+        let removed_fee = closure
+            .iter()
+            .fold(0u64, |sum, e| sum.saturating_add(e.fee));
+        if weight > max_conflict_weight && validated.fee > removed_fee {
             ReplacementDecision::Replace(conflicts.clone())
         } else {
             actions.push(MempoolAction::Observe {
@@ -568,6 +595,18 @@ pub(crate) fn check_capturing_held<V: Validator>(
         },
         actions,
     )
+}
+
+/// Minimum cost charged to the admission budgets for one validation attempt.
+/// A tx that fails before its scripts run (for example on a missing input)
+/// consumes almost no interpreter cost, yet still costs a parse, a lookup
+/// and a cache write; the floor keeps such attempts counted.
+pub(crate) const MIN_ACCOUNTED_COST: u64 = 5_000;
+
+/// The cost an admission attempt charges: what validation consumed, but at
+/// least [`MIN_ACCOUNTED_COST`].
+pub(crate) fn accounted_cost(consumed: u64) -> u64 {
+    consumed.max(MIN_ACCOUNTED_COST)
 }
 
 /// Steps 15 + 17 — apply the validated, capacity-cleared candidate to
@@ -760,10 +799,21 @@ fn apply_commit(
         .iter()
         .map(|id| (*id, pool.get(id).map(|e| e.weight).unwrap_or(0)))
         .collect();
+    let mut removed_outputs: std::collections::HashSet<Digest32> = std::collections::HashSet::new();
     for id in replaced_ids {
         for e in pool.remove_with_descendants_debiting(id, config.max_family_depth, bounds) {
+            removed_outputs.extend(e.outputs.iter().copied());
             removed_for_actions.push(e.tx_id);
         }
+    }
+    // Backstop for `check`: never seat a tx whose input was created by a tx
+    // this commit just removed (on the staged path the clone is discarded).
+    if validated
+        .input_box_ids
+        .iter()
+        .any(|input| removed_outputs.contains(input))
+    {
+        return Err(RejectReason::UnresolvedInput);
     }
 
     // 15b — compute parents_in_pool now that loser removals are done.

@@ -5,6 +5,7 @@ use crate::types::TipPointer;
 use crate::unresolved::UnresolvedCache;
 use crate::weight::ByCost;
 use ergo_primitives::digest::Digest32;
+use ergo_ser::ergo_box::ErgoBox;
 use ergo_validation::{ProtocolParams, TransactionContext, UtxoView};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -849,10 +850,13 @@ fn validation_failure_blacklists_by_canonical_tx_id() {
     // the key the step-5 record_hit and the Inv-skip gate look up —
     // not by a hash of the wire bytes (which, including proofs, never
     // equals the proof-excluded tx_id).
+    // A script failure depends on the delivered proofs, so the entry is
+    // scoped to the delivering peer.
     assert!(
-        inv.contains(&id(7)),
+        inv.contains_for_peer(&id(7), peer(), Instant::now()),
         "invalidation cache keyed by canonical tx_id"
     );
+    assert!(!inv.contains(&id(7)), "not filtered for other peers");
     let bytes_hash = ergo_primitives::digest::blake2b256(b"bytes");
     assert!(!inv.contains(&bytes_hash), "no bytes-hash proxy entry");
 }
@@ -886,7 +890,10 @@ fn failed_then_corrected_resubmission_is_accepted() {
         weight_fn: &w,
     };
     let _ = process(b"bytes", TxSource::Peer(peer()), t0, &mut cx, &v_fail);
-    assert!(inv.contains(&id(7)), "failure blacklists the canonical id");
+    assert!(
+        inv.contains_for_peer(&id(7), peer(), t0),
+        "failure blacklists the canonical id for the delivering peer"
+    );
     // Resubmission that now validates (e.g. corrected proofs — same
     // proof-excluded tx_id) must be ADMITTED: Scala's process never
     // consults invalidatedTxIds, so a blacklisted-but-now-valid tx is
@@ -906,7 +913,10 @@ fn failed_then_corrected_resubmission_is_accepted() {
     let (out, _) = process(b"bytes", TxSource::Peer(peer()), t1, &mut cx, &v_ok);
     assert!(matches!(out, AdmissionOutcome::Admitted { .. }));
     assert!(pool.contains(&id(7)));
-    assert!(inv.contains(&id(7)), "fetch-filter entry remains");
+    assert!(
+        inv.contains_for_peer(&id(7), peer(), t1),
+        "fetch-filter entry remains"
+    );
 }
 
 #[test]
@@ -1603,6 +1613,15 @@ fn pool_output_map_feeds_overlay_for_child_tx() {
         map.contains_key(&id(0xBB)),
         "output_map must expose pool-created output box for overlay"
     );
+    // The pool resolves the same output without building a map, and a
+    // staging copy shares the materialized boxes instead of copying them.
+    assert!(pool.output_box(&id(0xBB)).is_some());
+    assert!(pool.output_box(&id(0xCC)).is_none());
+    let staged = pool.clone_for_staging();
+    assert!(Arc::ptr_eq(
+        &staged.get(&id(1)).unwrap().output_boxes,
+        &pool.get(&id(1)).unwrap().output_boxes
+    ));
 
     // Admit a child that "spends" that output — MockValidator
     // returns success regardless of the overlay (it's a mock), but
@@ -1837,7 +1856,7 @@ fn check_seeds_invalidation_cache_on_validation_failure() {
     let v = MockValidator::new().plan(
         b"bytes".to_vec(),
         MockPlan {
-            result: Err(ValidationErr::ScriptFailed),
+            result: Err(ValidationErr::MonetaryFailed),
             charge: 25_000,
             peek_fee: Some(5_000_000),
             peek_tx_id: Some(id(9)),
@@ -1861,7 +1880,7 @@ fn check_seeds_invalidation_cache_on_validation_failure() {
     // derivation.
     assert!(
         inv.contains(&id(9)),
-        "check must seed the invalidation cache on script failure (parity with process)",
+        "check must seed the invalidation cache on a rule failure (parity with process)",
     );
     assert_eq!(pool.len(), 0, "check must never insert into the pool");
 }
@@ -2456,4 +2475,296 @@ fn valid_rent_claim_policy_override_and_ordinary_spend() {
             assert_eq!(pool.size(), 1);
         }
     }
+}
+
+// ----- replacement, accounting and invalidation scope -----
+
+/// One admission against a fresh `AdmissionCtx` over the shared test state.
+#[allow(clippy::too_many_arguments)]
+fn admit(
+    pool: &mut OrderedPool,
+    budgets: &mut CostBudgets,
+    inv: &mut InvalidationCache,
+    unr: &mut UnresolvedCache,
+    cfg: &MempoolConfig,
+    bytes: &[u8],
+    source: TxSource,
+    validator: &MockValidator,
+) -> AdmissionOutcome {
+    let utxo = EmptyUtxo;
+    let c = ctx();
+    let w = ByCost;
+    let tip = c.view(&utxo);
+    let mut cx = AdmissionCtx {
+        tip_ctx: &tip,
+        config: cfg,
+        pool,
+        budgets,
+        invalidated: inv,
+        unresolved: unr,
+        weight_fn: &w,
+    };
+    process(bytes, source, Instant::now(), &mut cx, validator).0
+}
+
+fn plan_ok(bytes: &[u8], validated: Validated) -> MockValidator {
+    let charge = validated.consumed_cost;
+    MockValidator::new().plan(
+        bytes.to_vec(),
+        MockPlan {
+            result: Ok(validated),
+            charge,
+            peek_fee: None,
+            peek_tx_id: None,
+        },
+    )
+}
+
+fn plan_err(bytes: &[u8], err: ValidationErr, charge: u64) -> MockValidator {
+    MockValidator::new().plan(
+        bytes.to_vec(),
+        MockPlan {
+            result: Err(err),
+            charge,
+            peek_fee: Some(5_000_000),
+            peek_tx_id: Some(id(0x77)),
+        },
+    )
+}
+
+fn validated(tx: u8, inputs: &[u8], outputs: &[u8], fee: u64) -> Validated {
+    Validated {
+        tx_id: id(tx),
+        input_box_ids: inputs.iter().map(|b| id(*b)).collect(),
+        output_box_ids: outputs.iter().map(|b| id(*b)).collect(),
+        outputs: vec![],
+        fee,
+        size_bytes: 100,
+        consumed_cost: 10_000,
+    }
+}
+
+#[test]
+fn replacement_spending_an_output_of_the_tx_it_replaces_is_rejected() {
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    let cfg = default_config();
+    // A spends i1 (0xA0) and creates o (0xB0).
+    let a = plan_ok(b"tx_a", validated(10, &[0xA0], &[0xB0], 2_000_000));
+    let out = admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_a",
+        TxSource::Api,
+        &a,
+    );
+    assert!(matches!(out, AdmissionOutcome::Admitted { .. }));
+    // R spends i1 (conflicts with A) and o (A's own output), at a much
+    // higher fee. Replacing A would leave o nowhere.
+    let r = plan_ok(b"tx_r", validated(11, &[0xA0, 0xB0], &[0xC0], 50_000_000));
+    let out = admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_r",
+        TxSource::Peer(peer()),
+        &r,
+    );
+    assert!(
+        matches!(
+            out,
+            AdmissionOutcome::Rejected {
+                reason: RejectReason::UnresolvedInput
+            }
+        ),
+        "{out:?}"
+    );
+    assert!(pool.contains(&id(10)), "A stays pooled");
+    assert!(!pool.contains(&id(11)));
+    pool.check_invariants();
+}
+
+#[test]
+fn replacement_spending_an_output_of_a_removed_descendant_is_rejected() {
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    let cfg = default_config();
+    let a = plan_ok(b"tx_a", validated(10, &[0xA0], &[0xB0], 2_000_000));
+    admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_a",
+        TxSource::Api,
+        &a,
+    );
+    // D spends A's output and creates 0xD0.
+    let d = plan_ok(b"tx_d", validated(12, &[0xB0], &[0xD0], 2_000_000));
+    let out = admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_d",
+        TxSource::Api,
+        &d,
+    );
+    assert!(matches!(out, AdmissionOutcome::Admitted { .. }));
+    // R conflicts with A and spends D's output: replacing A removes D too.
+    let r = plan_ok(b"tx_r", validated(11, &[0xA0, 0xD0], &[0xC0], 90_000_000));
+    let out = admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_r",
+        TxSource::Peer(peer()),
+        &r,
+    );
+    assert!(
+        matches!(
+            out,
+            AdmissionOutcome::Rejected {
+                reason: RejectReason::UnresolvedInput
+            }
+        ),
+        "{out:?}"
+    );
+    assert!(pool.contains(&id(10)) && pool.contains(&id(12)));
+    pool.check_invariants();
+}
+
+#[test]
+fn replacement_must_pay_more_than_the_sum_of_what_it_removes() {
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    let cfg = default_config();
+    // Two equal-weight txs spending different boxes.
+    let a = plan_ok(b"tx_a", validated(10, &[0xA1], &[0xB1], 10_000_000));
+    let bb = plan_ok(b"tx_b", validated(11, &[0xA2], &[0xB2], 10_000_000));
+    admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_a",
+        TxSource::Api,
+        &a,
+    );
+    admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_b",
+        TxSource::Api,
+        &bb,
+    );
+    // R spends both at 1.1x one tx's weight but below their combined fee.
+    let r = plan_ok(b"tx_r", validated(12, &[0xA1, 0xA2], &[0xC0], 11_000_000));
+    let out = admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_r",
+        TxSource::Peer(peer()),
+        &r,
+    );
+    assert!(
+        matches!(
+            out,
+            AdmissionOutcome::Rejected {
+                reason: RejectReason::DoubleSpendLoser
+            }
+        ),
+        "{out:?}"
+    );
+    assert!(pool.contains(&id(10)) && pool.contains(&id(11)));
+    // Above both the highest conflict weight and the combined fee: replaces.
+    let r2 = plan_ok(b"tx_r2", validated(13, &[0xA1, 0xA2], &[0xC1], 21_000_000));
+    let out = admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_r2",
+        TxSource::Peer(peer()),
+        &r2,
+    );
+    assert!(matches!(out, AdmissionOutcome::Admitted { .. }), "{out:?}");
+    assert!(!pool.contains(&id(10)) && !pool.contains(&id(11)));
+    pool.check_invariants();
+}
+
+#[test]
+fn a_validation_attempt_is_charged_at_least_the_minimum_cost() {
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    let cfg = default_config();
+    let before = b.global_consumed();
+    let v = plan_err(b"missing_input", ValidationErr::UnresolvedInput, 0);
+    let out = admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"missing_input",
+        TxSource::Peer(peer()),
+        &v,
+    );
+    assert!(matches!(
+        out,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::UnresolvedInput
+        }
+    ));
+    assert_eq!(b.global_consumed() - before, MIN_ACCOUNTED_COST);
+}
+
+#[test]
+fn proof_dependent_failure_is_cached_for_the_delivering_peer_only() {
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    let cfg = default_config();
+    let other = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9001);
+    let v = plan_err(b"bad_proof", ValidationErr::ScriptFailed, 20_000);
+    admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"bad_proof",
+        TxSource::Peer(peer()),
+        &v,
+    );
+    let now = Instant::now();
+    assert!(inv.contains_for_peer(&id(0x77), peer(), now));
+    assert!(
+        !inv.contains_for_peer(&id(0x77), other, now),
+        "another peer may hold the same id with valid proofs"
+    );
+    // A failure the proofs cannot change filters the id from every peer.
+    let v = plan_err(b"bad_amounts", ValidationErr::MonetaryFailed, 20_000);
+    admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"bad_amounts",
+        TxSource::Peer(peer()),
+        &v,
+    );
+    assert!(inv.contains_for_peer(&id(0x77), other, now));
 }

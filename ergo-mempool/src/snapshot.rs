@@ -111,7 +111,7 @@ mod tests {
             created_at: std::time::Instant::now(),
             last_checked_at: std::time::Instant::now(),
             source: TxSource::Api,
-            output_boxes: Vec::new(),
+            output_boxes: Vec::new().into(),
         }
     }
 
