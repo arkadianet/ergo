@@ -303,13 +303,20 @@ fn parse_node_value(
             // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/SigmaBuilder.scala#L706-L711
             // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/SigmaBuilder.scala#L750-L763
             if _tree_version < 3 && matches!(first, 0x99..=0x9A | 0x9C..=0x9E | 0xA1..=0xA2) {
+                // applyUpcast reads left.tpe, then right.tpe, before any cast,
+                // so a cached failed type read of either operand throws here.
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/SigmaBuilder.scala#L674-L684
+                if types.constructors.is_some() {
+                    let cached = types.constructor_children.last().unwrap();
+                    for tpe in &cached[cached.len() - 2..] {
+                        tpe.as_ref().map_err(|e| e.into_read_error())?;
+                    }
+                }
                 let num_children = children.len();
                 let operand_types = &mut children[num_children - 2..];
                 if let Some(target) = apply_upcast(&mut a, &mut b, operand_types) {
                     if types.constructors.is_some() {
-                        let ct = types.constructor_children.last_mut().unwrap();
-                        let len = ct.len();
-                        ct[len - 2..].fill(Ok(Some(target)));
+                        fill_upcast_types(types.constructor_children.last_mut().unwrap(), target);
                     }
                 }
             }
@@ -973,9 +980,10 @@ fn parse_node_value(
                 if _tree_version < 3 && (0x8F..=0x94).contains(&first) {
                     if let Some(target) = apply_upcast(&mut a, &mut b, operands) {
                         if types.constructors.is_some() {
-                            let ct = types.constructor_children.last_mut().unwrap();
-                            let len = ct.len();
-                            ct[len - 2..].fill(Ok(Some(target)));
+                            fill_upcast_types(
+                                types.constructor_children.last_mut().unwrap(),
+                                target,
+                            );
                         }
                     }
                 }
@@ -989,6 +997,18 @@ fn parse_node_value(
         opcode: first,
         payload,
     }))
+}
+
+/// Record the upcast operand types in the cached constructor types. A failed
+/// type read is never replaced: callers read both operands first, and keeping
+/// the failure means a later reader still sees it.
+fn fill_upcast_types(cached: &mut [super::ConstructorType], target: SigmaType) {
+    let len = cached.len();
+    for tpe in &mut cached[len - 2..] {
+        if tpe.is_ok() {
+            *tpe = Ok(Some(target.clone()));
+        }
+    }
 }
 
 // Mirror TransformingSigmaBuilder.applyUpcast: cast only the narrower numeric
