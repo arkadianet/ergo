@@ -129,7 +129,7 @@ jobs:
         if: (runner.os != 'Windows' || matrix.shard == matrix.shards) && (runner.os != 'macOS' || matrix.shard == matrix.shards)
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           tool: cargo-nextest@${{ steps.rust.outputs.nextest }}
 
@@ -191,14 +191,14 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/rust
         id: rust
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: '17'
       - uses: VirtusLab/scala-cli-setup@3f5bf11a33bb88343238780c18257c8fa43789e1 # v1
         with:
           scala-cli-version: ${{ steps.rust.outputs.scala_cli }}
-      - uses: sbt/setup-sbt@6158cb0903b8ceeae04f830055f3155e1b6a5ad7 # v1
+      - uses: sbt/setup-sbt@ecad189dd245444b9ae0a0cd5922fd938b88906f # v1
         with:
           sbt-runner-version: 1.12.11
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
