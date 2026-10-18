@@ -32,23 +32,46 @@ miner_reward_address = "9f..."
 The node decodes the address, checks it belongs to the configured network
 and pays rewards to its public key. No daemon is required.
 
+### Three secrets
+
+The daemon involves three different secrets; mixing them up is the usual
+cause of a rejected request:
+
+| Secret | Where it lives | What it is for |
+|---|---|---|
+| Node `api_key` | the node's own credential (hash in `ergo-node.toml`) | the node dashboard and node API; the daemon's page rejects it |
+| `wallet-api-key` | file beside `walletd.toml`, written by `ergo-walletd init` | the daemon's page (**Authorize**) and its local API (`api_key` header) |
+| Wallet password | chosen when the wallet was created | unlocks the wallet; an adopted wallet keeps its old password |
+
+`init` also writes `node-api-key`, which the daemon uses to call the node;
+the node only needs its hash, which `init` prints.
+
 ### A wallet in the daemon
 
 1. Create the daemon's configuration and credentials:
 
    ```sh
    ergo-walletd init --config ~/ergo-walletd/walletd.toml \
-     --data-dir ~/ergo-walletd/data --node-url http://127.0.0.1:9053
+     --data-dir ~/ergo-walletd/data --node-url http://127.0.0.1:9053 \
+     --tcp 127.0.0.1:3033
    ```
 
-   This writes the config and two owner-only credential files beside it, and
-   prints a `[[api.security.keys]]` entry for the node (add `--mining-jobs` for
-   the scopes private mining jobs need). Add that entry to `ergo-node.toml` and
+   `--node-url` is the node's API address. `--tcp` gives the daemon a
+   loopback port for its browser page; `127.0.0.1:3033` is the address the
+   node reports by default, and `init` prints the `[wallet] daemon_address`
+   line when you choose another. Without `--tcp` the daemon listens only on a
+   Unix socket beside the config.
+
+   `init` writes the config and the two owner-only credential files, then
+   prints the remaining steps: a `[[api.security.keys]]` entry for the node
+   (add `--mining-jobs` for the scopes private mining jobs need), where the
+   page is and which file authorizes it. Add the entry to `ergo-node.toml` and
    restart the node.
 
-2. Start the daemon and create or restore the wallet through its API
-   (`POST /api/v1/wallet/init` or `/api/v1/wallet/restore`, with the
-   `wallet-api-key` value in the `api_key` header) or its browser UI.
+2. Start the daemon (`ergo-walletd --config ~/ergo-walletd/walletd.toml`),
+   open its page, authorize with the contents of `wallet-api-key`, and create
+   or restore the wallet. The API equivalents are `POST /api/v1/wallet/init`
+   and `/api/v1/wallet/restore`.
 
 3. To mine to this wallet, print its reward address and add the printed line
    to `ergo-node.toml`:
@@ -59,15 +82,19 @@ and pays rewards to its public key. No daemon is required.
 
    The command reads the wallet password from standard input.
 
-The daemon encrypts its database at rest. After a restart it is **sealed**
-until the wallet password unlocks it; see
+The daemon encrypts its database at rest. After every restart it is
+**sealed**: its page shows the wallet as locked and nothing syncs until the
+wallet password unlocks it. See
 [sealed start](configuration.md#sealed-start-and-database-encryption) for
-unattended operation with a TPM-bound credential.
+unattended operation with a TPM-bound credential. To run the daemon as a
+service, start from the hardened unit in
+[`deploy/ergo-walletd.service`](../deploy/ergo-walletd.service).
 
 ## Upgrading a node that hosted its wallet
 
 The node no longer hosts a wallet. It leaves the old wallet's rows and keystore
-untouched and hands a copy to the daemon:
+untouched and hands a copy to the daemon. The node dashboard's **Wallet** page
+summarizes these steps and links to the daemon once it runs.
 
 1. **Upgrade the node.** It keeps syncing and mining. A miner without a
    configured reward key keeps the old wallet's first-address key, and the log
@@ -75,7 +102,7 @@ untouched and hands a copy to the daemon:
 
 2. **Find the handoff.** On start the node publishes a verified copy of the
    wallet at `<data_dir>/wallet-handoff/`, in the background, and logs the
-   exact command for the next step. The copy holds the wallet's tables and its
+   commands for the next two steps. The copy holds the wallet's tables and its
    encrypted keystore byte for byte; nothing is decrypted.
 
 3. **Adopt it** into a new daemon data directory:
@@ -87,19 +114,33 @@ untouched and hands a copy to the daemon:
 
    Adoption verifies the copy, moves it (or copies and verifies it across file
    systems), and records `wallet-handoff.adopted` in the node's data directory.
+   The node can keep running.
 
-4. **Configure and start the daemon** with `ergo-walletd init` using the
-   adopted data directory, or an existing seed-mode config pointing at it, and
-   unlock it with the old wallet password. The first unlock seals a database
-   key into the keystore, upgrades the keystore to the version-2 Argon2id
-   format and encrypts the database.
+4. **Create the daemon's config** for the adopted directory, as in
+   [a wallet in the daemon](#a-wallet-in-the-daemon), step 1:
 
-5. **Point wallet clients at the daemon.** The node answers its former wallet
-   routes with `wallet_moved` and the daemon's address (`[wallet]
+   ```sh
+   ergo-walletd init --config ~/ergo-walletd/walletd.toml \
+     --data-dir ~/ergo-walletd/data --node-url <node API URL> \
+     --tcp 127.0.0.1:3033
+   ```
+
+   Add the printed `[[api.security.keys]]` entry to `ergo-node.toml` and
+   restart the node. An existing seed-mode config pointed at the adopted
+   directory works too.
+
+5. **Start and unlock.** Start the daemon, open its page, authorize with the
+   contents of `wallet-api-key`, and unlock with the **old wallet password**.
+   The first unlock seals a database key into the keystore, upgrades the
+   keystore to the version-2 Argon2id format and encrypts the database; it
+   can take a little longer than later unlocks.
+
+6. **Point wallet clients at the daemon.** The node answers its former wallet
+   routes with `410 wallet_moved` and the daemon's address (`[wallet]
    daemon_address`); the daemon serves the same `/wallet/*` and `/scan/*`
-   routes. The dashboard's wallet page is now the daemon's browser UI.
+   routes. The node does not forward wallet requests.
 
-6. **Purge the old rows** from the node once the daemon works:
+7. **Purge the old rows** from the node once the daemon works:
 
    ```sh
    ergo-node wallet-legacy-purge <node data_dir>

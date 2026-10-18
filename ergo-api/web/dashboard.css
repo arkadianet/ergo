@@ -512,7 +512,8 @@
 .w-preauth p:last-child {
   margin: 0;
 }
-.w-preauth ul {
+.w-preauth ul,
+.w-preauth ol {
   margin: 0 0 var(--space-5);
   padding-left: var(--space-7);
 }
@@ -521,6 +522,9 @@
 }
 .w-preauth b {
   color: var(--tx);
+}
+.w-preauth code {
+  overflow-wrap: anywhere;
 }
 
 /* Mining + Events row: mining sidecar (1/3) beside the feed (2/3); a lone

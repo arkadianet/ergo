@@ -15,6 +15,11 @@ const AUTH_SOURCE: &str = include_str!("../../../ergo-api/web/js/auth.js");
 static WALLET: LazyLock<String> = LazyLock::new(|| {
     include_str!("../../../ergo-api/web/js/wallet.js")
         .replace("Your wallet, on your node", "Your wallet daemon")
+        .replace("YOUR NODE WALLET", "YOUR WALLET")
+        .replace(
+            "Authorize to view your wallet and access its controls;",
+            "Authorize with the contents of the <code>wallet-api-key</code> file beside the daemon’s config to view your wallet and access its controls;",
+        )
         .replace(
             "wallet built into this node",
             "wallet hosted by this daemon",
@@ -44,6 +49,15 @@ static AUTH: LazyLock<String> = LazyLock::new(|| {
         .replace("else if (r.status === 403) report", "else if (r.status === 403 || r.status === 401) report")
         .replace("api_key rejected (403)", "api_key rejected")
         .replace("features (logs, voting, wallet)", "wallet operations")
+        .replace("The operator <code>api_key</code>", "The wallet daemon’s <code>api_key</code>")
+        .replace(
+            "This is not the wallet password.",
+            "Paste the contents of the daemon’s <code>local_api_key_file</code> \
+             (<code>wallet-api-key</code> beside the config that <code>ergo-walletd init</code> wrote). \
+             It is not the node’s api_key and not the wallet password.",
+        )
+        .replace("invalid: 'Invalid key'", "invalid: 'Invalid wallet-api-key'")
+        .replace("'api_key rejected — click to re-enter'","'api_key rejected — paste the wallet daemon’s wallet-api-key'")
 });
 
 pub(crate) fn router() -> Router {

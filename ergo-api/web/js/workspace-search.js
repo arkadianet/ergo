@@ -9,7 +9,7 @@ const destinations = [
   ['mempool', 'Mempool', 'Pending transactions and fees'],
   ['mining', 'Mining', 'Mining readiness and network distribution'],
   ['voting', 'Voting', 'Protocol parameters and voting targets'],
-  ['wallet', 'Wallet', 'Balances, addresses and payments'],
+  ['wallet', 'Wallet', 'Where the wallet daemon runs and how to move a wallet to it'],
 ];
 
 export function initWorkspaceSearch({ trigger, canOpen, navigate, search }) {

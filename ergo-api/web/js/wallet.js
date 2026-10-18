@@ -871,6 +871,15 @@ function renderJobNotice(items) {
 }
 
 // ── refresh ──────────────────────────────────────────────────────────────────
+// A wallet daemon starts sealed after a restart: its database stays closed
+// until the wallet password unlocks it, and every wallet route answers
+// `503 wallet_sealed`. Only an existing wallet starts sealed, so it is shown
+// as locked, which offers the unlock form.
+export function sealedWalletStatus(res) {
+  if (res.status !== 503 || res.data?.reason !== 'wallet_sealed') return null;
+  return { isInitialized: true, isUnlocked: false, walletHeight: null, changeAddress: '', error: 'Sealed since the wallet daemon started. Unlock with the wallet password to open the wallet.' };
+}
+
 async function refresh() {
   if (!root || q('[data-wallet-app]').hidden || refreshing) return;
   refreshing = true;
@@ -878,6 +887,12 @@ async function refresh() {
   try {
     const res = await api.wallet.status();
     if (epoch !== generation || res.status === 403) return;
+    const sealed = sealedWalletStatus(res);
+    if (sealed) {
+      walletStatus = sealed;
+      setOnboarding(false); renderStatusPanel(walletStatus); lockedNotes();
+      return;
+    }
     if (!res.ok) {
       walletStatus = null; unlockRendered = false;
       q('[data-status-body]').replaceChildren(el('p', { class: 'banner banner--warn', text: 'Wallet status unavailable. Reconnecting…' }));

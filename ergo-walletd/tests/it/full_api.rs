@@ -604,13 +604,23 @@ async fn wallet_shell_is_public_but_every_wallet_operation_is_private() {
             assert!(source.contains("local_api_key_file"));
             assert!(source.contains("ergo.walletd.apikey"));
             assert!(!source.contains("features (logs, voting, wallet)"));
+            assert!(source.contains("wallet-api-key</code> beside the config"));
+            assert!(source.contains("not the node’s api_key"));
+            assert!(source.contains("invalid: 'Invalid wallet-api-key'"));
+            assert!(source.contains("paste the wallet daemon’s wallet-api-key"));
+            assert!(!source.contains("This is not the wallet password."));
         }
         if path == "/js/wallet.js" {
             let source = std::str::from_utf8(&bytes).unwrap();
             assert!(source.contains("Your wallet daemon"));
             assert!(source.contains("sent solely to this wallet daemon"));
             assert!(!source.contains("wallet built into this node"));
+            assert!(!source.contains("YOUR NODE WALLET"));
+            assert!(source
+                .contains("Authorize with the contents of the <code>wallet-api-key</code> file"));
             assert!(!source.contains("Keys remain on your node"));
+            // A sealed daemon must offer the unlock form, not a reconnect loop.
+            assert!(source.contains("reason !== 'wallet_sealed'"));
         }
         if path == "/js/wallet-transaction.js" {
             let source = std::str::from_utf8(&bytes).unwrap();
