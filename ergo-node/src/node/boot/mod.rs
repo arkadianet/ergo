@@ -842,8 +842,15 @@ async fn run_inner_with_backend(
         let node_url = config.api_bind.map_or_else(
             || "<this node's API URL>".to_owned(),
             |mut address| {
-                if address.ip().is_unspecified() {
-                    address.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+                // A wildcard bind is reached through the loopback of its family.
+                match address.ip() {
+                    std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
+                        address.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+                    }
+                    std::net::IpAddr::V6(ip) if ip.is_unspecified() => {
+                        address.set_ip(std::net::Ipv6Addr::LOCALHOST.into());
+                    }
+                    _ => {}
                 }
                 format!("http://{address}")
             },

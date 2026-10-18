@@ -82,6 +82,8 @@ pub struct InitOutcome {
     pub node_key_hash: String,
     pub scopes: Vec<&'static str>,
     pub config: PathBuf,
+    /// The daemon's credential for calling the node; the node holds its hash.
+    pub node_key: PathBuf,
     /// The local API credential: the browser page's and local clients' `api_key`.
     pub wallet_key: PathBuf,
     pub listener: Listener,
@@ -102,10 +104,12 @@ impl InitOutcome {
             "created {config}\n\
              created {wallet_key}: the api_key for the wallet page and local API \
              (not the node's api_key, not the wallet password)\n\n\
-             1. Add this credential to the node's ergo-node.toml:\n\n\
+             1. Add the hash of {node_key} (the daemon's credential for calling the node) \
+             to the node's ergo-node.toml:\n\n\
              [[api.security.keys]]\nid = \"ergo-walletd\"\nhash = \"{hash}\"\nscopes = [{scopes}]\n",
             config = self.config.display(),
             wallet_key = self.wallet_key.display(),
+            node_key = self.node_key.display(),
             hash = self.node_key_hash,
         );
         if let Listener::Tcp(address) = &self.listener {
@@ -220,6 +224,7 @@ pub fn init(args: &InitArgs) -> Result<InitOutcome, ConfigError> {
         )),
         scopes,
         config: args.config.clone(),
+        node_key,
         wallet_key,
         listener,
         existing_wallet,
@@ -280,6 +285,11 @@ mod tests {
         );
         assert!(text.contains("not the wallet password"), "{text}");
         assert!(text.contains("[[api.security.keys]]"), "{text}");
+        assert!(text.contains("Add the hash of "), "{text}");
+        assert!(
+            text.contains("node-api-key (the daemon's credential for calling the node)"),
+            "{text}"
+        );
         assert!(
             !text.contains("daemon_address"),
             "the node default needs no line: {text}"
