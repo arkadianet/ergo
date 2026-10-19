@@ -535,6 +535,16 @@ fn select_ordered_entries_cancellable(
             continue;
         };
         let Some(resolved_data_inputs) = overlay.resolve_data_inputs(&tx) else {
+            // Same report for a data input nothing can supply: a pooled
+            // reader of a box whose creator left the pool is not its child,
+            // so no removal cascade reaches it.
+            if tx
+                .data_inputs
+                .iter()
+                .any(|d| !overlay.is_known(&d.box_id) && !pooled_outputs.contains(&d.box_id))
+            {
+                sel.suspects.push(entry.tx_id);
+            }
             sel.exclude(entry.tx_id, "data_input_unavailable");
             continue;
         };
@@ -1418,6 +1428,70 @@ mod tests {
         assert!(sel.checked.is_empty());
         assert_eq!(sel.suspects, vec![Digest32::from_bytes([0xA0; 32])]);
         assert_eq!(sel.excluded[0].reason, "input_unavailable");
+    }
+
+    #[test]
+    fn data_input_reader_listed_before_its_pooled_creator_is_planned_after_it() {
+        // The child DATA-reads the parent's unconfirmed output and is listed
+        // first. The plan treats the data input as a dependency, so the
+        // parent goes first and both are included, as Scala's block
+        // validation accepts.
+        let in_box = box_at(1_000_000_000, HEIGHT, 0x01);
+        let own_box = box_at(1_000_000_000, HEIGHT, 0x02);
+        let utxo = MapUtxo::new(&[in_box.clone(), own_box.clone()]);
+        let tx_parent = spend_tx(&in_box, 1_000_000_000, HEIGHT);
+        let parent_out = ErgoBox {
+            candidate: tx_parent.output_candidates[0].clone(),
+            transaction_id: transaction_id(&tx_parent).unwrap(),
+            index: 0,
+        };
+        let tx_child = spend_tx_with_data_input(&own_box, &parent_out, 1_000_000_000, HEIGHT);
+        let snap = MempoolReadSnapshot::from_entries(vec![
+            entry(&tx_child, 10, 100, 0xB0),
+            entry(&tx_parent, 10, 100, 0xA0),
+        ]);
+
+        let mut overlay = CandidateOverlay::new(&utxo);
+        let sel = select_user_txs(
+            &mut overlay,
+            &snap,
+            &ctx(),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(sel.checked.len(), 2, "the creator is planned first");
+        assert!(sel.suspects.is_empty());
+    }
+
+    #[test]
+    fn a_tx_whose_data_input_nothing_can_supply_is_a_suspect() {
+        let missing = box_at(1_000_000_000, HEIGHT, 0x01);
+        let own_box = box_at(1_000_000_000, HEIGHT, 0x02);
+        let utxo = MapUtxo::new(std::slice::from_ref(&own_box));
+        let stale = spend_tx_with_data_input(&own_box, &missing, 1_000_000_000, HEIGHT);
+        let snap = MempoolReadSnapshot::from_entries(vec![entry(&stale, 10, 100, 0xA0)]);
+
+        let mut overlay = CandidateOverlay::new(&utxo);
+        let sel = select_user_txs(
+            &mut overlay,
+            &snap,
+            &ctx(),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+
+        assert!(sel.checked.is_empty());
+        assert_eq!(sel.suspects, vec![Digest32::from_bytes([0xA0; 32])]);
+        assert_eq!(sel.excluded[0].reason, "data_input_unavailable");
     }
 
     #[test]

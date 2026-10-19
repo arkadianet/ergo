@@ -21,7 +21,7 @@ use tracing::warn;
 
 use crate::budget::BudgetVerdict;
 use crate::invalidation::InvalidationReason;
-use crate::overlay::{CommittedOnly, PoolUtxoOverlay};
+use crate::overlay::PoolUtxoOverlay;
 use crate::pool::{Entry, FamilyBounds, OrderedPool, PoolError};
 use crate::types::{
     EvictionReason, MempoolAction, MempoolConfig, ObservedEvent, PenaltyKind, TxId, TxSource,
@@ -341,11 +341,12 @@ pub(crate) fn check_capturing_held<V: Validator>(
         );
     }
 
-    // Regular inputs resolve against the committed UTXO plus outputs created
-    // by pooled txs, read straight from the pool (no per-admission copy of
-    // every pooled output).
+    // Regular and data inputs resolve against the committed UTXO plus outputs
+    // created by pooled txs, read straight from the pool (no per-admission
+    // copy of every pooled output). Scala's `ErgoMemPool.process` validates
+    // against `utxo.withUnconfirmedTransactions(getAll)`, whose `boxById`
+    // serves both input kinds.
     let overlay_view = PoolUtxoOverlay::new(cx.tip_ctx.utxo, &*cx.pool);
-    let committed_view = CommittedOnly::new(cx.tip_ctx.utxo);
 
     // ── Steps 4–6 and 9–12 — validator handles deserialize, tx_id,
     //    canonical check, structural, monetary, script. Cost is charged
@@ -379,7 +380,7 @@ pub(crate) fn check_capturing_held<V: Validator>(
             reemission: cx.tip_ctx.reemission,
         },
     };
-    let validated = match validator.validate(tx_bytes, &overlay_view, &committed_view, &mut tx_cx) {
+    let validated = match validator.validate(tx_bytes, &overlay_view, &overlay_view, &mut tx_cx) {
         Ok(v) => v,
         Err(err) => {
             // Charge whatever cost the validator consumed (skipped for demoted
@@ -483,6 +484,24 @@ pub(crate) fn check_capturing_held<V: Validator>(
             return (
                 CheckOutcome::Rejected {
                     reason: RejectReason::UnresolvedInput,
+                },
+                actions,
+            );
+        }
+        // Nor read one as a data input. The ids come from the bytes `validate`
+        // just accepted, so the parse cannot fail; fail closed if it does.
+        let reads_removed = validator
+            .peek_structure(tx_bytes)
+            .map_or(true, |structure| {
+                structure
+                    .data_input_box_ids
+                    .iter()
+                    .any(|id| removed_outputs.contains(id))
+            });
+        if reads_removed {
+            return (
+                CheckOutcome::Rejected {
+                    reason: RejectReason::UnresolvedDataInput,
                 },
                 actions,
             );

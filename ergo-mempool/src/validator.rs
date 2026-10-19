@@ -27,8 +27,8 @@ pub use ergo_validation::MAINNET_FEE_PROPOSITION_BYTES;
 pub const MAINNET_FEE_PROPOSITION_BYTES_FOR_TEST: &[u8] = MAINNET_FEE_PROPOSITION_BYTES;
 
 /// Default production validator. Resolves regular inputs against
-/// `input_view` (the pool overlay), data inputs against `data_input_view`
-/// (committed-only), then delegates to `validate_transaction_parsed`.
+/// `input_view` and data inputs against `data_input_view` (both the pool
+/// overlay in admission), then delegates to `validate_transaction_parsed`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ErgoValidator;
 

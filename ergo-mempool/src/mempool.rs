@@ -18,7 +18,7 @@ use crate::admission::{
 };
 use crate::budget::{BudgetVerdict, CostBudgets};
 use crate::invalidation::InvalidationCache;
-use crate::overlay::{CommittedOnly, PoolUtxoOverlay};
+use crate::overlay::PoolUtxoOverlay;
 use crate::pool::{Entry, FamilyBounds, OrderedPool};
 use crate::reorg;
 use crate::revalidation::{topological_demote_order, RevalidationQueue};
@@ -1112,7 +1112,6 @@ impl Mempool {
             .map_err(|_| PackageValidationError::Validation(ValidationErr::CostExceeded))?;
         let mut cost = CostAccumulator::new(cap);
         let overlay_view = PoolUtxoOverlay::new(tip_ctx.utxo, overlay);
-        let committed_view = CommittedOnly::new(tip_ctx.utxo);
         let mut tx_cx = TxValidationCtx {
             ctx: tip_ctx.tx_context,
             params: tip_ctx.params,
@@ -1122,7 +1121,7 @@ impl Mempool {
                 reemission: tip_ctx.reemission,
             },
         };
-        let res = validator.validate(c_bytes, &overlay_view, &committed_view, &mut tx_cx);
+        let res = validator.validate(c_bytes, &overlay_view, &overlay_view, &mut tx_cx);
         // Charge regardless of verdict — the invariant is that no staging
         // operation runs script validation without charging CostBudgets. The one
         // exemption mirrors `admission::check_capturing_held`: a demoted tx is

@@ -2076,95 +2076,87 @@ fn check_then_process_same_bytes_admits_with_exactly_one_inv() {
     );
 }
 
-// ── Pool-overlay differential — data inputs ──────────────────────
+// ── Pool-overlay — data inputs ───────────────────────────────────
 //
-// Regular inputs see pool outputs via PoolUtxoOverlay; data inputs
-// see only the committed UTXO via CommittedOnly. A child tx that
-// tries to use a parent's pool-only output as a *data input* must
-// be rejected with UnresolvedDataInput, even though the same id
-// would resolve fine if used as a regular input.
+// Regular and data inputs both see pool outputs via PoolUtxoOverlay, as
+// Scala's mempool validates against `withUnconfirmedTransactions`. A child
+// may read a pooled parent's output as a data input. It is not a family
+// child (no `parents_in_pool` edge, no weight credit — Scala's
+// `updateFamily` walks spend inputs only).
 //
-// MockValidator ignores its views, so we wire a tiny custom
-// validator that actually consults `data_input_view` for the box
-// we care about. This is the only way to pin the overlay vs
-// CommittedOnly distinction at the unit level.
+// MockValidator ignores its views, so a tiny custom validator consults
+// `data_input_view` for the box we care about.
 
-#[test]
-fn data_input_does_not_resolve_through_pool_overlay() {
+/// Reports UnresolvedDataInput when the planned data-input id is missing
+/// from `data_input_view`, else a successful Validated payload.
+struct DataInputProbe {
+    bytes: Vec<u8>,
+    tx_id: TxId,
+    fee: u64,
+    input_ids: Vec<Digest32>,
+    data_input_id: Digest32,
+}
+impl Validator for DataInputProbe {
+    fn peek_fee(&self, tx_bytes: &[u8]) -> Result<PeekedTx, ValidationErr> {
+        if tx_bytes != self.bytes {
+            return Err(ValidationErr::Deserialize);
+        }
+        Ok(PeekedTx {
+            tx_id: self.tx_id,
+            fee: self.fee,
+            contains_storage_rent_claim: false,
+        })
+    }
+    fn peek_structure(
+        &self,
+        tx_bytes: &[u8],
+    ) -> Result<crate::admission::PeekedStructure, ValidationErr> {
+        if tx_bytes != self.bytes {
+            return Err(ValidationErr::Deserialize);
+        }
+        Ok(crate::admission::PeekedStructure {
+            tx_id: self.tx_id,
+            fee: self.fee,
+            input_box_ids: self.input_ids.clone(),
+            data_input_box_ids: vec![self.data_input_id],
+            output_box_ids: vec![id(0xCC)],
+        })
+    }
+    fn validate(
+        &self,
+        tx_bytes: &[u8],
+        _input_view: &dyn UtxoView,
+        data_input_view: &dyn UtxoView,
+        cx: &mut ergo_validation::TxValidationCtx<'_>,
+    ) -> Result<Validated, ValidationErr> {
+        if tx_bytes != self.bytes {
+            return Err(ValidationErr::Deserialize);
+        }
+        let _ = cx.cost.add(JitCost::from_block_cost(8_000).unwrap());
+        if data_input_view.get_box(&self.data_input_id).is_none() {
+            return Err(ValidationErr::UnresolvedDataInput);
+        }
+        Ok(Validated {
+            tx_id: self.tx_id,
+            input_box_ids: self.input_ids.clone(),
+            output_box_ids: vec![id(0xCC)],
+            outputs: vec![],
+            fee: self.fee,
+            size_bytes: tx_bytes.len() as u32,
+            consumed_cost: 8_000,
+        })
+    }
+}
+
+/// A pool holding parent `id(1)`, which spends `id(0x10)` and creates the
+/// pool-only box `id(0xBB)` (the committed UTXO, `EmptyUtxo`, lacks it).
+fn pool_with_data_input_parent() -> OrderedPool {
     use ergo_primitives::reader::VlqReader;
     use ergo_ser::ergo_box::ErgoBoxCandidate;
     use ergo_ser::ergo_tree::read_ergo_tree;
     use ergo_ser::register::AdditionalRegisters;
 
-    // ── Custom validator: reports UnresolvedDataInput when the
-    // planned data-input id is missing from data_input_view, else
-    // returns a successful Validated payload. Lets us probe what
-    // admission actually exposes via the data view.
-    struct DataInputProbe {
-        bytes: Vec<u8>,
-        tx_id: TxId,
-        data_input_id: Digest32,
-    }
-    impl Validator for DataInputProbe {
-        fn peek_fee(&self, tx_bytes: &[u8]) -> Result<PeekedTx, ValidationErr> {
-            if tx_bytes != self.bytes {
-                return Err(ValidationErr::Deserialize);
-            }
-            Ok(PeekedTx {
-                tx_id: self.tx_id,
-                fee: 5_000_000,
-                contains_storage_rent_claim: false,
-            })
-        }
-        fn peek_structure(
-            &self,
-            tx_bytes: &[u8],
-        ) -> Result<crate::admission::PeekedStructure, ValidationErr> {
-            if tx_bytes != self.bytes {
-                return Err(ValidationErr::Deserialize);
-            }
-            Ok(crate::admission::PeekedStructure {
-                tx_id: self.tx_id,
-                fee: 5_000_000,
-                input_box_ids: vec![],
-                data_input_box_ids: vec![],
-                output_box_ids: vec![id(0xCC)],
-            })
-        }
-        fn validate(
-            &self,
-            tx_bytes: &[u8],
-            _input_view: &dyn UtxoView,
-            data_input_view: &dyn UtxoView,
-            cx: &mut ergo_validation::TxValidationCtx<'_>,
-        ) -> Result<Validated, ValidationErr> {
-            if tx_bytes != self.bytes {
-                return Err(ValidationErr::Deserialize);
-            }
-            let _ = cx.cost.add(JitCost::from_block_cost(8_000).unwrap());
-            if data_input_view.get_box(&self.data_input_id).is_none() {
-                return Err(ValidationErr::UnresolvedDataInput);
-            }
-            Ok(Validated {
-                tx_id: self.tx_id,
-                input_box_ids: vec![],
-                output_box_ids: vec![id(0xCC)],
-                outputs: vec![],
-                fee: 5_000_000,
-                size_bytes: tx_bytes.len() as u32,
-                consumed_cost: 8_000,
-            })
-        }
-    }
-
-    let utxo = EmptyUtxo;
-    let c = ctx();
-    let (mut pool, mut b, mut inv, mut unr) = fresh();
-    let cfg = default_config();
-    let w = ByCost;
-
-    // Seed the pool with a parent that materializes output id 0xBB.
-    // committed UTXO (EmptyUtxo) does not know about it.
+    let (mut pool, _, _, _) = fresh();
     let tree_bytes = vec![0x00u8, 0x01, 0x01];
     let mut r = VlqReader::new(&tree_bytes);
     let tree = read_ergo_tree(&mut r).unwrap();
@@ -2192,13 +2184,24 @@ fn data_input_does_not_resolve_through_pool_overlay() {
         pool.output_map().contains_key(&id(0xBB)),
         "sanity: pool overlay must hold the parent output",
     );
+    pool
+}
 
-    // Child probes 0xBB as a data input. Admission feeds the
-    // CommittedOnly view to the validator's data_input_view —
-    // pool outputs must not be visible there.
+#[test]
+fn data_input_resolves_through_pool_overlay() {
+    let utxo = EmptyUtxo;
+    let c = ctx();
+    let mut pool = pool_with_data_input_parent();
+    let (_, mut b, mut inv, mut unr) = fresh();
+    let cfg = default_config();
+    let w = ByCost;
+    let parent_weight = pool.get(&id(1)).unwrap().weight;
+
     let child = DataInputProbe {
         bytes: b"child".to_vec(),
         tx_id: id(2),
+        fee: 5_000_000,
+        input_ids: vec![id(0x20)],
         data_input_id: id(0xBB),
     };
     let tip = c.view(&utxo);
@@ -2213,20 +2216,69 @@ fn data_input_does_not_resolve_through_pool_overlay() {
     };
     let (out, _) = process(b"child", TxSource::Api, Instant::now(), &mut cx, &child);
     assert!(
+        matches!(out, AdmissionOutcome::Admitted { .. }),
+        "a data input may read a pooled parent's output; got {out:?}",
+    );
+    assert_eq!(pool.len(), 2);
+    assert!(
+        pool.get(&id(2)).unwrap().parents_in_pool.is_empty(),
+        "a data-input reader is not a family child",
+    );
+    assert_eq!(
+        pool.get(&id(1)).unwrap().weight,
+        parent_weight,
+        "a data-input reader adds no family weight to the parent",
+    );
+    pool.check_invariants();
+}
+
+#[test]
+fn replacement_cannot_read_an_output_of_a_tx_it_removes() {
+    // The replacement double-spends the parent's input 0x10 and reads the
+    // parent's output 0xBB as a data input: once the parent is gone that box
+    // exists nowhere, so the replacement is refused and the pool is unchanged.
+    let utxo = EmptyUtxo;
+    let c = ctx();
+    let mut pool = pool_with_data_input_parent();
+    let (_, mut b, mut inv, mut unr) = fresh();
+    let cfg = default_config();
+    let w = ByCost;
+
+    let replacement = DataInputProbe {
+        bytes: b"replacement".to_vec(),
+        tx_id: id(3),
+        fee: 50_000_000,
+        input_ids: vec![id(0x10)],
+        data_input_id: id(0xBB),
+    };
+    let tip = c.view(&utxo);
+    let mut cx = AdmissionCtx {
+        tip_ctx: &tip,
+        config: &cfg,
+        pool: &mut pool,
+        budgets: &mut b,
+        invalidated: &mut inv,
+        unresolved: &mut unr,
+        weight_fn: &w,
+    };
+    let (out, _) = process(
+        b"replacement",
+        TxSource::Api,
+        Instant::now(),
+        &mut cx,
+        &replacement,
+    );
+    assert!(
         matches!(
             out,
             AdmissionOutcome::Rejected {
                 reason: RejectReason::UnresolvedDataInput
             }
         ),
-        "data inputs must NOT resolve through the pool overlay; got {:?}",
-        out,
+        "got {out:?}",
     );
-    assert_eq!(
-        pool.len(),
-        1,
-        "rejection must not touch the pool — only the parent stays",
-    );
+    assert!(pool.contains(&id(1)) && pool.len() == 1, "the parent stays");
+    pool.check_invariants();
 }
 
 /// Exercise the real wire parser and admission pipeline. Missing input boxes
@@ -2475,6 +2527,145 @@ fn valid_rent_claim_policy_override_and_ordinary_spend() {
             assert_eq!(pool.size(), 1);
         }
     }
+}
+
+/// Real wire bytes through `ErgoValidator`: a child that spends its own
+/// committed box and reads a pooled parent's output as a data input is
+/// refused while the parent is absent and admitted once it is pooled.
+#[test]
+fn real_data_input_child_of_a_pooled_parent_is_admitted() {
+    use crate::validator::{ErgoValidator, MAINNET_FEE_PROPOSITION_BYTES};
+    use ergo_primitives::{reader::VlqReader, writer::VlqWriter};
+    use ergo_ser::{
+        ergo_box::ErgoBoxCandidate,
+        ergo_tree::read_ergo_tree,
+        input::{ContextExtension, DataInput, Input, SpendingProof},
+        register::AdditionalRegisters,
+        transaction::{transaction_id, write_transaction, Transaction},
+    };
+
+    struct Boxes(Vec<ErgoBox>);
+    impl UtxoView for Boxes {
+        fn get_box(&self, id: &Digest32) -> Option<ErgoBox> {
+            self.0.iter().find(|b| b.box_id().unwrap() == *id).cloned()
+        }
+    }
+    let true_tree = || read_ergo_tree(&mut VlqReader::new(&[0, 8, 0xd3])).unwrap();
+    let fee_tree = || read_ergo_tree(&mut VlqReader::new(MAINNET_FEE_PROPOSITION_BYTES)).unwrap();
+    let committed = |seed: u8| ErgoBox {
+        candidate: ErgoBoxCandidate::new(
+            10_000_000,
+            true_tree(),
+            0,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap(),
+        transaction_id: id(seed).into(),
+        index: 0,
+    };
+    let spend = |b: &ErgoBox| Input {
+        box_id: b.box_id().unwrap(),
+        spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+    };
+    let bytes = |tx: &Transaction| {
+        let mut w = VlqWriter::new();
+        write_transaction(&mut w, tx).unwrap();
+        w.result()
+    };
+    let (parent_input, child_input) = (committed(10), committed(11));
+
+    let parent = Transaction {
+        inputs: vec![spend(&parent_input)],
+        data_inputs: vec![],
+        output_candidates: vec![
+            ErgoBoxCandidate::new(
+                9_000_000,
+                true_tree(),
+                1000,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+            ErgoBoxCandidate::new(
+                1_000_000,
+                fee_tree(),
+                1000,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+        ],
+    };
+    let parent_out = ErgoBox {
+        candidate: parent.output_candidates[0].clone(),
+        transaction_id: transaction_id(&parent).unwrap(),
+        index: 0,
+    };
+    let child = Transaction {
+        inputs: vec![spend(&child_input)],
+        data_inputs: vec![DataInput {
+            box_id: parent_out.box_id().unwrap(),
+        }],
+        output_candidates: vec![ErgoBoxCandidate::new(
+            10_000_000,
+            fee_tree(),
+            1000,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap()],
+    };
+
+    let boxes = Boxes(vec![parent_input, child_input]);
+    let c = ctx();
+    let tip = c.view(&boxes);
+    let mut pool = crate::Mempool::new(default_config(), Box::new(ByCost));
+    let (orphan, _) = pool.process(
+        &bytes(&child),
+        TxSource::Api,
+        Instant::now(),
+        &tip,
+        &ErgoValidator,
+    );
+    assert_eq!(
+        orphan,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::UnresolvedDataInput
+        },
+        "no pooled or committed box to read yet"
+    );
+    let (p, _) = pool.process(
+        &bytes(&parent),
+        TxSource::Api,
+        Instant::now(),
+        &tip,
+        &ErgoValidator,
+    );
+    assert!(matches!(p, AdmissionOutcome::Admitted { .. }), "{p:?}");
+    // The unresolved-bytes cache briefly suppresses an identical resubmit;
+    // a fresh pool shows admission with the parent pooled.
+    let mut pool = crate::Mempool::new(default_config(), Box::new(ByCost));
+    let (p, _) = pool.process(
+        &bytes(&parent),
+        TxSource::Api,
+        Instant::now(),
+        &tip,
+        &ErgoValidator,
+    );
+    assert!(matches!(p, AdmissionOutcome::Admitted { .. }), "{p:?}");
+    let (ch, _) = pool.process(
+        &bytes(&child),
+        TxSource::Api,
+        Instant::now(),
+        &tip,
+        &ErgoValidator,
+    );
+    assert!(
+        matches!(ch, AdmissionOutcome::Admitted { .. }),
+        "a data input may read a pooled parent's output: {ch:?}"
+    );
+    assert_eq!(pool.size(), 2);
 }
 
 // ----- replacement, accounting and invalidation scope -----

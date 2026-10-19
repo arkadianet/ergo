@@ -22,6 +22,8 @@ infrastructure.
 - **Wallet daemon authorization:** the daemon page's Authorize dialog now says which key it wants (the `wallet-api-key` file `ergo-walletd init` writes) and that the node's `api_key` and the wallet password are different secrets.
 - **The dashboard's search offered a Wallet page that did not exist.** The node dashboard has a Wallet section again: it links to the daemon at `[wallet] daemon_address` and lists the steps that move an earlier release's wallet.
 
+- **Mempool: data inputs may read unconfirmed outputs.** The mempool rejected a transaction whose data input is an output of another pooled transaction (`UnresolvedDataInput`), so such chains were neither relayed nor mined until the parent confirmed. The reference node's mempool accepts them, and blocks containing them already validated. Data inputs now resolve against the same pooled view as regular inputs. A data-input reader adds no family weight to the box's creator, a replacement may not read an output of a transaction it removes, and a reader whose box disappears is evicted on recheck and reported by the candidate builder.
+
 ### Changed
 
 - **`ergo-walletd init`** prints every remaining step: the node credential, the `[wallet] daemon_address` line when `--tcp` differs from the node's default, the page address, the file that authorizes it, and whether to unlock an adopted wallet with its old password or create one. It creates a missing config directory (owner-only).
