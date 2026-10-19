@@ -13,23 +13,7 @@ fn main() {
     if let Some(CliCommand::Init(args)) = &cli.command {
         match ergo_walletd::onboard::init(args) {
             Ok(outcome) => {
-                println!("created {}", outcome.config.display());
-                println!(
-                    "add this credential to the node's ergo-node.toml, then restart the node:\n\n\
-                     [[api.security.keys]]\nid = \"ergo-walletd\"\nhash = \"{}\"\nscopes = [{}]\n",
-                    outcome.node_key_hash,
-                    outcome
-                        .scopes
-                        .iter()
-                        .map(|scope| format!("\"{scope}\""))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                println!(
-                    "then start `ergo-walletd --config {}` and create or restore the wallet \
-                     (POST /api/v1/wallet/init or /api/v1/wallet/restore)",
-                    outcome.config.display()
-                );
+                print!("{}", outcome.instructions());
                 return;
             }
             Err(error) => {
@@ -46,7 +30,12 @@ fn main() {
                     serde_json::to_string_pretty(&report).expect("adoption report is serializable")
                 );
                 println!(
-                    "adopted: start ergo-walletd in seed mode with data_dir = {}; the first unlock encrypts it",
+                    "adopted. Next, create the daemon's config for it:\n\n\
+                     ergo-walletd init --config <dir>/walletd.toml --data-dir {} \\\n  \
+                     --node-url <the node's API URL> --tcp 127.0.0.1:3033\n\n\
+                     (or point an existing seed-mode config's data_dir at it). It prints the \
+                     remaining steps; the first unlock, with the wallet password this wallet had \
+                     before, encrypts the database.",
                     args.data_dir.display()
                 );
                 return;

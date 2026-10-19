@@ -14,7 +14,7 @@ use ergo_ser::ergo_box::ErgoBox;
 use ergo_validation::{TxValidationCtx, TxValidationRules};
 
 use crate::invalidation::{InvalidationCache, InvalidationReason};
-use crate::overlay::{CommittedOnly, PoolUtxoOverlay};
+use crate::overlay::PoolUtxoOverlay;
 use crate::types::TxId;
 
 use super::context::{TipContext, ValidationErr, Validator};
@@ -22,8 +22,7 @@ use super::context::{TipContext, ValidationErr, Validator};
 /// Re-validate an already-pooled tx against a tip+1 context for the proactive
 /// recheck-and-evict pass (the mempool-tip-revalidation feature). Runs ONLY the
 /// stateful validation — the same `Validator::validate` path `check` uses, with
-/// the same `PoolUtxoOverlay` (regular inputs) + `CommittedOnly` (data inputs)
-/// views — WITHOUT admission's duplicate/conflict/replacement/capacity/insert
+/// the same `PoolUtxoOverlay` view for regular and data inputs — WITHOUT admission's duplicate/conflict/replacement/capacity/insert
 /// machinery (the tx is already in the pool). Returns the cost the validator
 /// actually consumed (available on BOTH the `Ok` and `Err` paths so the caller
 /// charges it to its per-pass budget regardless of verdict) together with the
@@ -37,7 +36,6 @@ pub fn revalidate_pooled<V: Validator>(
     validator: &V,
 ) -> (u64, Result<(), ValidationErr>) {
     let overlay_view = PoolUtxoOverlay::new(tip_ctx.utxo, pool_outputs);
-    let committed_view = CommittedOnly::new(tip_ctx.utxo);
     let cap = match JitCost::from_block_cost(max_tx_cost) {
         Ok(c) => c,
         // Misconfig (max_tx_cost above the JitCost bound): treat as a cost
@@ -55,7 +53,7 @@ pub fn revalidate_pooled<V: Validator>(
         },
     };
     let verdict = validator
-        .validate(tx_bytes, &overlay_view, &committed_view, &mut tx_cx)
+        .validate(tx_bytes, &overlay_view, &overlay_view, &mut tx_cx)
         .map(|_| ());
     (cost.consumed(), verdict)
 }
@@ -181,14 +179,16 @@ pub(crate) fn is_hard_invalid(err: &ValidationErr) -> bool {
 ///
 /// [`is_hard_invalid`] plus relay-policy failures and the following case it
 /// deliberately excludes:
-/// `UnresolvedDataInput`. Data inputs resolve against the COMMITTED view only
-/// (`revalidate_pooled` passes `CommittedOnly`, never the pool overlay), so
-/// unlike a regular `UnresolvedInput` — which can be a demoted parent still
-/// waiting in the revalidation queue — an unresolved DATA input means the box
-/// is simply not in the UTXO set at this tip. Nothing in the pool can ever
-/// supply it, and `on_tip_change`'s input-conflict cascade does not cover it
-/// (that indexes spend inputs, not data inputs), so without this the tx sits in
-/// the pool until it is squeezed out by weight — for a low-weight tx, forever.
+/// `UnresolvedDataInput`. Data inputs resolve against the same pool overlay as
+/// regular inputs, so an unresolved DATA input means the box is neither in the
+/// UTXO set at this tip nor created by a pooled tx: its creator was confirmed
+/// and the box spent, or was evicted or replaced. Unlike a regular
+/// `UnresolvedInput`, a data-input reader is not a `parents_in_pool` child (it
+/// adds no family weight, as in Scala's `OrderedTxPool.updateFamily`), so
+/// neither the parent's removal cascade nor `on_tip_change`'s input-conflict
+/// cascade (which indexes spend inputs) reaches it; without this the tx sits
+/// in the pool until it is squeezed out by weight — for a low-weight tx,
+/// forever.
 /// Scala evicts it: `CleanupWorker.validatePool` eliminates EVERY tx whose
 /// re-validation fails (`CleanupWorker.scala:94-97` →
 /// `EliminateTransactions` → `ErgoMemPool.invalidate`), and a missing

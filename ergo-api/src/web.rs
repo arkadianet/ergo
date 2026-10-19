@@ -66,6 +66,7 @@ pub const JS_TRANSACTION_SOURCE: &str = include_str!("../web/js/transaction-sour
 pub const JS_PEERS: &str = include_str!("../web/js/peers.js");
 pub const JS_MEMPOOL: &str = include_str!("../web/js/mempool.js");
 pub const JS_VOTING: &str = include_str!("../web/js/voting.js");
+pub const JS_MOVED_WALLET: &str = include_str!("../web/js/moved-wallet.js");
 pub const JS_MINERS: &str = include_str!("../web/js/miners.js");
 pub const JS_MINING: &str = include_str!("../web/js/mining.js");
 pub const JS_MINING_INSPECTOR: &str = include_str!("../web/js/mining-inspector.js");

@@ -229,7 +229,7 @@ impl Validator for PoolAwareProbe {
                 return Err(ValidationErr::UnresolvedInput);
             }
         }
-        // Data inputs resolve against the committed-only view.
+        // Data inputs resolve against the supplied (pool overlay) view.
         for di in &p.data_inputs {
             if data_input_view.get_box(di).is_none() {
                 return Err(ValidationErr::UnresolvedDataInput);
@@ -1193,6 +1193,42 @@ fn package_replacement_spending_an_output_of_a_tx_it_removes_is_rejected() {
         .plan(9, 2_000_000, &[0x80], &[0x8A]) // I - incumbent
         .plan(1, 1_000_000, &[0x80], &[0x81]) // P - double-spend loser, held
         .plan(2, 50_000_000, &[0x81, 0x8A], &[0x8C]); // C - spends P's and I's outputs
+    let now = Instant::now();
+
+    mp.process(&tx_bytes(9), TxSource::Api, now, &tip.view(&utxo), &v);
+    let (po, _) = mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(matches!(
+        po,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::DoubleSpendLoser
+        }
+    ));
+
+    let (_co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(mp.contains(&d(9)), "incumbent stays pooled");
+    assert!(
+        !mp.contains(&d(1)) && !mp.contains(&d(2)),
+        "neither package member entered the pool"
+    );
+    assert!(
+        broadcasts(&ca).is_empty(),
+        "a rejected package gossips nothing"
+    );
+    mp.pool().check_invariants();
+}
+
+#[test]
+fn package_replacement_reading_an_output_of_a_tx_it_removes_is_rejected() {
+    // As above, but C READS I's output 0x8A as a data input. Data inputs see
+    // pooled outputs, so C validates; replacing I would leave that box
+    // nowhere, so the package is rejected and I stays.
+    let mut mp = mempool();
+    let utxo = FakeUtxo::with(&[0x80]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(9, 2_000_000, &[0x80], &[0x8A]) // I - incumbent
+        .plan(1, 1_000_000, &[0x80], &[0x81]) // P - double-spend loser, held
+        .plan_data(2, 50_000_000, &[0x81], &[0x8A], &[0x8C]); // C - reads I's output
     let now = Instant::now();
 
     mp.process(&tx_bytes(9), TxSource::Api, now, &tip.view(&utxo), &v);

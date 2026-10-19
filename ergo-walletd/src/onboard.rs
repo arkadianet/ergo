@@ -66,11 +66,85 @@ fn toml_string(path: &Path) -> Result<String, ConfigError> {
     Ok(toml::Value::String(text.to_owned()).to_string())
 }
 
+/// The node's default `[wallet] daemon_address` listener.
+const NODE_DEFAULT_DAEMON: std::net::SocketAddr = std::net::SocketAddr::V4(
+    std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 3033),
+);
+
+/// Where the daemon's local API listens.
+pub enum Listener {
+    Tcp(std::net::SocketAddr),
+    Unix(PathBuf),
+}
+
 /// What `init` created and what the node needs.
 pub struct InitOutcome {
     pub node_key_hash: String,
     pub scopes: Vec<&'static str>,
     pub config: PathBuf,
+    /// The daemon's credential for calling the node; the node holds its hash.
+    pub node_key: PathBuf,
+    /// The local API credential: the browser page's and local clients' `api_key`.
+    pub wallet_key: PathBuf,
+    pub listener: Listener,
+    /// The data directory already holds a wallet, such as one `adopt` moved in.
+    pub existing_wallet: bool,
+}
+
+impl InitOutcome {
+    /// The next steps, in order, for the operator.
+    pub fn instructions(&self) -> String {
+        let scopes = self
+            .scopes
+            .iter()
+            .map(|scope| format!("\"{scope}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut text = format!(
+            "created {config}\n\
+             created {wallet_key}: the api_key for the wallet page and local API \
+             (not the node's api_key, not the wallet password)\n\n\
+             1. Add the hash of {node_key} (the daemon's credential for calling the node) \
+             to the node's ergo-node.toml:\n\n\
+             [[api.security.keys]]\nid = \"ergo-walletd\"\nhash = \"{hash}\"\nscopes = [{scopes}]\n",
+            config = self.config.display(),
+            wallet_key = self.wallet_key.display(),
+            node_key = self.node_key.display(),
+            hash = self.node_key_hash,
+        );
+        if let Listener::Tcp(address) = &self.listener {
+            if *address != NODE_DEFAULT_DAEMON {
+                text.push_str(&format!(
+                    "\n   and, under [wallet], where the node's wallet_moved answers send clients:\n\n\
+                     daemon_address = \"http://{address}\"\n"
+                ));
+            }
+        }
+        text.push_str(&format!(
+            "\n   then restart the node.\n\
+             2. Start the daemon: ergo-walletd --config {}\n",
+            self.config.display()
+        ));
+        let then = if self.existing_wallet {
+            "unlock with the wallet password this wallet had before"
+        } else {
+            "create or restore the wallet"
+        };
+        match &self.listener {
+            Listener::Tcp(address) => text.push_str(&format!(
+                "3. Open http://{address}/, authorize with the contents of {}, then {then}.\n",
+                self.wallet_key.display()
+            )),
+            Listener::Unix(socket) => text.push_str(&format!(
+                "3. The local API listens on {} (api_key: the contents of {}); {then} \
+                 through it. For the browser page, set [api] tcp_fallback = \"127.0.0.1:3033\" \
+                 in the config.\n",
+                socket.display(),
+                self.wallet_key.display()
+            )),
+        }
+        text
+    }
 }
 
 /// Write a seed-mode config and two fresh owner-only credentials.
@@ -92,13 +166,14 @@ pub fn init(args: &InitArgs) -> Result<InitOutcome, ConfigError> {
             if !address.ip().is_loopback() {
                 return Err(invalid("the local API must bind a loopback address"));
             }
-            format!("tcp_fallback = \"{address}\"\n")
+            Listener::Tcp(address)
         }
-        None if cfg!(unix) => format!(
-            "unix_socket = {}\n",
-            toml_string(&directory.join("ergo-walletd.sock"))?
-        ),
-        None => "tcp_fallback = \"127.0.0.1:3033\"\n".to_string(),
+        None if cfg!(unix) => Listener::Unix(directory.join("ergo-walletd.sock")),
+        None => Listener::Tcp(NODE_DEFAULT_DAEMON),
+    };
+    let listener_line = match &listener {
+        Listener::Tcp(address) => format!("tcp_fallback = \"{address}\"\n"),
+        Listener::Unix(socket) => format!("unix_socket = {}\n", toml_string(socket)?),
     };
     let config = format!(
         "# Created by `ergo-walletd init`. See docs/configuration.md.\n\
@@ -110,7 +185,7 @@ pub fn init(args: &InitArgs) -> Result<InitOutcome, ConfigError> {
          local_api_key_file = {wallet_key}\n\
          \n\
          [api]\n\
-         {listener}",
+         {listener_line}",
         network = args.network.as_str(),
         data_dir = toml_string(&args.data_dir)?,
         node_url = toml::Value::String(args.node_url.clone()),
@@ -121,6 +196,16 @@ pub fn init(args: &InitArgs) -> Result<InitOutcome, ConfigError> {
     let file: crate::config::FileConfig =
         toml::from_str(&config).map_err(|error| invalid(error.to_string()))?;
     crate::config::Config::from_file(crate::config::merge_api_section(file)?)?;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(directory)
+        .map_err(|error| invalid(format!("{}: {error}", directory.display())))?;
     let node_secret = new_secret();
     let wallet_secret = new_secret();
     write_new_private(&node_key, node_secret.as_bytes())?;
@@ -130,12 +215,19 @@ pub fn init(args: &InitArgs) -> Result<InitOutcome, ConfigError> {
     if args.mining_jobs {
         scopes.push("operator");
     }
+    let existing_wallet =
+        ergo_wallet::storage::SecretStorage::find_secret_file(&args.data_dir.join("wallet"))
+            .is_ok();
     Ok(InitOutcome {
         node_key_hash: hex::encode(ergo_crypto::autolykos::common::blake2b256(
             node_secret.as_bytes(),
         )),
         scopes,
         config: args.config.clone(),
+        node_key,
+        wallet_key,
+        listener,
+        existing_wallet,
     })
 }
 
@@ -171,6 +263,58 @@ mod tests {
         assert_eq!(loaded.config.mode, crate::config::WalletMode::Seed);
         assert!(!bool::from(loaded.api_key.ct_eq(&loaded.local_api_key)));
         assert!(init(&args).is_err(), "never overwrites");
+    }
+
+    #[test]
+    fn init_instructions_name_the_ui_key_and_the_next_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = |data: &str, tcp: &str, config: &str| InitArgs {
+            config: dir.path().join(config).join("walletd.toml"),
+            data_dir: dir.path().join(data),
+            node_url: "http://127.0.0.1:9063".into(),
+            network: Network::Mainnet,
+            tcp: Some(tcp.parse().unwrap()),
+            mining_jobs: false,
+        };
+        // `init` creates a missing config directory.
+        let fresh = init(&args("fresh-data", "127.0.0.1:3033", "fresh")).unwrap();
+        let text = fresh.instructions();
+        assert!(
+            text.contains("wallet-api-key: the api_key for the wallet page"),
+            "{text}"
+        );
+        assert!(text.contains("not the wallet password"), "{text}");
+        assert!(text.contains("[[api.security.keys]]"), "{text}");
+        assert!(text.contains("Add the hash of "), "{text}");
+        assert!(
+            text.contains("node-api-key (the daemon's credential for calling the node)"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("daemon_address"),
+            "the node default needs no line: {text}"
+        );
+        assert!(text.contains("Open http://127.0.0.1:3033/"), "{text}");
+        assert!(text.contains("create or restore the wallet"), "{text}");
+
+        let keystore = dir.path().join("adopted").join("wallet");
+        fs::create_dir_all(&keystore).unwrap();
+        fs::write(
+            keystore.join("961768fe-2fed-3453-98f1-d95ebcf51ad1.json"),
+            b"{}",
+        )
+        .unwrap();
+        let adopted = init(&args("adopted", "127.0.0.1:9064", "adopted-config")).unwrap();
+        let text = adopted.instructions();
+        assert!(
+            text.contains("daemon_address = \"http://127.0.0.1:9064\""),
+            "{text}"
+        );
+        assert!(text.contains("Open http://127.0.0.1:9064/"), "{text}");
+        assert!(
+            text.contains("unlock with the wallet password this wallet had before"),
+            "{text}"
+        );
     }
 
     #[test]

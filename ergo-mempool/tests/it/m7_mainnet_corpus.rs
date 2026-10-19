@@ -208,9 +208,9 @@ impl ProgressiveUtxo {
     }
 }
 
-/// Mempool validator view: admission resolves regular inputs against
-/// the overlay; data inputs go to `CommittedOnly` which we point at
-/// the `all`-time history so already-spent boxes still resolve.
+/// Mempool validator view: admission resolves regular and data inputs
+/// against the overlay, which we point at the `all`-time history so
+/// already-spent boxes still resolve.
 /// Both sides share a single backing UtxoView here — acceptable for
 /// admission tests because conflict detection happens via `by_input`,
 /// not via the overlay.

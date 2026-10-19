@@ -87,7 +87,7 @@ pub enum ValidationErr {
     Structural,
     /// An input box was not present in the supplied UTXO view.
     UnresolvedInput,
-    /// A data input box was not present in the committed view.
+    /// A data input box was not present in the supplied UTXO view.
     UnresolvedDataInput,
     /// Script execution rejected the proof.
     ScriptFailed,
@@ -177,8 +177,8 @@ pub trait Validator {
     fn peek_structure(&self, tx_bytes: &[u8]) -> Result<PeekedStructure, ValidationErr>;
 
     /// Validate `tx_bytes` against the supplied UTXO views. The
-    /// `input_view` is the `PoolUtxoOverlay` (committed + pool-created),
-    /// the `data_input_view` is `CommittedOnly`. Charge consumed cost
+    /// `input_view` and the `data_input_view` are both the
+    /// `PoolUtxoOverlay` (committed + pool-created). Charge consumed cost
     /// to `cx.cost` so the caller can read `cx.cost.consumed()`
     /// afterwards.
     fn validate(

@@ -1025,12 +1025,11 @@ impl Validator for ViewRecordingProbe {
 }
 
 #[test]
-fn recheck_data_input_uses_committed_only_view() {
-    // [R1-6] P creates box 0xCC into the pool overlay; Q is rechecked. The
-    // recheck feeds REGULAR inputs the PoolUtxoOverlay (which carries 0xCC)
-    // but DATA inputs the CommittedOnly view (which does NOT) — admission
-    // parity. Observe both views directly: the same box is visible to Q's
-    // regular-input view and invisible to its data-input view.
+fn recheck_data_input_sees_the_pool_overlay() {
+    // P creates box 0xCC into the pool overlay; Q is rechecked. The recheck
+    // feeds REGULAR and DATA inputs the same PoolUtxoOverlay — admission
+    // parity, and Scala's `withUnconfirmedTransactions` view. Observe both
+    // views directly: the pool-created box is visible to each.
     let mut mp = mempool_with(MempoolConfig::default());
     let p = Entry::new(
         d(1),
@@ -1066,15 +1065,13 @@ fn recheck_data_input_uses_committed_only_view() {
     );
     assert_eq!(
         probe.saw_data.get(),
-        Some(false),
-        "data inputs use the committed-only view (pool-created 0xCC invisible)"
+        Some(true),
+        "data inputs see the pool overlay (pool-created 0xCC present)"
     );
     assert!(no_evictions(&actions), "both txs valid, nothing evicted");
     assert!(mp.contains(&d(1)) && mp.contains(&d(2)));
 
-    // Contrapositive: when 0xCC is a COMMITTED box, the data-input view DOES
-    // resolve it — the committed-only view isn't blind, it just excludes the
-    // pool overlay.
+    // A COMMITTED 0xCC resolves too.
     let mut mp2 = mempool_with(MempoolConfig::default());
     seed(&mut mp2, 2, 0x20, 0x21, 100, vec![]);
     let committed = FakeUtxo::empty().with_box(d(0xCC), dummy_box(0xCC));
@@ -1083,7 +1080,7 @@ fn recheck_data_input_uses_committed_only_view() {
     assert_eq!(
         probe2.saw_data.get(),
         Some(true),
-        "data inputs resolve COMMITTED boxes (committed-only view is not pool-blind)"
+        "data inputs resolve COMMITTED boxes"
     );
 }
 
@@ -1189,10 +1186,10 @@ fn recheck_evicts_a_tx_whose_input_resolves_nowhere() {
 
 #[test]
 fn recheck_unresolved_data_input_evicts_tx() {
-    // A DATA input resolves against the COMMITTED view only (revalidate_pooled
-    // passes CommittedOnly), so no pooled tx can ever supply it and
-    // on_tip_change's cascade — which indexes SPEND inputs — never evicts on
-    // it. Left in the pool such a tx leaks until it is squeezed out by weight,
+    // A DATA input resolves against the pool overlay, so an unresolved one is
+    // in neither the UTXO set nor any pooled tx's outputs. The reader is no
+    // family child of the box's creator, and on_tip_change's cascade — which
+    // indexes SPEND inputs — never evicts on it. Left in the pool such a tx leaks until it is squeezed out by weight,
     // i.e. never for a low-weight tx. Scala eliminates it: CleanupWorker
     // eliminates every tx whose re-validation fails
     // (CleanupWorker.scala:94-97 -> EliminateTransactions).

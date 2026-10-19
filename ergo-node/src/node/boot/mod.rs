@@ -839,6 +839,22 @@ async fn run_inner_with_backend(
         let db = store.db_arc();
         let data_dir = config.data_dir.clone();
         let network = config.network;
+        let node_url = config.api_bind.map_or_else(
+            || "<this node's API URL>".to_owned(),
+            |mut address| {
+                // A wildcard bind is reached through the loopback of its family.
+                match address.ip() {
+                    std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
+                        address.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+                    }
+                    std::net::IpAddr::V6(ip) if ip.is_unspecified() => {
+                        address.set_ip(std::net::Ipv6Addr::LOCALHOST.into());
+                    }
+                    _ => {}
+                }
+                format!("http://{address}")
+            },
+        );
         std::thread::Builder::new()
             .name("wallet-handoff".into())
             .spawn(move || {
@@ -847,7 +863,10 @@ async fn run_inner_with_backend(
                     Ok(Handoff::Written(path) | Handoff::Waiting(path)) => tracing::warn!(
                         handoff = %path.display(),
                         "a legacy embedded wallet is ready for the wallet daemon: run \
-                         `ergo-walletd adopt --handoff {} --data-dir <new wallet directory>`",
+                         `ergo-walletd adopt --handoff {} --data-dir <wallet dir>`, then \
+                         `ergo-walletd init --config <dir>/walletd.toml --data-dir <wallet dir> \
+                         --node-url {node_url} --tcp 127.0.0.1:3033` and follow the steps it \
+                         prints; the wallet keeps its password (docs/wallet-setup.md)",
                         path.display()
                     ),
                     Ok(Handoff::Adopted) => tracing::info!(

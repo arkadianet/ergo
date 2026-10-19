@@ -18,7 +18,7 @@ use crate::admission::{
 };
 use crate::budget::{BudgetVerdict, CostBudgets};
 use crate::invalidation::InvalidationCache;
-use crate::overlay::{CommittedOnly, PoolUtxoOverlay};
+use crate::overlay::PoolUtxoOverlay;
 use crate::pool::{Entry, FamilyBounds, OrderedPool};
 use crate::reorg;
 use crate::revalidation::{topological_demote_order, RevalidationQueue};
@@ -44,6 +44,8 @@ struct PackageMember {
     tx_id: TxId,
     bytes: Arc<[u8]>,
     input_box_ids: Vec<Digest32>,
+    /// Boxes the member reads as data inputs; they may be pooled outputs.
+    data_input_box_ids: Vec<Digest32>,
     output_box_ids: Vec<Digest32>,
     outputs: Vec<ErgoBox>,
     fee: u64,
@@ -52,6 +54,9 @@ struct PackageMember {
     cost: u64,
     source: TxSource,
 }
+
+/// A held ancestor's bytes, source and data inputs, to re-validate at a new tip.
+type StaleMember = (Arc<[u8]>, TxSource, Vec<Digest32>);
 
 enum PackageValidationError {
     Budget(RejectReason),
@@ -770,7 +775,7 @@ impl Mempool {
             // Snapshot from staging, then drop the borrow before any `&mut self`
             // (charge / remove). `Ok` = usable cached member; `Err` = the bytes
             // + source to re-validate.
-            let cached_or_reval: Result<PackageMember, (Arc<[u8]>, TxSource)> = {
+            let cached_or_reval: Result<PackageMember, StaleMember> = {
                 let st = self.staging.get(hid)?;
                 let facts = st.validated.as_ref()?;
                 // Freshness keyed on tip IDENTITY (header id), not height: a
@@ -783,6 +788,7 @@ impl Mempool {
                         tx_id: st.tx_id,
                         bytes: st.bytes.clone(),
                         input_box_ids: st.input_box_ids.clone(),
+                        data_input_box_ids: st.data_input_box_ids.clone(),
                         output_box_ids: st.output_box_ids.clone(),
                         outputs: facts.outputs.clone(),
                         fee: st.fee,
@@ -792,12 +798,16 @@ impl Mempool {
                         source: st.source.clone(),
                     })
                 } else {
-                    Err((st.bytes.clone(), st.source.clone()))
+                    Err((
+                        st.bytes.clone(),
+                        st.source.clone(),
+                        st.data_input_box_ids.clone(),
+                    ))
                 }
             };
             let member = match cached_or_reval {
                 Ok(m) => m,
-                Err((bytes, src)) => {
+                Err((bytes, src, data_input_box_ids)) => {
                     match self.validate_package_child(&bytes, &overlay, &src, tip_ctx, validator) {
                         Ok(v) => {
                             let w = self.weight_fn.compute(WeightInputs {
@@ -810,6 +820,7 @@ impl Mempool {
                                 tx_id: v.tx_id,
                                 bytes,
                                 input_box_ids: v.input_box_ids,
+                                data_input_box_ids,
                                 output_box_ids: v.output_box_ids,
                                 outputs: v.outputs,
                                 fee: v.fee,
@@ -903,6 +914,7 @@ impl Mempool {
             tx_id: c_validated.tx_id,
             bytes: Arc::from(c_bytes),
             input_box_ids: c_validated.input_box_ids.clone(),
+            data_input_box_ids: s.data_input_box_ids.clone(),
             output_box_ids: c_validated.output_box_ids.clone(),
             outputs: c_validated.outputs.clone(),
             fee: c_validated.fee,
@@ -1112,7 +1124,6 @@ impl Mempool {
             .map_err(|_| PackageValidationError::Validation(ValidationErr::CostExceeded))?;
         let mut cost = CostAccumulator::new(cap);
         let overlay_view = PoolUtxoOverlay::new(tip_ctx.utxo, overlay);
-        let committed_view = CommittedOnly::new(tip_ctx.utxo);
         let mut tx_cx = TxValidationCtx {
             ctx: tip_ctx.tx_context,
             params: tip_ctx.params,
@@ -1122,7 +1133,7 @@ impl Mempool {
                 reemission: tip_ctx.reemission,
             },
         };
-        let res = validator.validate(c_bytes, &overlay_view, &committed_view, &mut tx_cx);
+        let res = validator.validate(c_bytes, &overlay_view, &overlay_view, &mut tx_cx);
         // Charge regardless of verdict — the invariant is that no staging
         // operation runs script validation without charging CostBudgets. The one
         // exemption mirrors `admission::check_capturing_held`: a demoted tx is
@@ -1264,11 +1275,12 @@ impl Mempool {
             if !(pkg_weight > inc_weight && pkg_fee > inc_fee) {
                 return None; // clone discarded — live pool untouched
             }
-            // No member may spend an output of a tx the package removes: that
-            // box would exist nowhere after the swap.
+            // No member may spend or read an output of a tx the package
+            // removes: that box would exist nowhere after the swap.
             if members.iter().any(|m| {
                 m.input_box_ids
                     .iter()
+                    .chain(&m.data_input_box_ids)
                     .any(|input| removed_outputs.contains(input))
             }) {
                 return None;
@@ -1325,8 +1337,14 @@ impl Mempool {
         }
 
         // Evict the post-boost lowest until the budgets fit — but a package
-        // member must never be the victim (else the package didn't really fit).
+        // member must never be the victim (else the package didn't really fit),
+        // nor the creator of a box a member reads as a data input (a reader is
+        // no family child, so its creator gets no weight credit from it).
         let member_ids: HashSet<TxId> = members.iter().map(|m| m.tx_id).collect();
+        let member_reads: HashSet<Digest32> = members
+            .iter()
+            .flat_map(|m| m.data_input_box_ids.iter().copied())
+            .collect();
         while staged.len() > self.config.max_pool_size
             || staged.total_bytes() > self.config.max_pool_bytes
         {
@@ -1337,6 +1355,9 @@ impl Mempool {
                 return None; // a member would be evicted → reject the package
             }
             for e in staged.remove_with_descendants_debiting(&low, max_depth, bounds) {
+                if e.outputs.iter().any(|id| member_reads.contains(id)) {
+                    return None; // a member's data input would vanish
+                }
                 evicted.push(e.tx_id);
             }
         }

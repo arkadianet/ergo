@@ -5,8 +5,9 @@
 //! pool tx spends. Conflict detection runs separately via the
 //! `by_input` index.
 //!
-//! Data inputs are resolved through `CommittedOnly`, never the
-//! overlay, so they cannot depend on unconfirmed pool outputs.
+//! Admission and the recheck resolve data inputs through the same
+//! overlay, so a data input may read an unconfirmed pool output, as
+//! in Scala's mempool. `CommittedOnly` is the committed set alone.
 
 use std::collections::HashMap;
 

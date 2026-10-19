@@ -39,8 +39,9 @@ staging, and reorg maintenance. Consensus validation is delegated to
   `src/unresolved.rs` briefly suppresses repeated unresolved raw bytes by hash.
   Both caches use insertion-order eviction and TTL; refresh owns one bounded
   node, lookups do not refresh order, and capacity zero disables retention.
-- `src/overlay.rs` provides regular-input resolution from committed and pooled
-  outputs. `CommittedOnly` restricts data-input resolution to committed boxes.
+- `src/overlay.rs` resolves regular and data inputs from committed and pooled
+  outputs, as Scala's mempool view (`withUnconfirmedTransactions`) does.
+  `CommittedOnly` is the committed set alone.
 - `src/staging.rs` retains orphan structure and fully validated held facts under
   count/byte/per-peer/TTL/block limits. Holding emits no gossip. Promotion and
   package admission run through `src/mempool.rs`.
@@ -77,11 +78,18 @@ staging, and reorg maintenance. Consensus validation is delegated to
   ticks continue the frontier under the cleanup budget even between blocks;
   dependency cleanup revokes relay without blacklisting each descendant.
 - Recheck failures are contextual. Hard rule failures and unresolved data inputs
-  evict; transient unresolved spending inputs and internal `Other` errors do not.
+  evict (a data-input reader is no family child of the box's creator, so no
+  removal cascade reaches it); transient unresolved spending inputs and internal
+  `Other` errors do not.
   The invalidation cache filters inventory requests, while received bytes still
   undergo validation. A later tip or corrected proof can change the verdict.
 - Regular-input overlays leave committed boxes visible for replacement checks;
-  input-conflict detection is separate. Data inputs never see pooled outputs.
+  input-conflict detection is separate. Data inputs may read pooled outputs but
+  add no `parents_in_pool` edge or family weight (Scala's `updateFamily` walks
+  spend inputs only). A replacement, single or package, may not read an output
+  of a tx it removes, and capacity eviction may not remove the creator of a box
+  the incoming tx or package reads.
+  Candidate planning still orders a data-input creator before its reader.
 - Epoch demotion and rollback enqueue raw transactions for bounded re-admission;
   they do not insert unvalidated transactions directly. Node maintenance is
   gated on the applied and best-header tips being synchronized.

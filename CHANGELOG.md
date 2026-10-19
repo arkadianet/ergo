@@ -16,6 +16,19 @@ infrastructure.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Wallet daemon page after a restart:** a sealed `ergo-walletd` showed "Wallet status unavailable. Reconnecting…" indefinitely and offered no way to unlock. The page now shows the wallet as locked with the unlock form; the wallet password unseals and unlocks it.
+- **Wallet daemon authorization:** the daemon page's Authorize dialog now says which key it wants (the `wallet-api-key` file `ergo-walletd init` writes) and that the node's `api_key` and the wallet password are different secrets.
+- **The dashboard's search offered a Wallet page that did not exist.** The node dashboard has a Wallet section again: it links to the daemon at `[wallet] daemon_address` and lists the steps that move an earlier release's wallet.
+
+- **Mempool: data inputs may read unconfirmed outputs.** The mempool rejected a transaction whose data input is an output of another pooled transaction (`UnresolvedDataInput`), so such chains were neither relayed nor mined until the parent confirmed. The reference node's mempool accepts them, and blocks containing them already validated. Data inputs now resolve against the same pooled view as regular inputs. A data-input reader adds no family weight to the box's creator, a replacement (single or package) may not read an output of a transaction it removes, capacity eviction never removes the creator of a box the incoming transaction reads, and a reader whose box disappears is evicted on recheck and reported by the candidate builder.
+
+### Changed
+
+- **`ergo-walletd init`** prints every remaining step: the node credential, the `[wallet] daemon_address` line when `--tcp` differs from the node's default, the page address, the file that authorizes it, and whether to unlock an adopted wallet with its old password or create one. It creates a missing config directory (owner-only).
+- **`ergo-walletd adopt`** and the node's handoff log line now give the `init` command for the next step, with the node's API address filled in.
+
 ## [0.13.0] - 2026-10-13
 
 A consensus release for mainnet, and the release that moves the wallet out of the node. Upgrade every 0.12.x node, mining nodes first. 0.12.3 was never published; its changes are included here.
