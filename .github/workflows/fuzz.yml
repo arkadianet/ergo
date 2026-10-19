@@ -313,7 +313,7 @@ jobs:
         with:
           key: consensus-guard
 
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: '11'
@@ -321,7 +321,7 @@ jobs:
       - uses: VirtusLab/scala-cli-setup@3f5bf11a33bb88343238780c18257c8fa43789e1 # v1
 
       # scala-cli does not install sbt, which the cold publishLocal path needs.
-      - uses: sbt/setup-sbt@5ffaf2b6f207c2df06fee08e16bd6110e300b04d # v1
+      - uses: sbt/setup-sbt@0d3d475ac54e821e5a3e704ae24ae042b9c97484 # v1
         with:
           sbt-runner-version: 1.12.11
 
