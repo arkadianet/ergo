@@ -2529,6 +2529,48 @@ fn valid_rent_claim_policy_override_and_ordinary_spend() {
     }
 }
 
+#[test]
+fn capacity_eviction_never_removes_the_creator_of_a_box_the_new_tx_reads() {
+    // The pool is full with the parent, which creates 0xBB. A heavier reader
+    // of 0xBB would evict the parent to make room, leaving its data input
+    // nowhere: it is refused and the parent stays.
+    let utxo = EmptyUtxo;
+    let c = ctx();
+    let mut pool = pool_with_data_input_parent();
+    let (_, mut b, mut inv, mut unr) = fresh();
+    let cfg = MempoolConfig {
+        max_pool_size: 1,
+        ..default_config()
+    };
+    let w = ByCost;
+    let reader = DataInputProbe {
+        bytes: b"reader".to_vec(),
+        tx_id: id(4),
+        fee: 50_000_000,
+        input_ids: vec![id(0x40)],
+        data_input_id: id(0xBB),
+    };
+    let tip = c.view(&utxo);
+    let mut cx = AdmissionCtx {
+        tip_ctx: &tip,
+        config: &cfg,
+        pool: &mut pool,
+        budgets: &mut b,
+        invalidated: &mut inv,
+        unresolved: &mut unr,
+        weight_fn: &w,
+    };
+    let (out, _) = process(b"reader", TxSource::Api, Instant::now(), &mut cx, &reader);
+    assert_eq!(
+        out,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::PoolFull
+        }
+    );
+    assert!(pool.contains(&id(1)) && pool.len() == 1, "the parent stays");
+    pool.check_invariants();
+}
+
 /// Real wire bytes through `ErgoValidator`: a child that spends its own
 /// committed box and reads a pooled parent's output as a data input is
 /// refused while the parent is absent and admitted once it is pooled.

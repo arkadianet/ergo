@@ -86,7 +86,9 @@ staging, and reorg maintenance. Consensus validation is delegated to
 - Regular-input overlays leave committed boxes visible for replacement checks;
   input-conflict detection is separate. Data inputs may read pooled outputs but
   add no `parents_in_pool` edge or family weight (Scala's `updateFamily` walks
-  spend inputs only); a replacement may not read an output of a tx it removes.
+  spend inputs only). A replacement, single or package, may not read an output
+  of a tx it removes, and capacity eviction may not remove the creator of a box
+  the incoming tx or package reads.
   Candidate planning still orders a data-input creator before its reader.
 - Epoch demotion and rollback enqueue raw transactions for bounded re-admission;
   they do not insert unvalidated transactions directly. Node maintenance is

@@ -93,11 +93,17 @@ pub(crate) fn process_capturing_held<V: Validator>(
             weight,
             replaced_ids,
         } => {
+            // The bytes just validated, so the parse cannot fail.
+            let data_input_box_ids = validator
+                .peek_structure(tx_bytes)
+                .map(|structure| structure.data_input_box_ids)
+                .unwrap_or_default();
             let admit = commit(
                 cx,
                 tx_bytes,
                 &source,
                 validated,
+                &data_input_box_ids,
                 weight,
                 replaced_ids,
                 &mut actions,
@@ -641,6 +647,7 @@ fn commit(
     tx_bytes: &[u8],
     source: &TxSource,
     validated: Validated,
+    data_input_box_ids: &[Digest32],
     weight: u64,
     replaced_ids: Vec<TxId>,
     actions: &mut Vec<MempoolAction>,
@@ -677,6 +684,7 @@ fn commit(
         match apply_commit(
             &mut staged,
             &validated,
+            data_input_box_ids,
             weight,
             &replaced_ids,
             bounds,
@@ -714,6 +722,7 @@ fn commit(
         match apply_commit(
             cx.pool,
             &validated,
+            data_input_box_ids,
             weight,
             &replaced_ids,
             bounds,
@@ -791,6 +800,7 @@ struct CommitOutcome {
 fn apply_commit(
     pool: &mut OrderedPool,
     validated: &Validated,
+    data_input_box_ids: &[Digest32],
     weight: u64,
     replaced_ids: &[TxId],
     bounds: FamilyBounds,
@@ -892,6 +902,16 @@ fn apply_commit(
             break; // pool empty; new tx alone fits (pre-checked in `check`)
         };
         for e in pool.remove_with_descendants_debiting(&id, config.max_family_depth, bounds) {
+            // A data-input reader is no family child, so its box's creator
+            // gets no weight credit and can be the victim. Never seat a reader
+            // without the box it reads; only the staged path evicts, and the
+            // caller discards that clone.
+            if e.outputs
+                .iter()
+                .any(|output| data_input_box_ids.contains(output))
+            {
+                return Err(RejectReason::PoolFull);
+            }
             removed_for_actions.push(e.tx_id);
         }
     }
