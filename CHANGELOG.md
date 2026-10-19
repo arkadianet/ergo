@@ -16,18 +16,35 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-10-19
+
+A fix release for 0.13.0: the move to the wallet daemon, chained transactions in the mempool, and a TLS dependency update. Not a consensus change. Upgrading changes no data: stop the node and `ergo-walletd`, replace the binaries and start them again.
+
+- **Wallet daemon page after a restart:** 0.13.0's page looped on "Wallet status unavailable. Reconnecting…" while the daemon was sealed and offered no way to unlock it. It now shows the unlock form (#663).
+- **Moving a wallet to the daemon** is guided end to end: the page names the key it wants, `ergo-walletd init` prints every remaining step, and the node dashboard has a Wallet section linking to the daemon. [Wallet setup](https://github.com/arkadianet/ergo/blob/v0.13.1/docs/wallet-setup.md) explains the three secrets involved (#663).
+- **Mempool:** a transaction whose data input reads an output of another unconfirmed transaction is now accepted, relayed and mined, as the reference node's mempool does. 0.13.0 and earlier rejected it until the parent confirmed (#663).
+- **Security:** rustls 0.23.46 fixes RUSTSEC-2026-0346 to 0349 (#663).
+- **Dependencies:** rayon 1.12, rustix 1.1.5, futures-util 0.3.34, dns-lookup 4.0.2 (reverse DNS for peer details; no behaviour change) and proptest 1.12 (tests only) (#657–#661).
+
+### Security
+
+- Update rustls to 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349 (#663).
+
 ### Fixed
 
-- **Wallet daemon page after a restart:** a sealed `ergo-walletd` showed "Wallet status unavailable. Reconnecting…" indefinitely and offered no way to unlock. The page now shows the wallet as locked with the unlock form; the wallet password unseals and unlocks it.
-- **Wallet daemon authorization:** the daemon page's Authorize dialog now says which key it wants (the `wallet-api-key` file `ergo-walletd init` writes) and that the node's `api_key` and the wallet password are different secrets.
-- **The dashboard's search offered a Wallet page that did not exist.** The node dashboard has a Wallet section again: it links to the daemon at `[wallet] daemon_address` and lists the steps that move an earlier release's wallet.
+- **Wallet daemon page after a restart:** a sealed `ergo-walletd` showed "Wallet status unavailable. Reconnecting…" indefinitely and offered no way to unlock. The page now shows the wallet as locked with the unlock form; the wallet password unseals and unlocks it (#663).
+- **Wallet daemon authorization:** the daemon page's Authorize dialog now says which key it wants (the `wallet-api-key` file `ergo-walletd init` writes) and that the node's `api_key` and the wallet password are different secrets (#663).
+- **The dashboard's search offered a Wallet page that did not exist.** The node dashboard has a Wallet section again: it links to the daemon at `[wallet] daemon_address` and lists the steps that move an earlier release's wallet (#663).
+- **Mempool: data inputs may read unconfirmed outputs.** The mempool rejected a transaction whose data input is an output of another pooled transaction (`UnresolvedDataInput`), so such chains were neither relayed nor mined until the parent confirmed. The reference node's mempool accepts them, and blocks containing them already validated. Data inputs now resolve against the same pooled view as regular inputs. A data-input reader adds no family weight to the box's creator, a replacement (single or package) may not read an output of a transaction it removes, capacity eviction never removes the creator of a box the incoming transaction reads, and a reader whose box disappears is evicted on recheck and reported by the candidate builder (#663).
 
-- **Mempool: data inputs may read unconfirmed outputs.** The mempool rejected a transaction whose data input is an output of another pooled transaction (`UnresolvedDataInput`), so such chains were neither relayed nor mined until the parent confirmed. The reference node's mempool accepts them, and blocks containing them already validated. Data inputs now resolve against the same pooled view as regular inputs. A data-input reader adds no family weight to the box's creator, a replacement (single or package) may not read an output of a transaction it removes, capacity eviction never removes the creator of a box the incoming transaction reads, and a reader whose box disappears is evicted on recheck and reported by the candidate builder.
+- **Test:** the websocket event-bridge test waited fixed 30/40 ms windows and failed on slow CI runners; it now waits for the bridge's seed read and for the event itself.
+- **Build:** `Cargo.lock` on `main` referenced a `windows-sys` entry that the combined dependency updates had removed, so `--locked` builds failed; it now resolves to `windows-sys` 0.61.2.
 
 ### Changed
 
-- **`ergo-walletd init`** prints every remaining step: the node credential, the `[wallet] daemon_address` line when `--tcp` differs from the node's default, the page address, the file that authorizes it, and whether to unlock an adopted wallet with its old password or create one. It creates a missing config directory (owner-only).
-- **`ergo-walletd adopt`** and the node's handoff log line now give the `init` command for the next step, with the node's API address filled in.
+- **Dependencies:** rayon 1.11 → 1.12 (#657), dns-lookup 3.0.1 → 4.0.2 (#659; only its error type changed, which the node discards), rustix 1.1.4 → 1.1.5 (#658), futures-util 0.3.32 → 0.3.34 (#661), proptest 1.11 → 1.12 (#660, tests only), and CI actions (#662).
+- **`ergo-walletd init`** prints every remaining step: the node credential, the `[wallet] daemon_address` line when `--tcp` differs from the node's default, the page address, the file that authorizes it, and whether to unlock an adopted wallet with its old password or create one. It creates a missing config directory (owner-only) (#663).
+- **`ergo-walletd adopt`** and the node's handoff log line now give the `init` command for the next step, with the node's API address filled in (#663).
 
 ## [0.13.0] - 2026-10-13
 

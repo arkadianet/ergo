@@ -635,8 +635,9 @@ mod tests {
     #[tokio::test]
     async fn spawn_event_bridge_seeds_then_publishes_live() {
         // A shared feed cell the stub read returns; we mutate it between ticks.
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Mutex;
-        struct Feed(Mutex<ApiNodeEvents>);
+        struct Feed(Mutex<ApiNodeEvents>, AtomicUsize);
         impl NodeReadState for Feed {
             fn info(&self) -> crate::types::ApiInfo {
                 unreachable!("bridge only calls events()")
@@ -669,21 +670,34 @@ mod tests {
                 unreachable!()
             }
             fn events(&self) -> ApiNodeEvents {
-                self.0.lock().unwrap().clone()
+                let events = self.0.lock().unwrap().clone();
+                self.1.fetch_add(1, Ordering::SeqCst);
+                events
             }
         }
 
-        let feed = Arc::new(Feed(Mutex::new(ApiNodeEvents {
-            latest_seq: 0,
-            events: vec![],
-        })));
+        let feed = Arc::new(Feed(
+            Mutex::new(ApiNodeEvents {
+                latest_seq: 0,
+                events: vec![],
+            }),
+            AtomicUsize::new(0),
+        ));
         let read: Arc<dyn NodeReadState> = feed.clone();
         let bus = Arc::new(RealtimeBus::blocks_only());
         let mut sub = blocks_sub(&bus);
         let handle = spawn_event_bridge(read, bus.clone(), Duration::from_millis(10));
 
-        // Let the first (seed) tick run against the empty feed.
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        // Wait until the seed tick has read the empty feed. A fixed sleep
+        // raced on slow runners: a block added before the seed read is
+        // standing history, which the bridge never publishes.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while feed.1.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("seed tick ran");
         assert_eq!(bus.latest_seq(), 0, "seed tick publishes nothing");
 
         // A new block appears; a later tick publishes it.
@@ -691,10 +705,11 @@ mod tests {
             latest_seq: 1,
             events: vec![block_ev(1, 100)],
         };
-        tokio::time::sleep(Duration::from_millis(40)).await;
-
+        let ev = tokio::time::timeout(Duration::from_secs(10), sub.rx.recv())
+            .await
+            .expect("live block published")
+            .expect("bus open");
         handle.abort();
-        let ev = sub.rx.try_recv().expect("live block published");
         assert_eq!(ev.data["height"], 100);
     }
 
