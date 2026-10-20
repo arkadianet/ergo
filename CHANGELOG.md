@@ -18,6 +18,8 @@ infrastructure.
 
 ### Fixed
 
+- **Contract templates with five or more parameters bound values to the wrong constants.** `compile_contract` numbered the body's placeholders in Scala's hash-map order (to match Scala byte for byte) while each parameter's `constantIndex` follows declaration order, so `ContractTemplate::apply` put values where the body reads other parameters: the wrong keys or amounts when the swapped parameters share a type, a tree the deserializer rejects when they do not. Scala's `SigmaTemplateCompiler` has the same bug (reported as ergoplatform/sigmastate-interpreter#1205). Placeholders now follow declaration order at every parameter count, so templates of up to four parameters are unchanged and larger ones now differ from Scala's (wrong) bytes; `compile_contract_with_order(…, PlaceholderOrder::Scala212)` still reproduces Scala's bytes for comparison. Consensus is unaffected: no validation path compiles templates.
+
 - **Wallet daemon page after a restart:** a sealed `ergo-walletd` showed "Wallet status unavailable. Reconnecting…" indefinitely and offered no way to unlock. The page now shows the wallet as locked with the unlock form; the wallet password unseals and unlocks it.
 - **Wallet daemon authorization:** the daemon page's Authorize dialog now says which key it wants (the `wallet-api-key` file `ergo-walletd init` writes) and that the node's `api_key` and the wallet password are different secrets.
 - **The dashboard's search offered a Wallet page that did not exist.** The node dashboard has a Wallet section again: it links to the daemon at `[wallet] daemon_address` and lists the steps that move an earlier release's wallet.
