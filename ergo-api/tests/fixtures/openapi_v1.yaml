@@ -5,7 +5,7 @@ info:
   license:
     name: MIT OR Apache-2.0
     identifier: MIT OR Apache-2.0
-  version: 0.13.0
+  version: 0.13.1
 paths:
   /api/v1/addresses/{address}/balance:
     get:
