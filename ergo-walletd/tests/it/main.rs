@@ -6,11 +6,13 @@
 mod daemon_boot;
 mod full_api;
 mod http_client;
+mod index_restore;
 mod lifecycle;
 mod node_api;
 mod routes;
 mod scan_registry_rewind;
 mod seed_daemon_boot;
+mod sim_chain;
 mod spending_context;
 mod store_reopen;
 mod support;

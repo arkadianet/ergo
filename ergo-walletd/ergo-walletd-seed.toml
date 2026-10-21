@@ -27,7 +27,7 @@ local_api_key_file = "./wallet-api-key"
 shutdown_timeout_secs = 5
 sync_interval = "15s"
 sync_batch = 256
-blocks_page = 1
+blocks_page = 128
 
 [api]
 unix_socket = "./ergo-walletd-seed.sock" # Created owner-only, mode 0600.

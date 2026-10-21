@@ -271,7 +271,7 @@ fn default_sync_batch() -> u32 {
 /// `config::bundled_sample_config_matches_the_schema` plus the sync unit test
 /// keep the two from drifting.
 fn default_blocks_page() -> u32 {
-    1
+    128
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -1076,7 +1076,7 @@ mod tests {
             assert_eq!(config.network, Network::Mainnet);
             assert_eq!(config.sync_interval, Duration::from_secs(15));
             assert_eq!(config.sync_batch, 256);
-            assert_eq!(config.blocks_page, 1);
+            assert_eq!(config.blocks_page, 128);
             assert!(config.unix_socket.is_some());
             assert!(config.tcp_fallback.is_none());
         }
@@ -1199,7 +1199,7 @@ mod tests {
         .unwrap();
         let config = Config::from_file(file).unwrap();
         assert_eq!(config.sync_batch, 512);
-        assert_eq!(config.blocks_page, 1);
+        assert_eq!(config.blocks_page, 128);
 
         // Explicitly overridable, and validated on its own: 0 would ask for an
         // empty page, 1025 would exceed the node's own blocks-since limit.

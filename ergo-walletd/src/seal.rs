@@ -151,15 +151,18 @@ pub(crate) fn open(
     } else {
         None
     };
-    let syncer = Arc::new(StandaloneSyncer::new(
-        service.clone(),
-        SyncConfig {
-            batch: config.sync_batch,
-            page: config.blocks_page,
-            ..SyncConfig::default()
-        },
-        context.tip.clone(),
-    ));
+    let syncer = Arc::new(
+        StandaloneSyncer::new(
+            service.clone(),
+            SyncConfig {
+                batch: config.sync_batch,
+                page: config.blocks_page,
+                ..SyncConfig::default()
+            },
+            context.tip.clone(),
+        )
+        .with_network(config.network.prefix()),
+    );
     Ok(Opened {
         service,
         syncer,

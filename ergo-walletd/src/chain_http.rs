@@ -27,9 +27,10 @@
 //!
 //! Every response body is capped at [`MAX_RESPONSE_BODY_BYTES`]. For
 //! `blocks-since` that cap is what bounds the *page size*, so a page the node
-//! cannot fit is rejected here rather than retried: the daemon never asks for a
-//! smaller page, so a body over the cap means a single block is larger than the
-//! budget, and the pass fails closed with an error naming both the cap and the
+//! cannot fit is reported here as the typed `PageTooLarge` error and not retried
+//! by the client: the sync loop answers it by asking for half the page, and only
+//! a one-block page over the cap is terminal (a single block larger than the
+//! budget), failing the pass closed with an error naming both the cap and the
 //! page size. See [`crate::sync::DEFAULT_BLOCKS_PER_PAGE`].
 
 use std::io::Read;
@@ -40,8 +41,9 @@ use ergo_primitives::reader::VlqReader;
 use ergo_ser::ergo_box::{read_ergo_box, serialize_ergo_box};
 use ergo_wallet_protocol::chain as wire;
 use ergo_wallet_service::{
-    ChainBlock, ChainBox, ChainClient, ChainClientError, ChainInput, ChainOutput, ChainSnapshot,
-    ChainTransaction, CommittedTip, ReemissionInput, SubmitRequest, SubmitResponse, UtxoLookup,
+    AddressHistory, ChainBlock, ChainBox, ChainClient, ChainClientError, ChainInput, ChainOutput,
+    ChainSnapshot, ChainTransaction, CommittedTip, IndexedTransaction, ReemissionInput,
+    SubmitRequest, SubmitResponse, UtxoLookup,
 };
 use reqwest::blocking::{Client, Response};
 use reqwest::header::HeaderValue;
@@ -56,6 +58,12 @@ const API_KEY_HEADER: &str = "api_key";
 /// so a page's body is roughly twice the blocks it carries, and an unbounded
 /// page would grow with `sync_batch` until it hit this.
 pub const MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// Transactions per page when reading an address from the node's index. Each
+/// listed transaction carries its full boxes, so a page stays far below the
+/// response cap.
+const INDEX_PAGE: usize = 50;
+/// Times an address listing is re-read when the index moves under it.
+const INDEX_READ_ATTEMPTS: usize = 3;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -336,10 +344,9 @@ impl HttpChainClient {
     /// Identical to [`Self::request_bytes`] except for the body policy, and the
     /// difference is the whole point: the sync loop bounds a page by block
     /// count (`crate::sync::DEFAULT_BLOCKS_PER_PAGE`), and the byte cap is what
-    /// stops a page from being unbounded. A body over the cap is reported as the
-    /// terminal condition it is, naming both numbers. The daemon never asks for
-    /// a smaller page, so retrying could not help, and `SyncError` treats a
-    /// protocol failure as terminal — the pass fails closed instead of looping.
+    /// stops a page from being unbounded. A body over the cap is reported as
+    /// `PageTooLarge`, naming both numbers; the sync loop retries it with a
+    /// smaller page, and terminally only when the page is already one block.
     fn page_bytes(&self, path: &str, blocks: u32) -> Result<Vec<u8>, ChainClientError> {
         self.outside_runtime(|| {
             let response = self.send(path, None)?;
@@ -445,9 +452,171 @@ impl HttpChainClient {
             .map(|body| parse_json(&body))
             .transpose()
     }
+
+    /// One GET against the node's address index. `Ok(None)` is the node saying
+    /// it has no index to ask (route absent, still syncing or halted, address
+    /// not accepted), which is a reason to scan blocks, never an error.
+    fn index_get<T: DeserializeOwned + Send>(
+        &self,
+        path: &str,
+    ) -> Result<Option<T>, ChainClientError> {
+        self.outside_runtime(|| {
+            let response = self.send(path, None)?;
+            let status = response.status();
+            if status.is_success() {
+                let body = read_body(response, self.max_response_body_bytes)
+                    .map_err(ChainClientError::from)?;
+                return parse_json(&body).map(Some);
+            }
+            if matches!(
+                status,
+                StatusCode::NOT_FOUND | StatusCode::SERVICE_UNAVAILABLE | StatusCode::BAD_REQUEST
+            ) {
+                return Ok(None);
+            }
+            Err(self.status_error(response)?)
+        })
+    }
+
+    /// The index's height, or `None` unless it is caught up with the node.
+    fn indexed_height(&self) -> Result<Option<u32>, ChainClientError> {
+        let Some(status) = self.index_get::<IndexedHeightBody>("blockchain/indexedHeight")? else {
+            return Ok(None);
+        };
+        if status.status != "caughtUp" {
+            return Ok(None);
+        }
+        Ok(u32::try_from(status.indexed_height).ok())
+    }
+
+    fn index_address(
+        network: ergo_ser::address::NetworkPrefix,
+        tree: &[u8],
+    ) -> Result<String, ChainClientError> {
+        ergo_ser::address::encode_address_from_tree_bytes(network, tree)
+            .map_err(|_| ChainClientError::Protocol("tracked script has no address".to_string()))
+    }
+
+    /// Every transaction the index lists for `address`, paged. The listing is
+    /// newest first, so a block arriving mid-read shifts the pages: the total
+    /// is compared across pages and the read repeated when it moved. `None`
+    /// when the index cannot answer or never holds still.
+    fn index_transactions(
+        &self,
+        address: &str,
+    ) -> Result<Option<Vec<IndexedTransaction>>, ChainClientError> {
+        'attempt: for _ in 0..INDEX_READ_ATTEMPTS {
+            let mut found = Vec::new();
+            let mut total = None;
+            loop {
+                let path = format!(
+                    "blockchain/transaction/byAddress/{address}?offset={}&limit={INDEX_PAGE}",
+                    found.len()
+                );
+                let Some(page) = self.index_get::<IndexedTxPage>(&path)? else {
+                    return Ok(None);
+                };
+                match total {
+                    None => total = Some(page.total),
+                    Some(first) if first != page.total => continue 'attempt,
+                    Some(_) => {}
+                }
+                if page.items.is_empty() {
+                    break;
+                }
+                for item in page.items {
+                    found.push(IndexedTransaction {
+                        tx_id: decode_id(&item.id, "indexed transaction id")?,
+                        height: u32::try_from(item.inclusion_height).map_err(|_| {
+                            ChainClientError::Protocol("indexed height is negative".to_string())
+                        })?,
+                        block_id: decode_id(&item.block_id, "indexed block id")?,
+                    });
+                }
+                if found.len() as i64 >= page.total {
+                    break;
+                }
+            }
+            if found.len() as i64 != total.unwrap_or(0) {
+                continue;
+            }
+            return Ok(Some(found));
+        }
+        Ok(None)
+    }
+}
+
+/// The parts of `GET /blockchain/indexedHeight` the daemon reads.
+#[derive(serde::Deserialize)]
+struct IndexedHeightBody {
+    #[serde(rename = "indexedHeight")]
+    indexed_height: u64,
+    status: String,
+}
+
+/// The parts of the index's `{items, total}` transaction listing the daemon
+/// reads. The rest of each item (its boxes) is ignored: the wallet gets the
+/// block itself from the chain and trusts nothing else here.
+#[derive(serde::Deserialize)]
+struct IndexedTxPage {
+    items: Vec<IndexedTxItem>,
+    total: i64,
+}
+
+#[derive(serde::Deserialize)]
+struct IndexedTxItem {
+    id: String,
+    #[serde(rename = "inclusionHeight")]
+    inclusion_height: i64,
+    #[serde(rename = "blockId")]
+    block_id: String,
 }
 
 impl ChainClient for HttpChainClient {
+    fn address_history(
+        &self,
+        network: ergo_ser::address::NetworkPrefix,
+        ergo_trees: &[Vec<u8>],
+    ) -> Result<Option<AddressHistory>, ChainClientError> {
+        let Some(indexed_height) = self.indexed_height()? else {
+            return Ok(None);
+        };
+        let mut transactions = std::collections::BTreeMap::new();
+        for tree in ergo_trees {
+            let address = Self::index_address(network, tree)?;
+            let Some(listed) = self.index_transactions(&address)? else {
+                return Ok(None);
+            };
+            for transaction in listed {
+                transactions.insert(transaction.tx_id, transaction);
+            }
+        }
+        Ok(Some(AddressHistory {
+            indexed_height,
+            transactions: transactions.into_values().collect(),
+        }))
+    }
+
+    fn addresses_used(
+        &self,
+        network: ergo_ser::address::NetworkPrefix,
+        ergo_trees: &[Vec<u8>],
+    ) -> Result<Option<Vec<bool>>, ChainClientError> {
+        if self.indexed_height()?.is_none() {
+            return Ok(None);
+        }
+        let mut used = Vec::with_capacity(ergo_trees.len());
+        for tree in ergo_trees {
+            let address = Self::index_address(network, tree)?;
+            let path = format!("blockchain/transaction/byAddress/{address}?offset=0&limit=1");
+            let Some(page) = self.index_get::<IndexedTxPage>(&path)? else {
+                return Ok(None);
+            };
+            used.push(page.total > 0);
+        }
+        Ok(Some(used))
+    }
+
     fn spending_context(&self) -> Result<wire::SpendingContext, ChainClientError> {
         self.get_json("api/v1/chain/spending-context")
     }
@@ -702,19 +871,15 @@ fn read_body(response: Response, limit: usize) -> Result<Vec<u8>, BodyError> {
 /// Body fetch for one `blocks-since` page: the same ceiling as every other
 /// endpoint, reported in terms of the page.
 ///
-/// The message names both numbers on purpose. The sync loop bounds a page by
+/// The error names both numbers on purpose. The sync loop bounds a page by
 /// block count (`crate::sync::DEFAULT_BLOCKS_PER_PAGE`) and this cap bounds it
-/// by bytes; when the bytes run out first the page size has already been
-/// applied, so the only remaining explanation is a block larger than the cap —
-/// which the daemon cannot fetch, because it never shrinks a page. Naming the
-/// cap and the page turns that into an operator-actionable terminal error
+/// by bytes; when the bytes run out first the loop halves the page and asks
+/// again, and a one-block page that still runs out can only be a block larger
+/// than the cap, which it reports as an operator-actionable terminal error
 /// instead of an anonymous "body too large".
 fn read_page(response: Response, limit: usize, blocks: u32) -> Result<Vec<u8>, ChainClientError> {
     read_body(response, limit).map_err(|error| match error {
-        BodyError::TooLarge { limit } => ChainClientError::Protocol(format!(
-            "a {blocks}-block page does not fit the {limit}-byte response cap; the daemon does \
-             not retry with a smaller page, so a single block larger than the cap is terminal"
-        )),
+        BodyError::TooLarge { limit } => ChainClientError::PageTooLarge { blocks, limit },
         other => other.into(),
     })
 }
@@ -1901,11 +2066,12 @@ mod tests {
     }
 
     /// A `blocks-since` body over the cap is reported in terms of the page: the
-    /// error names the cap *and* the page size, and states that no smaller page
-    /// will be tried, because that is the whole operator-facing content of the
-    /// failure. A generic "body too large" would leave them guessing.
+    /// typed error carries the cap *and* the page size, which is what lets the
+    /// sync loop retry with a smaller page and name both numbers if even a
+    /// one-block page does not fit. A generic "body too large" would leave
+    /// neither the loop nor the operator anything to act on.
     #[test]
-    fn an_oversized_page_names_the_cap_the_page_and_the_no_smaller_page_rule() {
+    fn an_oversized_page_carries_the_cap_and_the_page_size() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
@@ -1930,18 +2096,21 @@ mod tests {
                 cursor: ergo_wallet_service::ChainCursor::genesis(),
                 limit: 1,
             })
-            .unwrap_err()
-            .to_string();
+            .unwrap_err();
         handle.join().unwrap();
-        assert!(
-            error.contains(&MAX_RESPONSE_BODY_BYTES.to_string()),
-            "{error}"
+        assert_eq!(
+            error,
+            ChainClientError::PageTooLarge {
+                blocks: 1,
+                limit: MAX_RESPONSE_BODY_BYTES
+            }
         );
-        assert!(error.contains("1-block page"), "{error}");
+        let text = error.to_string();
         assert!(
-            error.contains("does not retry with a smaller page"),
-            "{error}"
+            text.contains(&MAX_RESPONSE_BODY_BYTES.to_string()),
+            "{text}"
         );
+        assert!(text.contains("1-block page"), "{text}");
     }
 
     // ----- construction context -----

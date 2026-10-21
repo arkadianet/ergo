@@ -50,13 +50,13 @@ use ergo_ser::transaction::Transaction;
 use ergo_state::store::StateStore;
 use ergo_wallet_service::{
     BlocksSinceRequest, BlocksSinceResponse, ChainClient, ChainClientError, ChainCursor,
-    ChainSnapshot, CommittedTip, RedbWalletStore, RescanState, SubmitRequest, SubmitResponse,
-    UtxoLookup, WalletService, WalletStore,
+    ChainSnapshot, CommittedTip, RedbWalletStore, SubmitRequest, SubmitResponse, UtxoLookup,
+    WalletService, WalletStore,
 };
 
 use ergo_walletd::chain_http::HttpChainClient;
 use ergo_walletd::config::ApiKey;
-use ergo_walletd::sync::{StandaloneSyncer, SyncConfig, SyncError};
+use ergo_walletd::sync::{StandaloneSyncer, SyncConfig};
 use ergo_walletd::tip::CachedNodeTip;
 
 /// A valid, non-default operator key. Deliberately *not* one of
@@ -677,11 +677,10 @@ fn real_node_tip_blocks_since_and_sync_against_a_seeded_state_store() {
     assert_eq!(report.wallet_height, TIP_HEIGHT);
     assert_eq!(report.tip, tip);
     assert_eq!(report.blocks_processed, TIP_HEIGHT);
-    // The apply budget (8) and the page budget (the default, 1) are separate:
-    // the pass applies all three blocks but never asks for more than one at a
-    // time, and the loop then finishes on its tip comparison, so there is no
-    // fourth request.
-    assert_eq!(chain.requests(), vec![(0, 1), (1, 1), (2, 1)]);
+    // The apply budget (8) and the page ceiling (the default) are separate:
+    // the blocks are tiny, so the pass reads all three in one request, and the
+    // loop then finishes on its tip comparison, so there is no second one.
+    assert_eq!(chain.requests(), vec![(0, 4)]);
     assert!(
         chain
             .requests()
@@ -710,12 +709,12 @@ fn real_node_tip_blocks_since_and_sync_against_a_seeded_state_store() {
 /// difference between a completed pass and a hard failure.
 ///
 /// Three things are pinned:
-/// 1. the premise — a whole-tip page would not fit the cap, so the bound is
-///    load-bearing rather than decorative;
-/// 2. a full pass completes, applying every block, over pages of at most
-///    `blocks_page`;
-/// 3. the *same* node with the page bound removed fails closed on the first
-///    response with the bounded, named error instead of looping.
+/// 1. the premise — a whole-tip page would not fit the cap, so the adaptation
+///    is load-bearing rather than decorative;
+/// 2. a full pass completes, applying every block: the first page, sized for
+///    small blocks, is refused as over the cap, and the daemon halves it and
+///    then sizes the rest from the blocks it saw;
+/// 3. a ceiling of one block keeps the old fixed one-block pages.
 #[test]
 fn real_node_pages_non_empty_full_size_blocks_without_oversized_requests() {
     let node_dir = tempfile::tempdir().unwrap();
@@ -774,62 +773,46 @@ fn real_node_pages_non_empty_full_size_blocks_without_oversized_requests() {
     assert_eq!(report.blocks_processed, TIP_HEIGHT);
     assert_eq!(report.wallet_height, TIP_HEIGHT);
     let requests = chain.requests();
+    assert!(
+        requests[0].1 >= 3,
+        "the first page is sized for small blocks: {requests:?}"
+    );
+    assert!(
+        requests.len() >= 2 && requests[1].1 < requests[0].1,
+        "an over-cap page is retried smaller: {requests:?}"
+    );
     assert_eq!(
-        requests,
-        vec![(0, 1), (1, 1), (2, 1)],
-        "three blocks at the default one-block page: three requests, each asking \
-         for one block"
+        requests.last().map(|(_, limit)| *limit),
+        Some(1),
+        "once it has seen the blocks the daemon asks for one at a time: {requests:?}"
     );
     assert!(
         requests
             .iter()
             .all(|(_, limit)| *limit <= ergo_walletd::sync::DEFAULT_BLOCKS_PER_PAGE),
-        "no request may exceed the page budget: {requests:?}"
+        "no request may exceed the page ceiling: {requests:?}"
     );
     let read = store_wallet.read().unwrap();
     assert_eq!(read.scan_cursor().unwrap().unwrap().height, TIP_HEIGHT);
     assert!(!read.scan_invalidated().unwrap());
 
-    // (3) Remove the page bound — the pre-fix behaviour, where the apply budget
-    // sized the request — and the same node produces a body over the cap. It is
-    // reported once, as a terminal error naming the cap, the page, and the fact
-    // that no smaller page will be tried. It is not retried and does not loop.
-    let unbounded_dir = tempfile::tempdir().unwrap();
-    let unbounded = CountingChain::new(daemon_client(&node.url(), NODE_API_KEY));
-    let unbounded_wallet = standalone_wallet(unbounded_dir.path());
-    let unbounded_syncer = StandaloneSyncer::new(
-        Arc::new(WalletService::new(
-            unbounded_wallet.clone(),
-            unbounded.clone(),
-        )),
+    // (3) A ceiling of one block is the old fixed page: one request per block,
+    // and no over-cap response to learn from.
+    let fixed_dir = tempfile::tempdir().unwrap();
+    let fixed = CountingChain::new(daemon_client(&node.url(), NODE_API_KEY));
+    let fixed_wallet = standalone_wallet(fixed_dir.path());
+    let fixed_syncer = StandaloneSyncer::new(
+        Arc::new(WalletService::new(fixed_wallet.clone(), fixed.clone())),
         SyncConfig {
             batch: TIP_HEIGHT,
-            page: TIP_HEIGHT,
+            page: 1,
             retry_delay: Duration::ZERO,
             max_retry_delay: Duration::ZERO,
         },
-        Arc::new(CachedNodeTip::new(unbounded.clone())),
+        Arc::new(CachedNodeTip::new(fixed.clone())),
     );
-    let error = unbounded_syncer.sync_once().unwrap_err();
-    let text = error.to_string();
-    assert!(matches!(error, SyncError::Protocol(_)), "{text}");
-    assert!(
-        text.contains(&format!("{TIP_HEIGHT}-block page")),
-        "the error must name the page it asked for: {text}"
-    );
-    assert!(
-        text.contains(&ergo_walletd::chain_http::MAX_RESPONSE_BODY_BYTES.to_string()),
-        "the error must name the cap: {text}"
-    );
-    assert!(
-        text.contains("does not retry with a smaller page"),
-        "the error must say why retrying is pointless: {text}"
-    );
-    assert_eq!(unbounded.requests().len(), 1, "one request, then it stops");
-    assert!(matches!(
-        unbounded_wallet.read().unwrap().rescan_state().unwrap(),
-        RescanState::Failed { .. }
-    ));
+    assert!(fixed_syncer.sync_once().unwrap().completed);
+    assert_eq!(fixed.requests(), vec![(0, 1), (1, 1), (2, 1)]);
 }
 
 /// A fresh daemon over an existing wallet database is already at the tip and
@@ -1045,8 +1028,8 @@ fn assert_real_node_reorg(store: &mut StateStore, ids: &[[u8; 32]], chain: Arc<C
     assert_eq!(report.tip.header_id, new_tip_id);
     assert_eq!(
         chain.requests()[before_reorg..],
-        vec![(1, 1), (2, 1)],
-        "the two replacement blocks follow the already-proven ancestor"
+        vec![(1, 3)],
+        "the two replacement blocks follow the already-proven ancestor, in one page"
     );
     let read = store_wallet.read().unwrap();
     let cursor = read.scan_cursor().unwrap().unwrap();

@@ -168,45 +168,20 @@ fn page_size_bounds_every_request_while_the_batch_budget_still_applies() {
     );
 }
 
-/// The shipped default is a *page* of 1, not the apply budget: an unbounded
-/// page grows with `sync_batch` until it hits the adapter's response cap.
-///
-/// The value is the largest page whose *worst legal* body provably fits the cap,
-/// and this pins that arithmetic rather than asserting the constant alone:
-/// consensus bounds one block's `BlockTransactions` section by the voted
-/// `maxBlockSize`, the largest value `docs/configuration.md` shows an operator
-/// voting for is 2 MiB, and the wire form hex-encodes every byte of it.
+/// The shipped default is a page *ceiling*, not the apply budget: the page the
+/// daemon actually asks for adapts to the blocks it is served and never exceeds
+/// it. The ceiling keeps the request inside the node's own `blocks-since`
+/// limit, and it is far below the apply budget's reach, so a large `sync_batch`
+/// cannot turn into one unbounded response body.
 #[test]
-fn the_default_page_is_the_bounded_constant_not_the_apply_budget() {
-    const DOCUMENTED_MAX_BLOCK_SIZE: u64 = 2 * 1024 * 1024;
-    // Worst-case body for a page of N blocks: every transaction crosses the
-    // wire as hex and so do its output boxes, so a block costs up to four times
-    // its bytes, plus a deliberately loose allowance for the JSON envelope. The
-    // real envelope is a few hundred kilobytes, so this over-counts and cannot
-    // make the default look safer than it is.
-    const ENVELOPE_ALLOWANCE_PER_BLOCK: u64 = 1024 * 1024;
-    let worst_case_body = |blocks: u64| -> u64 {
-        blocks * (4 * DOCUMENTED_MAX_BLOCK_SIZE + ENVELOPE_ALLOWANCE_PER_BLOCK)
-    };
-    let cap = ergo_walletd::chain_http::MAX_RESPONSE_BODY_BYTES as u64;
-
-    assert_eq!(SyncConfig::default().page, 1);
-    assert_eq!(
-        SyncConfig::default().page,
-        ergo_walletd::sync::DEFAULT_BLOCKS_PER_PAGE
-    );
-    assert!(SyncConfig::default().page < SyncConfig::default().batch);
-    assert!(
-        worst_case_body(SyncConfig::default().page as u64) < cap,
-        "one maxed-out block must fit the cap under a loose envelope: {} vs {cap}",
-        worst_case_body(SyncConfig::default().page as u64)
-    );
-    assert!(
-        worst_case_body(SyncConfig::default().page as u64 + 1) > cap,
-        "a two-block page is not provably under the cap, so it cannot be the \
-         default: {} vs {cap}",
-        worst_case_body(SyncConfig::default().page as u64 + 1)
-    );
+fn the_default_page_is_a_bounded_ceiling_not_the_apply_budget() {
+    let default = SyncConfig::default();
+    assert_eq!(default.page, ergo_walletd::sync::DEFAULT_BLOCKS_PER_PAGE);
+    assert!((1..=ergo_walletd::sync::MAX_SYNC_BLOCKS).contains(&default.page));
+    assert!(default.page <= default.batch);
+    // Several blocks per request, which a full scan needs: one per request is
+    // about 1.9 million round trips on mainnet.
+    assert!(default.page > 1);
 }
 
 /// An unbounded page is a configuration error, not a startup loop against the
@@ -232,10 +207,10 @@ fn an_out_of_range_page_fails_the_pass_without_calling_the_node() {
     }
 }
 
-/// A page that cannot fit the adapter's response cap cannot be retried smaller:
-/// the daemon never shrinks a page, so the pass must fail closed on the first
-/// response, with an error that names both the cap and the page, and leave a
-/// durable `failed` state behind.
+/// A page that cannot fit the adapter's response cap is retried at half the
+/// size, and a one-block page that still cannot fit is final: the pass must
+/// fail closed, with an error that names both the cap and the page, and leave a
+/// durable `failed` state behind. It must not loop.
 #[test]
 fn an_oversized_page_is_a_bounded_terminal_error_rather_than_a_loop() {
     use ergo_wallet_service::{
@@ -258,14 +233,13 @@ fn an_oversized_page_is_a_bounded_terminal_error_rather_than_a_loop() {
 
         fn blocks_since(
             &self,
-            _request: ergo_wallet_service::BlocksSinceRequest,
+            request: ergo_wallet_service::BlocksSinceRequest,
         ) -> Result<BlocksSinceResponse, ChainClientError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Err(ChainClientError::Protocol(
-                "a 2-block page does not fit the 8388608-byte response cap; the daemon does not \
-                 retry with a smaller page, so a single block larger than the cap is terminal"
-                    .to_string(),
-            ))
+            Err(ChainClientError::PageTooLarge {
+                blocks: request.limit,
+                limit: 8_388_608,
+            })
         }
 
         fn lookup_utxo(
@@ -291,12 +265,17 @@ fn an_oversized_page_is_a_bounded_terminal_error_rather_than_a_loop() {
     assert!(matches!(error, SyncError::Protocol(_)), "{error}");
     assert!(
         !error.retryable(),
-        "a page over the cap is terminal: no retry can make it smaller"
+        "a one-block page over the cap is terminal: no retry can make it smaller"
+    );
+    let text = error.to_string();
+    assert!(
+        text.contains("8388608") && text.contains("1-block page"),
+        "the error names the cap and the page: {text}"
     );
     assert_eq!(
         chain.calls.load(Ordering::SeqCst),
-        1,
-        "exactly one request, then the pass gives up"
+        2,
+        "the two-block page, then the one-block page, then the pass gives up"
     );
     assert!(matches!(
         syncer
@@ -869,4 +848,233 @@ fn a_caught_up_pass_writes_no_running_state() {
         matches!(read.rescan_state().unwrap(), RescanState::Idle),
         "an idle pass still ends on `idle`, so a stale `running` cannot stick"
     );
+}
+
+// ----- adaptive pages -----
+
+/// A node whose `blocks-since` bodies are capped, the way the real adapter's
+/// are. The size is the wire form's: hex for the transaction and again for
+/// each of its boxes, plus per-item JSON overhead.
+struct CappedChain {
+    inner: Arc<crate::sim_chain::SimChain>,
+    cap: usize,
+    rejected: std::sync::Mutex<Vec<u32>>,
+    largest_served: std::sync::atomic::AtomicUsize,
+}
+
+impl CappedChain {
+    fn new(inner: Arc<crate::sim_chain::SimChain>, cap: usize) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            cap,
+            rejected: std::sync::Mutex::new(Vec::new()),
+            largest_served: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn wire_bytes(blocks: &[ergo_wallet_service::ChainBlock]) -> usize {
+        blocks
+            .iter()
+            .map(|block| {
+                512 + block
+                    .transactions
+                    .iter()
+                    .map(|tx| {
+                        160 + 2 * tx.bytes.as_ref().map_or(0, Vec::len)
+                            + tx.outputs
+                                .iter()
+                                .map(|output| 160 + 2 * output.bytes.len())
+                                .sum::<usize>()
+                    })
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+}
+
+impl ChainClient for CappedChain {
+    fn committed_tip(&self) -> Result<CommittedTip, ergo_wallet_service::ChainClientError> {
+        self.inner.committed_tip()
+    }
+
+    fn snapshot(
+        &self,
+    ) -> Result<ergo_wallet_service::ChainSnapshot, ergo_wallet_service::ChainClientError> {
+        self.inner.snapshot()
+    }
+
+    fn blocks_since(
+        &self,
+        request: ergo_wallet_service::BlocksSinceRequest,
+    ) -> Result<BlocksSinceResponse, ergo_wallet_service::ChainClientError> {
+        let limit = request.limit;
+        let response = self.inner.blocks_since(request)?;
+        if let BlocksSinceResponse::Forward(forward) = &response {
+            let bytes = Self::wire_bytes(&forward.blocks);
+            if bytes > self.cap {
+                self.rejected.lock().unwrap().push(limit);
+                return Err(ergo_wallet_service::ChainClientError::PageTooLarge {
+                    blocks: limit,
+                    limit: self.cap,
+                });
+            }
+            self.largest_served
+                .fetch_max(bytes, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(response)
+    }
+
+    fn lookup_utxo(
+        &self,
+        box_id: [u8; 32],
+        expected_tip: CommittedTip,
+    ) -> Result<ergo_wallet_service::UtxoLookup, ergo_wallet_service::ChainClientError> {
+        self.inner.lookup_utxo(box_id, expected_tip)
+    }
+
+    fn submit(
+        &self,
+        request: ergo_wallet_service::SubmitRequest,
+    ) -> Result<ergo_wallet_service::SubmitResponse, ergo_wallet_service::ChainClientError> {
+        self.inner.submit(request)
+    }
+}
+
+fn stranger_tree() -> Vec<u8> {
+    crate::sim_chain::p2pk(&[2; 33].map(|byte| byte))
+}
+
+fn payments(count: usize) -> crate::sim_chain::TxSpec {
+    crate::sim_chain::TxSpec {
+        inputs: Vec::new(),
+        outputs: (0..count).map(|_| (stranger_tree(), 1)).collect(),
+    }
+}
+
+fn capped_syncer(
+    chain: Arc<CappedChain>,
+    store: Arc<RedbWalletStore>,
+    page: u32,
+) -> StandaloneSyncer {
+    let cap = chain.cap;
+    let dyn_chain: Arc<dyn ChainClient> = chain;
+    StandaloneSyncer::new(
+        Arc::new(WalletService::new(store, dyn_chain.clone())),
+        config(1024, page),
+        Arc::new(CachedNodeTip::new(dyn_chain)),
+    )
+    .with_response_cap(cap)
+}
+
+#[test]
+fn adaptive_pages_grow_on_small_blocks_and_never_serve_past_the_cap() {
+    const CAP: usize = 1024 * 1024;
+    let sim = crate::sim_chain::SimChain::new();
+    for _ in 0..100 {
+        sim.push_block(vec![payments(1)]);
+    }
+    for _ in 0..20 {
+        sim.push_block(vec![payments(300)]);
+    }
+    for _ in 0..100 {
+        sim.push_block(vec![payments(1)]);
+    }
+    let chain = CappedChain::new(sim.clone(), CAP);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
+    let syncer = capped_syncer(chain.clone(), store.clone(), 128);
+
+    let report = syncer.sync_once().unwrap();
+    assert!(report.completed, "{report:?}");
+    assert_eq!(report.wallet_height, 220);
+    assert_eq!(
+        store.read().unwrap().scan_cursor().unwrap().unwrap().height,
+        220
+    );
+
+    // Light blocks went in big pages, not one at a time.
+    let requests = sim.blocks_since_log.lock().unwrap().clone();
+    assert!(
+        requests.len() < 60,
+        "{} requests for 220 blocks: {requests:?}",
+        requests.len()
+    );
+    assert!(
+        requests.iter().any(|(_, limit)| *limit > 16),
+        "the page never grew: {requests:?}"
+    );
+    // Nothing the node served went over the cap, and the daemon found pages
+    // that fit after a bounded number of rejections, not one per heavy block.
+    // It cannot see the heavy run coming, so growing back toward it can be
+    // refused again before the daemon has seen a heavy block.
+    assert!(
+        chain
+            .largest_served
+            .load(std::sync::atomic::Ordering::SeqCst)
+            <= CAP
+    );
+    let rejected = chain.rejected.lock().unwrap().clone();
+    assert!(
+        !rejected.is_empty() && rejected.len() <= 8,
+        "rejections: {rejected:?}"
+    );
+    // Inside the heavy run the daemon asks for one block at a time, having
+    // seen what those blocks cost.
+    assert!(
+        requests
+            .iter()
+            .filter(|(cursor, _)| (104..120).contains(cursor))
+            .all(|(_, limit)| *limit == 1),
+        "{requests:?}"
+    );
+}
+
+#[test]
+fn a_page_ceiling_of_one_keeps_the_fixed_one_block_page() {
+    let sim = crate::sim_chain::SimChain::new();
+    sim.push_empty(6);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
+    let syncer = build_syncer_with(sim.clone(), store, 16, 1);
+    syncer.sync_once().unwrap();
+    assert!(sim
+        .blocks_since_log
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(_, limit)| *limit == 1));
+}
+
+#[test]
+fn a_block_over_the_cap_even_alone_is_a_named_terminal_error() {
+    const CAP: usize = 64 * 1024;
+    let sim = crate::sim_chain::SimChain::new();
+    sim.push_block(vec![payments(900)]);
+    let chain = CappedChain::new(sim, CAP);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
+    let syncer = capped_syncer(chain.clone(), store, 128);
+    let error = syncer.sync_once().unwrap_err();
+    assert!(matches!(error, SyncError::Protocol(_)), "{error}");
+    assert!(!error.retryable());
+    let text = error.to_string();
+    assert!(
+        text.contains(&CAP.to_string()) && text.contains("1-block page"),
+        "{text}"
+    );
+    assert_eq!(
+        chain.rejected.lock().unwrap().clone(),
+        vec![2, 1],
+        "it halves until a single block is the whole page, then stops"
+    );
+    assert!(matches!(
+        syncer
+            .service()
+            .store()
+            .read()
+            .unwrap()
+            .rescan_state()
+            .unwrap(),
+        RescanState::Failed { .. }
+    ));
 }
