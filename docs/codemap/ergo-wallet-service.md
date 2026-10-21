@@ -37,6 +37,10 @@ transitional `ergo-state -> ergo-wallet-service` integration
   lock-state projection.
 - `src/runtime.rs:74` — `WalletService`/`WalletRuntime`, status and balance
   reads, bounded sync, and rescan orchestration over a `ChainClient`.
+- `src/address_index.rs` — restore and key backfill from the node's address
+  index: `WalletService::backfill_from_index` applies the blocks the index names
+  (checked against the chain) into a caller-owned write transaction;
+  `indexed_key_usage` backs gap-limit key discovery.
 - `src/chain.rs:312` — object-safe `ChainClient` plus neutral tip, snapshot,
   block-range, UTXO, and submit shapes used by the runtime.
 - `src/wallet/store.rs:170` — `WalletStore`/`WalletRead`/`WalletWrite` and the

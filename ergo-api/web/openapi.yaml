@@ -2349,6 +2349,14 @@ components:
           type: string
           description: Derivation path for a new secret to derive
           example: 'm/1/2'
+        fresh:
+          type: boolean
+          default: false
+          description: >-
+            Wallet daemon only (`ergo-walletd`). States that the key has never been used on chain,
+            so it is tracked from the current tip with no rescan. When absent the daemon checks the
+            node's address index (a key it has never seen is added with no rescan; a key with history
+            is backfilled from the index) and otherwise rescans from genesis. Never assumed.
 
     DeriveKeyResult:
       type: object
@@ -5031,6 +5039,15 @@ paths:
                   type: integer
                   format: int32
                   minimum: 0
+                noActivityBefore:
+                  type: boolean
+                  default: false
+                  description: >-
+                    Wallet daemon only (`ergo-walletd`). With fromHeight above 0 on a wallet whose scan is
+                    invalidated, states that the wallet had no activity before fromHeight: the stored history
+                    is cleared, block following restarts there, and wallet status records that history up to
+                    fromHeight is not reconstructed. Without it an invalidated scan refuses a partial rescan.
+                    Refused on a valid scan, with fromHeight 0, and on a wallet with registered scans.
       responses:
         '200':
           description: Wallet rescanned
@@ -5129,6 +5146,17 @@ paths:
       operationId: walletDeriveNextKey
       tags:
         - wallet
+      parameters:
+        - name: fresh
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: >-
+            Wallet daemon only (`ergo-walletd`). States that the new key has never been used on
+            chain, so it is tracked from the current tip with no rescan; see `fresh` on
+            `POST /wallet/deriveKey`.
       responses:
         '200':
           description: Resulted secret path and address

@@ -53,7 +53,8 @@ as described above.
 - `src/sync.rs:106` — `StandaloneSyncer` / `sync_once`: the forward/reorg/pruned
   state machine that drives the wallet cursor. `batch` is the per-pass **apply**
   budget and `page` is the per-request **page** budget; see "Two sync budgets".
-- `src/chain_http.rs:55` — `HttpChainClient`: the node HTTP adapter and its
+- `src/chain_http.rs:55` — `HttpChainClient`: the node HTTP adapter (including the
+  `/blockchain/*` address-index reads behind restore and key backfill) and its
   response neutralisation/validation, the 16 MiB body cap, and the
   `new_in_runtime` / `with_timeouts_in_runtime` constructors for async callers.
 - `src/api.rs:32` — `ApiContext` and the read-only router.
@@ -226,35 +227,78 @@ exercises the production one.
 - **`batch` (`sync_batch`)** — the maximum number of blocks *applied* by one
   `sync_once`. It is the pass's work budget and bounds how much the wallet
   database can change before the loop returns.
-- **`page` (`blocks_page`, default `DEFAULT_BLOCKS_PER_PAGE` = 1)** — the maximum
-  number of blocks asked for in a single `blocks-since` call. It is the
-  *request* budget, and it is what bounds one response body.
+- **`page` (`blocks_page`, default `DEFAULT_BLOCKS_PER_PAGE` = 128)** — the
+  *ceiling* on the number of blocks asked for in a single `blocks-since` call.
+  It is the *request* budget, and the page actually requested adapts below it.
 
-Every request is `min(remaining, page, batch - processed)`. A pass with
-`batch = 256` and `page = 1` reaches the tip through up to 256 requests.
+Every request is `min(remaining, page_now, batch - processed)`, where `page_now`
+is the syncer's adaptive page, never above `page`. A pass with `batch = 256`
+reaches the tip through as many requests as its pages take.
 
-The default of 1 is sized against `chain_http::MAX_RESPONSE_BODY_BYTES` (16 MiB),
-not picked for throughput. The chain protocol carries every transaction and
-every output box as hex strings, so a page's JSON body costs roughly four times
-the serialized bytes of the blocks in it, and consensus bounds one block's
-`BlockTransactions` section by the voted `maxBlockSize` parameter. Measured
-against the largest `maxBlockSize` this repo documents an operator voting for
-(2 MiB in `docs/configuration.md`), one maxed-out block is already 8 MiB of hex,
-so a page of `1` provably fits with about half the cap spare while a page of `2`
-reaches 16 MiB *before* any JSON envelope. Today's mainnet parameter is smaller, so the default is deliberately
-conservative; `blocks_page` remains configurable and raising it is a per-node
-decision. The earlier behaviour — sizing the request from the apply budget,
-`min(batch, remaining)` — could ask for up to 1024 blocks and hit the cap on any
-real chain, which is a permanent sync failure, not a slow one.
+The ceiling is sized against `chain_http::MAX_RESPONSE_BODY_BYTES` (16 MiB) by
+the adaptation, not by the constant. The chain protocol carries every
+transaction and every output box as hex strings, so a page's JSON body costs
+roughly four times the serialized bytes of the blocks in it, and consensus
+bounds one block's `BlockTransactions` section by the voted `maxBlockSize`
+parameter. Against the largest `maxBlockSize` this repo documents an operator
+voting for (2 MiB in `docs/configuration.md`) one maxed-out block is already
+8 MiB of hex, so a page of `1` is the only page whose worst legal body provably
+fits, but real blocks are far smaller and a fixed page of `1` costs about 1.9
+million round trips for a full mainnet scan. So the page starts at 16
+(`INITIAL_PAGE`), is resized after every served page from its largest block
+(`note_page`: toward a quarter of the cap, at most doubling), and is halved and
+retried when a response is refused for size (`blocks_since_adaptive`). Sizing the
+request from the apply budget, `min(batch, remaining)`, could ask for up to 1024
+blocks regardless, which is a permanent sync failure on a real chain.
 
-A block too large even for a one-block page is not retried smaller: the daemon
-never shrinks a page, so `chain_http::read_page` reports it once as a terminal
-error naming both the cap and the page size, and `map_chain_error` keeps it out
-of the retry path. `tests/it/node_api.rs` drives that against the real node API
-with ~1.5 MiB blocks, in both directions: bounded page ⇒ completed pass,
-unbounded page ⇒ one request and the named bounded error.
-`tests/it/sync.rs` pins the worst-case arithmetic above against the real cap
-constant.
+A response over the cap is `ChainClientError::PageTooLarge { blocks, limit }`
+(`chain_http::read_page`). The sync loop answers it by halving; a one-block page
+that is still too large cannot be fetched at all, so `map_chain_error` turns it
+into one terminal protocol error naming the cap and the page size.
+`tests/it/node_api.rs` drives the adaptation against the real node API with
+~1.5 MiB blocks, and `tests/it/sync.rs` pins the sizing and the terminal case
+against a simulated chain with a response cap.
+
+## Where the wallet starts
+
+How much of the chain the wallet reads depends on what it can prove about its
+keys.
+
+- **Nothing tracked, nothing to do.** `StandaloneSyncer::has_tracking` is true
+  when a key is tracked or a `/scan/*` rule is registered, which are the
+  matcher's only inputs (watch-only descriptor keys are tracked keys too). A
+  pass is skipped otherwise, in the host and in the descriptor-mode loop, and no
+  cursor is created.
+- **`init` starts at the tip.** A mnemonic the engine just generated cannot have
+  history. `WalletEngine::init` puts the cursor on the node's committed tip and
+  records a fresh-wallet anchor (`WALLET_FRESH_ANCHOR`) in the same transaction;
+  the first unlock tracks its first two keys under that anchor without the usual
+  history reset, then clears it. Every command, sync passes included, takes the
+  host's writer gate first, so no pass is in flight while the cursor moves. If the
+  node cannot be reached, `init` still succeeds and the wallet replays as before.
+- **`restore` uses the node's address index when it has one.** The first unlock
+  of a wallet `init` did not create walks the EIP-3 external addresses in windows
+  of 20 through `ChainClient::addresses_used`, stopping 20 addresses past the last
+  used one, and tracks every key up to it. The sync pass that then rebuilds from
+  genesis asks `ChainClient::address_history` for the blocks that touched those
+  keys (both the P2PK script and the mining-reward script) and applies only
+  those, through the same classification as a full scan, then follows blocks
+  from 16 blocks below the shorter of the index height and the tip. Each named
+  block is fetched from the chain and must carry the index's block id and
+  transaction, or the index is ignored and the wallet scans. A node without the
+  index, an index that is not caught up, registered scans, or any disagreement
+  all fall back to the full scan. See `ergo-wallet-service/src/address_index.rs`.
+- **A key added later** is not assumed fresh. The engine asks the index: never
+  seen, it is added with no rescan; seen, its history is backfilled from the
+  named blocks in the same transaction that adds it; otherwise (no index, or the
+  index cannot be trusted) the old safe default stands and the scan is
+  invalidated. A caller can say `"fresh": true` on `deriveKey` / `deriveNextKey`
+  (`?fresh=true`) to add the key with no rescan on its own word.
+- **A declared start.** `POST /wallet/rescan` with `fromHeight > 0` and
+  `"noActivityBefore": true` restarts an *invalidated* scan at that height: the
+  stored history is cleared, the cursor goes to the block before it, and the same
+  incomplete-history record offline discovery writes (`history_complete: false`,
+  anchor = that block) says history below it was not reconstructed.
 
 ## What the daemon verifies
 
@@ -343,10 +387,11 @@ and `WALLET_SCAN_TXS`.
 | File | What it pins |
 |---|---|
 | `tests/it/http_client.rs` | `HttpChainClient` wire parsing and status→error mapping against a one-shot TCP responder (the `api_key` header, `410` pruning, `404`, canonical box/tip identity). |
-| `tests/it/node_api.rs` | The **real** node chain API in-process: a seeded `ergo-state` `StateStore`, the real `ergo-node` `InProcessChainClient` + `WalletChainAdapter`, the real `ergo-api` `/api/v1/chain/*` router with its real `ApiSecurity` gate, driven by the real daemon client and `StandaloneSyncer` over real HTTP. Covers tip, forward/bounded/empty `blocks-since`, the genesis-cursor wire contract, the `api_key` gate (present/wrong/absent), a daemon restart against an existing database, and a real `rollback_to` + re-apply reorg the daemon rewinds and follows. Also the **paging contract on realistic blocks**: ~1.5 MiB blocks of real ErgoBoxes where a three-block page cannot fit the 8 MiB cap, so the default one-block page completes the pass and an unbounded page fails closed on the first response. |
+| `tests/it/node_api.rs` | The **real** node chain API in-process: a seeded `ergo-state` `StateStore`, the real `ergo-node` `InProcessChainClient` + `WalletChainAdapter`, the real `ergo-api` `/api/v1/chain/*` router with its real `ApiSecurity` gate, driven by the real daemon client and `StandaloneSyncer` over real HTTP. Covers tip, forward/bounded/empty `blocks-since`, the genesis-cursor wire contract, the `api_key` gate (present/wrong/absent), a daemon restart against an existing database, and a real `rollback_to` + re-apply reorg the daemon rewinds and follows. Also the **paging contract on realistic blocks**: ~1.5 MiB blocks of real ErgoBoxes where a three-block page cannot fit the 8 MiB cap, so the adaptive page is refused once for size, halves, and completes the pass, and a ceiling of one block keeps the fixed one-block page. |
 | `tests/it/daemon_boot.rs` | The full production startup shape — config + 0600 api-key file + descriptor file, `prepare` on a non-runtime thread, runtime + `run_until` on another — then the read API over the real Unix socket, the sync loop reaching the real node tip, the `0400`/`0600` socket mode, the empty `/scans`, the `404` write routes, and the socket-guard cleanup on shutdown. Plus the api-key permission gate and `Debug` redaction. |
 | `tests/it/seed_daemon_boot.rs` | Config → real seed TCP API → authenticated real-node sync; distinct node/local credentials, locked restart with persisted addresses, mode ownership, and refusal of implicit watch/seed migration. |
 | `tests/it/lifecycle.rs` | Real hosted engine through seed routes: authentication before parsing, native errors, secret response policy, lifecycle/key persistence, wrong-password budget, and unchanged default watch routes. |
+| `tests/it/index_restore.rs` (with `tests/it/sim_chain.rs`) | Where the wallet starts, on a simulated chain with a real address index computed from the same blocks: `init` at the tip and no block request below it, a keyless daemon making no request, restore from the index equal to a plain block scan (balances, boxes, transaction history, tracked keys, change address), an index that lags or disagrees or a registered scan falling back to the scan, a derived key never seen / with history (backfilled, equal to a scan) / with an unusable index (invalidates) / declared fresh (no rescan), and the declared start. |
 | `src/host.rs` unit tests | Locked boot/restart, atomic first-key replay reset, no-key sync pause, shared command/sync writer, bounded admission, shutdown queue rejection and panic key erasure. |
 | `src/engine_chain.rs`, `src/ownership.rs` unit tests | Local lifecycle during node outage, bounded tip capability, unsupported signing/replay, mode markers and seed directory permissions. |
 | `src/supervision_tests.rs` | A seed terminal failure stays parked until a key reset permits replay; idle Unix keep-alive connections close on shutdown and release redb for immediate reopen. The real seed TCP boot test also holds pooled connections across shutdown before restarting. |
