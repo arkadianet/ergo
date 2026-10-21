@@ -8,12 +8,20 @@
 //! `ORACLE_TREE_VERSION=3`, `ORACLE_NETWORK=testnet`).
 //!
 //! Gate:
-//! - oracle `OK <hex>` → our `ContractTemplate::serialize()` MUST be
-//!   byte-identical to `<hex>` (the M7 deliverable) — for ≤4 params (declaration
-//!   order) AND ≥5 params (Scala 2.12 `HashTrieMap` placeholder-iteration order);
+//! - oracle `OK <hex>` → our `ContractTemplate::serialize()` under
+//!   `PlaceholderOrder::Scala212` MUST be byte-identical to `<hex>` (the M7
+//!   deliverable) — for ≤4 params (declaration order) AND ≥5 params (Scala 2.12
+//!   `HashTrieMap` placeholder-iteration order);
+//! - the default `compile_contract` MUST equal it for ≤4 params, and differs for
+//!   the ≥5 hash-order vectors by design: there Scala's placeholders disagree with
+//!   the parameters' `constantIndex`, so its templates bind values to the wrong
+//!   constants (ergoplatform/sigmastate-interpreter#1205); the default numbers
+//!   them in declaration order;
 //! - oracle `REJECT …` → our `compile_contract` MUST also reject (class advisory).
 
-use ergo_compiler::{compile_contract, ApplyError, NetworkPrefix};
+use ergo_compiler::{
+    compile_contract, compile_contract_with_order, ApplyError, NetworkPrefix, PlaceholderOrder,
+};
 use serde_json::Value;
 
 const SEED: &str = include_str!("../../../test-vectors/ergoscript/contract/contract_seed.json");
@@ -31,6 +39,7 @@ fn contract_template_seed_byte_parity() {
 
     let mut byte_exact = 0usize;
     let mut byte_exact_ge5 = 0usize;
+    let mut diverging_ge5 = 0usize;
     let mut rejects = 0usize;
     let mut failures: Vec<String> = Vec::new();
 
@@ -38,12 +47,26 @@ fn contract_template_seed_byte_parity() {
         let name = v["name"].as_str().expect("name");
         let source = v["source"].as_str().expect("source");
         let oracle = v["oracle"].as_str().expect("oracle");
-        let result = compile_contract(source, tree_version, NetworkPrefix::Testnet);
+        let result = compile_contract_with_order(
+            source,
+            tree_version,
+            NetworkPrefix::Testnet,
+            PlaceholderOrder::Scala212,
+        );
+        let default = compile_contract(source, tree_version, NetworkPrefix::Testnet);
 
         if let Some(hex) = oracle.strip_prefix("OK ") {
             match result {
                 Ok(ct) => {
                     let ours = to_hex(&ct.serialize());
+                    let ours_default = to_hex(&default.expect("Scala212 compiled").serialize());
+                    if ct.parameters.len() <= 4 && ours_default != hex {
+                        failures.push(format!(
+                            "[{name}] default order differs from the oracle at <=4 params\n     ours: {ours_default}\n   oracle: {hex}"
+                        ));
+                    } else if ct.parameters.len() > 4 && ours_default != hex {
+                        diverging_ge5 += 1;
+                    }
                     if ours == hex {
                         byte_exact += 1;
                         if ct.parameters.len() > 4 {
@@ -60,9 +83,9 @@ fn contract_template_seed_byte_parity() {
                 )),
             }
         } else if oracle.starts_with("REJECT") {
-            match result {
-                Err(_) => rejects += 1,
-                Ok(_) => failures.push(format!(
+            match (result, default) {
+                (Err(_), Err(_)) => rejects += 1,
+                _ => failures.push(format!(
                     "[{name}] oracle REJECT ({oracle}) but compile_contract accepted"
                 )),
             }
@@ -87,6 +110,10 @@ fn contract_template_seed_byte_parity() {
         "the ≥5-param HashTrieMap-order path must be byte-exact (got {byte_exact_ge5})"
     );
     assert!(rejects >= 1, "a reject vector must be exercised");
+    assert!(
+        diverging_ge5 >= 3,
+        "the hash-order vectors must show the declaration-order divergence (got {diverging_ge5})"
+    );
 }
 
 // ----- template application (applyTemplate parity) -----
@@ -185,8 +212,14 @@ fn contract_template_apply_seed_byte_parity() {
         let tree_version = v["tree_version"].as_u64().unwrap() as u8;
         let args = parse_apply_args(v["args"].as_str().unwrap());
         let oracle = v["oracle"].as_str().unwrap();
-        let ct = compile_contract(source, compile_version, NetworkPrefix::Testnet)
-            .expect("template compiles");
+        // Scala's placeholder order, so the applied bytes compare with the JVM's.
+        let ct = compile_contract_with_order(
+            source,
+            compile_version,
+            NetworkPrefix::Testnet,
+            PlaceholderOrder::Scala212,
+        )
+        .expect("template compiles");
         let ours = ct.apply(tree_version, &args);
         match (oracle.strip_prefix("OK "), ours) {
             (Some(hex), Ok(tree)) => {

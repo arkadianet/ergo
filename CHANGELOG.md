@@ -16,6 +16,8 @@ infrastructure.
 
 ## [Unreleased]
 
+### Changed
+
 - **Wallet daemon sync (#665):** `ergo-walletd` no longer reads the whole chain to learn what it should already know.
   - A wallet created with `init` starts at the node's tip instead of block 1: a fresh mnemonic has no history. `restore` is unchanged in what it must find.
   - A daemon with nothing to match (no tracked key and no registered scan) idles instead of downloading blocks.
@@ -26,6 +28,10 @@ infrastructure.
   - The wallet reads `/api/v1/indexer/status` to check the index is complete; health it cannot read (a node key without access to that route, 404/503, an unparseable answer) counts as unusable and the wallet scans blocks instead. Give the wallet's node key read access to `/api/v1/indexer/status` to get the fast restore and key-add paths.
   - Known limitations: `deriveKey` backfill and first-unlock key discovery run under the wallet's command gate with no cancellation and bounded only by the node's HTTP timeouts (up to about 1024 block reads, or 50 address windows); a transient failure of first-unlock discovery is logged and not retried, so keys beyond the first two stay untracked until derived by hand; discovery covers account `m/44'/429'/0'/0/i` only and stops after 50 windows.
   - Internal: new `ChainClientError::PageTooLarge`, `ChainClient::address_history` / `addresses_used` (default: no index), and wallet store methods for fresh-wallet anchoring, keep-history key inserts, block backfill and declared starts.
+
+### Fixed
+
+- **Contract templates with five or more parameters bound values to the wrong constants.** `compile_contract` numbered the body's placeholders in Scala's hash-map order (to match Scala byte for byte) while each parameter's `constantIndex` follows declaration order, so `ContractTemplate::apply` put values where the body reads other parameters: the wrong keys or amounts when the swapped parameters share a type, a tree the deserializer rejects when they do not. Scala's `SigmaTemplateCompiler` has the same bug (reported as ergoplatform/sigmastate-interpreter#1205). Placeholders now follow declaration order at every parameter count, so templates of up to four parameters are unchanged and larger ones now differ from Scala's (wrong) bytes; `compile_contract_with_order(…, PlaceholderOrder::Scala212)` still reproduces Scala's bytes for comparison. Consensus is unaffected: no validation path compiles templates.
 - **Compiler header (ISSUE-669):** `compile()` and the `/script/p2sAddress` and `/api/v1/script/*` routes now write the ErgoTree header for the requested tree version, as the reference node does (`defaultHeaderWithVersion(treeVersion)`): `0x19` at version 1, `0x1b` at version 3 (`0x0b` for a bare constant). Scripts using v6 types such as `UnsignedBigInt` now compile at tree version 3. Tree version 0 output is unchanged. P2S addresses for tree versions 1–7 change; P2SH addresses do not. Tree version 8 or above is refused.
 
 ## [0.13.1] - 2026-10-19

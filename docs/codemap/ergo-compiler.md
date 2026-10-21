@@ -85,7 +85,7 @@ the native `/api/v1/script/*` surface)
   `ContractTemplate` `:68`, `ApplyError` `:100`).
 - `src/param_order.rs` — Scala 2.12 `HashTrieMap` iteration order for ≥5
   template params (`iteration_order_2_12` `:71`), matching the JVM's
-  placeholder numbering.
+  placeholder numbering; used only by `PlaceholderOrder::Scala212`.
 - `src/env.rs` — deterministic compile-time `ScriptEnv`/`EnvValue`
   (`BTreeMap`); `EnvValue::ProveDlog` is the wallet-key entry point.
 - `src/typecheck.rs` — public front-end (`typecheck` `:190`,
@@ -154,9 +154,14 @@ the native `/api/v1/script/*` surface)
   `line:col` (`tests/it/corpus_smoke.rs:111`).
 - **Contract-template parity.** `contract_template_seed_byte_parity` requires
   byte-identical `serialize()` (20 vectors) and `apply` parity (16 vectors);
-  placeholder indices follow the JVM's immutable-map iteration order —
-  declaration order for ≤4 params (`MAX_DECLARATION_ORDER_PARAMS = 4`,
-  `src/contract_template.rs:51`), Scala 2.12 `HashTrieMap` order above that.
+  under `PlaceholderOrder::Scala212` placeholder indices follow the JVM's
+  immutable-map iteration order — declaration order for ≤4 params
+  (`MAX_DECLARATION_ORDER_PARAMS = 4`), Scala 2.12 `HashTrieMap` order above
+  that. The default `compile_contract` uses declaration order at every count:
+  from 5 params Scala's order disagrees with the parameters' `constantIndex`
+  and its templates bind values to the wrong constants
+  (ergoplatform/sigmastate-interpreter#1205), so the ≥5 hash-order vectors are
+  a documented divergence the gate asserts.
 - **Reject, never emit wrong bytes, for unknown shapes.** `CreateAvlTree`
   (D-E1), `ZKProofBlock` (D-E2) and opaque-env `SigmaProp` (D-E3) reject with
   `EmitError::UnsupportedNode`; constructs the typer accepts but Scala's
