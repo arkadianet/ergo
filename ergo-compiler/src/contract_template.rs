@@ -197,7 +197,10 @@ pub fn compile_contract(
             }))
         }
     };
-    let root = graph_build(root)?;
+    // A template's `expressionTree` is headerless (`treeVersion = None`), so
+    // the shared pipeline runs with header version 0: the pre-v3 data gate
+    // stays on, exactly as before the compile route took versioned headers.
+    let root = graph_build(root, 0)?;
 
     // assemble (SigmaTemplateCompiler.scala:34-52). constTypes/constValues/
     // parameters all walk `parsed.signature.params` DIRECTLY, so they are

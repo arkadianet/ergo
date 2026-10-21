@@ -20,6 +20,17 @@
 //! `_source` note and excluded, per the task brief. No oracle field is ever
 //! hand-edited.
 //!
+//! **Header normalization (ISSUE-669).** The committed vectors were captured
+//! with a harness that attached `defaultHeaderWithVersion(0)` regardless of
+//! `ORACLE_TREE_VERSION`. Scala's node route writes
+//! `defaultHeaderWithVersion(treeVersion)` (`ScriptApiRoute.scala:58`;
+//! `ScriptApiRouteSpec` asserts `0x10` at v0 and `0x19` at v1), and so does
+//! `compile()`. The gate therefore re-expresses each captured v0-header tree in
+//! the route header for its `tree_version` before comparing bytes, P2S and
+//! reduction (`at_route_header`); the committed fields stay untouched and the
+//! committed P2S is still pinned against the captured bytes. The harness's
+//! header-induced REJECTs are SET-pinned in `V0_HEADER_HARNESS_REJECTS`.
+//!
 //! **The gate** ([`compile_seed_semantic_parity`], always-on, committed JSON
 //! only):
 //! - oracle REJECT → our `compile()` must also reject (class advisory only);
@@ -71,7 +82,7 @@ use std::path::{Path, PathBuf};
 use ergo_compiler::{compile, CompileResult, EnvValue, GroupElement, NetworkPrefix, ScriptEnv};
 use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
-use ergo_ser::address::encode_p2sh;
+use ergo_ser::address::{encode_p2s, encode_p2sh};
 use ergo_ser::ergo_tree::{read_ergo_tree, ErgoTree};
 use ergo_ser::opcode::{write_expr, Expr, IrNode, Payload};
 use ergo_ser::sigma_type::SigmaType;
@@ -138,6 +149,51 @@ const SEMANTIC_SKIP: &[(&str, &str)] = &[];
 // mechanism (not deleted) for the next partial-fold gap this class of
 // asymmetry can recur under.
 const ORACLE_BARE_FOLD_EXCLUSIONS: &[(&str, &str)] = &[];
+
+/// Committed SET of sources whose oracle `REJECT` is an artifact of the
+/// capture harness's header, not of Scala's compile route (ISSUE-669).
+///
+/// `compile_seed.json` was captured with `TyperOracle.scala` attaching
+/// `ErgoTree.defaultHeaderWithVersion(0)` at `ORACLE_TREE_VERSION = 3`. The
+/// node route writes `defaultHeaderWithVersion(treeVersion)`
+/// (`ScriptApiRoute.scala:58`; `ScriptApiRouteSpec` asserts header `0x10` at
+/// v0 and `0x19` at v1), and under a v3 header `CoreDataSerializer` writes
+/// UnsignedBigInt DATA, so these compile. Each entry must be an oracle
+/// `SerializerException` REJECT at `tree_version >= 3` that our compile()
+/// ACCEPTS with a v3 header; the set is gated exactly, and empties once the
+/// seed is recaptured with the corrected harness.
+const V0_HEADER_HARNESS_REJECTS: &[&str] = &[
+    r#"unsignedBigInt("5") == unsignedBigInt("3")"#,
+    r#"unsignedBigInt("5") > unsignedBigInt("3")"#,
+];
+
+/// Re-express an oracle tree captured under the harness's v0 header in the
+/// header the route writes for `tree_version` (`defaultHeaderWithVersion`:
+/// version bits, plus the size bit and VLQ body length for version > 0). The
+/// body bytes are header-independent. A tree that already carries a non-zero
+/// version (a recapture with the corrected harness) is returned unchanged.
+fn at_route_header(oracle_bytes: &[u8], tree_version: u8) -> Vec<u8> {
+    if tree_version == 0 || oracle_bytes[0] & 0x0f != 0 {
+        return oracle_bytes.to_vec();
+    }
+    let mut w = VlqWriter::new();
+    w.put_u8(oracle_bytes[0] | 0x08 | tree_version);
+    w.put_u32((oracle_bytes.len() - 1) as u32);
+    w.put_bytes(&oracle_bytes[1..]);
+    w.result()
+}
+
+/// Parse an (already route-headed) oracle tree. A versioned header needs an
+/// activated script version at least as high to parse rather than wrap as
+/// unparsed, so those read under activated 3 (the oracle's own
+/// `VersionContext.withVersions(3, 3)`); v0 trees keep the default reader.
+fn read_oracle_tree(bytes: &[u8]) -> Result<ErgoTree, String> {
+    let mut r = VlqReader::new(bytes);
+    if bytes[0] & 0x07 != 0 {
+        r = r.with_activated_script_version(3);
+    }
+    read_ergo_tree(&mut r).map_err(|e| format!("{e:?}"))
+}
 
 /// `(verb, source)` label for a vector, used as the key in the SET-based
 /// parity gates below (M4 Task 1, recon-gap.md Finding 5). Corpus-sourced
@@ -906,6 +962,8 @@ fn compile_seed_semantic_parity() {
         std::collections::BTreeSet::new();
     let mut fired_bare_exclusions: std::collections::BTreeSet<&str> =
         std::collections::BTreeSet::new();
+    let mut fired_harness_rejects: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
 
     for v in &vectors {
         let label = v
@@ -921,6 +979,20 @@ fn compile_seed_semantic_parity() {
         let env = env_for_verb(&v.verb);
         let result = compile(&env, &v.source, v.tree_version, network_of(v));
 
+        if v.oracle == "REJECT" && V0_HEADER_HARNESS_REJECTS.contains(&v.source.as_str()) {
+            fired_harness_rejects.insert(v.source.clone());
+            match &result {
+                Ok(r)
+                    if v.tree_version >= 3
+                        && v.reject_class.as_deref() == Some("SerializerException")
+                        && r.ergo_tree.version == v.tree_version => {}
+                other => divergences.push(format!(
+                    "{label}: listed in V0_HEADER_HARNESS_REJECTS but is not a v3-header \
+                     accept of a SerializerException oracle reject: {other:?}"
+                )),
+            }
+            continue;
+        }
         if v.oracle == "REJECT" {
             match result {
                 Ok(_) => divergences.push(format!(
@@ -951,13 +1023,17 @@ fn compile_seed_semantic_parity() {
             }
         };
         accept_total += 1;
-        let oracle_bytes = hex::decode(v.tree_hex.as_deref().expect("ACCEPT vector has tree_hex"))
-            .expect("tree_hex is hex");
-        let mut r = VlqReader::new(&oracle_bytes);
-        let oracle_tree = match read_ergo_tree(&mut r) {
+        let captured_bytes =
+            hex::decode(v.tree_hex.as_deref().expect("ACCEPT vector has tree_hex"))
+                .expect("tree_hex is hex");
+        // The harness attached a v0 header; compare against the header the
+        // route writes for this tree_version (see `at_route_header`).
+        let oracle_bytes = at_route_header(&captured_bytes, v.tree_version);
+        let restamped = oracle_bytes != captured_bytes;
+        let oracle_tree = match read_oracle_tree(&oracle_bytes) {
             Ok(t) => t,
             Err(e) => {
-                divergences.push(format!("{label}: oracle tree_hex does not parse: {e:?}"));
+                divergences.push(format!("{label}: oracle tree_hex does not parse: {e}"));
                 continue;
             }
         };
@@ -1004,10 +1080,21 @@ fn compile_seed_semantic_parity() {
 
         // Address-parity gate (finding H-2: every vector records both
         // addresses but the gate never compared either).
-        let oracle_p2s = v
+        let committed_p2s = v
             .p2s_address
             .as_deref()
             .expect("ACCEPT vector has p2s_address");
+        // P2S embeds the full tree bytes, header included: the committed
+        // address is over the harness's v0-header bytes, so pin it against
+        // those and compare ours against the route-headed equivalent.
+        if encode_p2s(network_of(v), &captured_bytes) != committed_p2s {
+            divergences.push(format!(
+                "{label}: encode_p2s over the captured oracle bytes does not reproduce \
+                 the committed p2s_address"
+            ));
+        }
+        let route_p2s = encode_p2s(network_of(v), &oracle_bytes);
+        let oracle_p2s: &str = if restamped { &route_p2s } else { committed_p2s };
         let oracle_p2sh = v
             .p2sh_address
             .as_deref()
@@ -1069,9 +1156,9 @@ fn compile_seed_semantic_parity() {
                 hex::encode(&oracle_prop)
             );
         }
-        // P2S: byte-equal trees (the bare-const class gated above) must agree;
-        // everything else diverges by construction — Scala segregates every
-        // non-bare root (header 0x10) while we emit header 0x00 (D-C1).
+        // P2S: byte-equal trees must agree, and any P2S agreement implies
+        // byte-equal trees (P2S embeds the tree bytes verbatim). Both sides
+        // carry the route header for `tree_version` here.
         if ours.p2s_address == oracle_p2s {
             p2s_match += 1;
             if ours.tree_bytes != oracle_bytes {
@@ -1166,6 +1253,14 @@ fn compile_seed_semantic_parity() {
     assert!(bare_total >= 1, "no bare-const SigmaProp vector swept");
     // Every listed bare-fold exclusion must fire — a stale entry would widen
     // the H-3 gate's blind spot without anyone noticing.
+    let expected_harness: std::collections::BTreeSet<String> = V0_HEADER_HARNESS_REJECTS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        fired_harness_rejects, expected_harness,
+        "V0_HEADER_HARNESS_REJECTS must match the swept vectors exactly"
+    );
     for (src, _) in ORACLE_BARE_FOLD_EXCLUSIONS {
         assert!(
             fired_bare_exclusions.contains(src),
@@ -1214,8 +1309,10 @@ fn compile_seed_semantic_parity() {
         // D-C6 wave-2 fold-boundary controls: dynamic-index `getReg[T](HEIGHT)`
         // and non-folded v6 numeric MethodCalls (`HEIGHT.toBytes`, `n1.toBytes`,
         // `x.shiftLeft(1)`) — BOTH compilers keep the residual MethodCall
-        // (oracle bodies byte-match ours) and the v0 wire header makes the v6
-        // wire pair unevaluable on BOTH sides. Genuine parity, not masking.
+        // (oracle bodies byte-match ours). Under the harness's v0 header the
+        // v6 pair was unevaluable on BOTH sides; with both trees now under the
+        // route's v3 header (ISSUE-669) they reduce, so this pair is kept
+        // only for a v0-header vector that may reintroduce it.
         ("PreV3V6Method", "PreV3V6Method"),
         // Wave-4 Negation-disposition probe (`-(0 + 2147483647) - 2`):
         // NEITHER compiler folds the Negation node (lib.rs D-C5 fold note;
@@ -1254,9 +1351,9 @@ fn inline_placeholders_reproduces_our_proposition_for_shape_identical_vectors() 
             .iter()
             .find(|v| v.source == src && v.oracle == "ACCEPT")
             .unwrap_or_else(|| panic!("vector {src:?} missing from compile_seed.json"));
-        let oracle_bytes = hex::decode(v.tree_hex.as_deref().expect("tree_hex")).expect("hex");
-        let mut r = VlqReader::new(&oracle_bytes);
-        let oracle_tree = read_ergo_tree(&mut r).expect("oracle tree parses");
+        let captured = hex::decode(v.tree_hex.as_deref().expect("tree_hex")).expect("hex");
+        let oracle_bytes = at_route_header(&captured, v.tree_version);
+        let oracle_tree = read_oracle_tree(&oracle_bytes).expect("oracle tree parses");
         assert!(
             oracle_tree.constant_segregation,
             "{src}: oracle tree is segregated"

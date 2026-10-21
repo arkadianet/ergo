@@ -16,6 +16,8 @@ infrastructure.
 
 ## [Unreleased]
 
+- **Compiler header (ISSUE-669):** `compile()` and the `/script/p2sAddress` and `/api/v1/script/*` routes now write the ErgoTree header for the requested tree version, as the reference node does (`defaultHeaderWithVersion(treeVersion)`): `0x19` at version 1, `0x1b` at version 3 (`0x0b` for a bare constant). Scripts using v6 types such as `UnsignedBigInt` now compile at tree version 3. Tree version 0 output is unchanged. P2S addresses for tree versions 1–7 change; P2SH addresses do not. Tree version 8 or above is refused.
+
 ## [0.13.1] - 2026-10-19
 
 A fix release for 0.13.0: the move to the wallet daemon, chained transactions in the mempool, and a TLS dependency update. Not a consensus change. Upgrading changes no data: stop the node and `ergo-walletd`, replace the binaries and start them again.
