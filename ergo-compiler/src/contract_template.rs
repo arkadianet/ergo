@@ -6,26 +6,33 @@
 //! (`crate::tree::graph_build`) with one `ConstantPlaceholder(index, tpe)`
 //! seeded per param → a [`ContractTemplate`] metadata record.
 //!
-//! ## Placeholder-index assignment — map iteration order
-//! Scala builds `parEnv = params.map(p => p.name -> p.tpe).toMap`
-//! (SigmaTemplateCompiler.scala:28) then, in `compileTyped`,
-//! `placeholdersEnv = env.collect{…}.zipWithIndex.map{ (name,t),i =>
-//! name -> ConstantPlaceholder(i, t) }.toMap` (SigmaCompiler.scala:88-92). The
-//! placeholder index each param receives is thus its position in the immutable
-//! `Map`'s ITERATION order, which is serialized into the `expressionTree` bytes.
+//! ## Placeholder-index assignment — declaration order (a deliberate deviation)
+//! `constTypes`/`constValues`/`parameters` (and each `Parameter.constantIndex`)
+//! walk `parsed.signature.params` in declaration order, as Scala's `assemble`
+//! does, and [`ContractTemplate::apply`] fills constant `i` from the parameter
+//! whose `constantIndex` is `i`. [`compile_contract`] numbers the body's
+//! `ConstantPlaceholder`s in that same declaration order, so every parameter's
+//! value lands where the body reads it.
 //!
-//! For **≤4** entries Scala's immutable `Map` is a `Map1..Map4` that preserves
-//! INSERTION order, so `index = declaration position` — byte-exact against
-//! declaration order. For **≥5** params the `.toMap` upgrades to a
-//! JVM `HashMap` whose iteration order is `improve(String.hashCode)` bucket
-//! order, NOT declaration order — reproduced here via
-//! `crate::param_order::iteration_order_2_12` (Scala 2.12 `HashTrieMap` walk,
-//! the version the `ct` oracle and ergo-appkit pin).
+//! Scala does not, for **≥5** params. It builds
+//! `parEnv = params.map(p => p.name -> p.tpe).toMap`
+//! (SigmaTemplateCompiler.scala:28) and, in `compileTyped`, numbers placeholders
+//! by that `Map`'s ITERATION order (`env.collect{…}.zipWithIndex`,
+//! SigmaCompiler.scala:88-92). For ≤4 entries the `Map1..Map4` keep insertion
+//! order, so the indices agree; from 5 entries `.toMap` is a hash map iterated in
+//! `improve(String.hashCode)` bucket order, so the body reads other parameters'
+//! constants: a valid tree with swapped values when the swapped params share a
+//! type, a tree the deserializer rejects when they do not. Reported upstream as
+//! ergoplatform/sigmastate-interpreter#1205 (reproduced on sigma-state 6.0.5,
+//! Scala 2.12 and 2.13; unchanged through 6.0.7). The hash order is also
+//! Scala-version dependent (`crate::param_order` documents 2.12 and 2.13).
 //!
-//! CRUCIAL: `constTypes`/`constValues`/`parameters` (and each
-//! `Parameter.constantIndex`) walk `parsed.signature.params` DIRECTLY, so they
-//! stay declaration-ordered regardless (mirror `assemble`). ONLY the body's
-//! `ConstantPlaceholder` substitution follows the map order.
+//! Scala's exact bytes remain available as
+//! [`PlaceholderOrder::Scala212`] through [`compile_contract_with_order`]: the
+//! Scala 2.12 `HashTrieMap` walk (`crate::param_order::iteration_order_2_12`,
+//! the version the `ct` oracle and ergo-appkit pin), for comparing with
+//! Scala-produced templates and the JVM-oracle parity gate. For ≤4 params both
+//! orders are identical.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -45,10 +52,28 @@ use crate::typecheck::{typecheck_contract_body, CompileError};
 use crate::typed::{node_tpe, ConstPayload};
 
 /// Scala's `Map1..Map4` preserve insertion order; `.toMap` upgrades to a
-/// hash map ABOVE this many entries. At or below it, placeholder
-/// index assignment is declaration order; above it, Scala 2.12 `HashTrieMap`
-/// iteration order (`crate::param_order::iteration_order_2_12`).
+/// hash map ABOVE this many entries. At or below it, Scala's placeholder
+/// index assignment is declaration order; above it, under
+/// [`PlaceholderOrder::Scala212`], Scala 2.12 `HashTrieMap` iteration order
+/// (`crate::param_order::iteration_order_2_12`).
 pub const MAX_DECLARATION_ORDER_PARAMS: usize = 4;
+
+/// How [`compile_contract_with_order`] numbers the body's `ConstantPlaceholder`s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlaceholderOrder {
+    /// Declaration order, matching each parameter's `constantIndex`: the
+    /// template applies correctly at any parameter count. [`compile_contract`]
+    /// uses this.
+    #[default]
+    Declaration,
+    /// Scala sigma-state's order, byte-exact with `SigmaTemplateCompiler`
+    /// (Scala 2.12): declaration order up to 4 params, `HashTrieMap` iteration
+    /// order from 5. With 5+ params the applied tree binds values to the wrong
+    /// constants (ergoplatform/sigmastate-interpreter#1205). For comparing with
+    /// Scala-produced templates only; never deploy a 5+ parameter template
+    /// compiled this way.
+    Scala212,
+}
 
 /// A contract-template parameter record (`org.ergoplatform.sdk.Parameter`,
 /// ContractTemplate.scala:22-32).
@@ -136,11 +161,25 @@ pub enum ApplyError {
 }
 
 /// Compile an ErgoScript contract-template source into a [`ContractTemplate`].
-/// Mirrors `SigmaTemplateCompiler(networkPrefix).compile(source)`.
+/// Mirrors `SigmaTemplateCompiler(networkPrefix).compile(source)`, byte-exact up to
+/// 4 params; from 5 params the body's placeholders follow declaration order,
+/// where Scala's hash order binds values to the wrong constants (see the module
+/// docs; [`PlaceholderOrder::Scala212`] reproduces Scala's bytes).
 pub fn compile_contract(
     source: &str,
     tree_version: u8,
     network: NetworkPrefix,
+) -> Result<ContractTemplate, ContractError> {
+    compile_contract_with_order(source, tree_version, network, PlaceholderOrder::Declaration)
+}
+
+/// [`compile_contract`] with an explicit placeholder numbering. Every other byte
+/// of the template is the same under either order.
+pub fn compile_contract_with_order(
+    source: &str,
+    tree_version: u8,
+    network: NetworkPrefix,
+    order: PlaceholderOrder,
 ) -> Result<ContractTemplate, ContractError> {
     let parsed = parse_contract(source, tree_version).map_err(CompileError::Parse)?;
     let params = &parsed.signature.params;
@@ -154,28 +193,30 @@ pub fn compile_contract(
     // typecheck(env, body) with the param TYPE env (SigmaCompiler.scala:74-78).
     let typed = typecheck_contract_body(&parsed.body, &type_params, tree_version, network)?;
 
-    // placeholdersEnv: name -> ConstantPlaceholder(index) at the param's position
-    // in the immutable `Map`'s ITERATION order (SigmaCompiler.scala:88-92). For
-    // ≤4 params `Map1..Map4` preserve insertion order (index = declaration
-    // position); for ≥5 the `.toMap` hash map iterates in Scala 2.12
-    // `HashTrieMap` order. Only this substitution follows the map order —
-    // `constTypes`/`parameters` below stay declaration-ordered.
-    let placeholders: HashMap<String, u32> = if params.len() <= MAX_DECLARATION_ORDER_PARAMS {
-        params
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.name.clone(), i as u32))
-            .collect()
-    } else {
-        let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
-        crate::param_order::iteration_order_2_12(&names)
-            .into_iter()
-            .enumerate()
-            .map(|(placeholder_idx, decl_idx)| {
-                (params[decl_idx].name.clone(), placeholder_idx as u32)
-            })
-            .collect()
-    };
+    // placeholdersEnv: name -> ConstantPlaceholder(index). Declaration order by
+    // default, matching `parameters[i].constant_index` below. Scala212 reproduces
+    // Scala's position in the immutable `Map`'s ITERATION order
+    // (SigmaCompiler.scala:88-92): insertion order for ≤4 params (`Map1..Map4`),
+    // Scala 2.12 `HashTrieMap` order from 5 — which then disagrees with the
+    // declaration-ordered `constTypes`/`parameters` (sigmastate-interpreter#1205).
+    let declaration = order == PlaceholderOrder::Declaration;
+    let placeholders: HashMap<String, u32> =
+        if declaration || params.len() <= MAX_DECLARATION_ORDER_PARAMS {
+            params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.name.clone(), i as u32))
+                .collect()
+        } else {
+            let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+            crate::param_order::iteration_order_2_12(&names)
+                .into_iter()
+                .enumerate()
+                .map(|(placeholder_idx, decl_idx)| {
+                    (params[decl_idx].name.clone(), placeholder_idx as u32)
+                })
+                .collect()
+        };
 
     // Root dispatch + placeholder-aware emit, then the SHARED graph-building
     // pipeline (identical to `compile`). `expr.toSigmaProp`
@@ -548,23 +589,107 @@ mod tests {
 
     // ----- error paths -----
 
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Five same-typed keys whose Scala 2.12 hash order is not declaration order.
+    const FIVE_KEYS: &str = "/* */\n@contract def t(bob: SigmaProp, dave: SigmaProp, alice: SigmaProp, \
+         carol: SigmaProp, erin: SigmaProp) = (atLeast(2, Coll(bob, dave, alice)) && carol) || erin";
+
     #[test]
-    fn five_params_compiles_with_hashmap_placeholder_order() {
-        // ≥5 params: placeholder indices follow the Scala 2.12 HashTrieMap
-        // iteration order, no longer rejected. `parameters` stay declaration-
-        // ordered; byte-exactness vs the oracle is the parity gate's job.
-        let ct = cc(
-            "/* */\n@contract def g5(a: Int, b: Int, c: Int, d: Int, e: Int) \
-             = sigmaProp(a + b + c + d + e > 0)",
-        );
-        assert_eq!(ct.const_types.len(), 5);
-        assert_eq!(ct.parameters.len(), 5);
-        // Declaration order preserved in the parameters list + constant indices.
+    fn five_params_number_placeholders_in_declaration_order() {
+        // SigmaOr(SigmaAnd(AtLeast(2, Coll(ph0, ph1, ph2)), ph3), ph4): each name
+        // reads its own constant (parameters[i].constant_index == i).
+        let ct = cc(FIVE_KEYS);
         let names: Vec<&str> = ct.parameters.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["a", "b", "c", "d", "e"]);
+        assert_eq!(names, ["bob", "dave", "alice", "carol", "erin"]);
         for (i, p) in ct.parameters.iter().enumerate() {
             assert_eq!(p.constant_index, i as u32);
         }
+        assert_eq!(
+            hex(&ct.expression_tree_bytes()),
+            "eb02ea0298040483030873007301730273037304"
+        );
+    }
+
+    #[test]
+    fn scala212_order_reproduces_sigma_state_bytes() {
+        // Scala sigma-state 6.0.5 (2.12.21 and 2.13.18), SigmaTemplateCompiler on the
+        // same source: expressionTree reads Coll(ph4, ph0, ph3), ph1, ph2 while the
+        // parameters keep constantIndex bob..erin = 0..4, so applyTemplate yields
+        // (atLeast(2, Coll(erin, bob, carol)) && dave) || alice
+        // (ergoplatform/sigmastate-interpreter#1205). Tail of the JVM's applied tree.
+        let ct = compile_contract_with_order(
+            FIVE_KEYS,
+            3,
+            NetworkPrefix::Testnet,
+            PlaceholderOrder::Scala212,
+        )
+        .expect("compiles");
+        for (i, p) in ct.parameters.iter().enumerate() {
+            assert_eq!(p.constant_index, i as u32);
+        }
+        assert_eq!(
+            hex(&ct.expression_tree_bytes()),
+            "eb02ea0298040483030873047300730373017302"
+        );
+    }
+
+    #[test]
+    fn orders_agree_up_to_four_params() {
+        let src = "/* */\n@contract def t(bob: SigmaProp, dave: SigmaProp, alice: SigmaProp, \
+                   carol: SigmaProp) = atLeast(2, Coll(bob, dave, alice)) && carol";
+        let scala =
+            compile_contract_with_order(src, 3, NetworkPrefix::Testnet, PlaceholderOrder::Scala212)
+                .expect("compiles");
+        assert_eq!(cc(src).serialize(), scala.serialize());
+    }
+
+    #[test]
+    fn five_mixed_type_params_apply_to_a_tree_the_deserializer_accepts() {
+        // Declared bob, dave, alice: Int; carol: Long; erin: Coll[Byte]. In Scala's
+        // order `bob` reads constant 4 (erin's Coll[Byte]), so `HEIGHT > bob`
+        // compares an Int with a Coll[Byte] and the deserializer refuses the tree
+        // (the same names read other constants too); in declaration order the tree
+        // parses back to itself.
+        let src = "/* */\n@contract def t(bob: Int, dave: Int, alice: Int, carol: Long, \
+                   erin: Coll[Byte]) = sigmaProp(HEIGHT > bob && HEIGHT > dave && \
+                   HEIGHT > alice && HEIGHT.toLong > carol && erin.size > 0)";
+        let bytes = SigmaType::SColl(Box::new(SigmaType::SByte));
+        let vals = values(&[
+            ("bob", SigmaType::SInt, SigmaValue::Int(1)),
+            ("dave", SigmaType::SInt, SigmaValue::Int(2)),
+            ("alice", SigmaType::SInt, SigmaValue::Int(3)),
+            ("carol", SigmaType::SLong, SigmaValue::Long(4)),
+            (
+                "erin",
+                bytes,
+                SigmaValue::Coll(ergo_ser::sigma_value::CollValue::Bytes(vec![5])),
+            ),
+        ]);
+        let roundtrip = |order| -> Result<ErgoTree, String> {
+            let ct = compile_contract_with_order(src, 3, NetworkPrefix::Testnet, order)
+                .expect("compiles");
+            let tree = ct.apply(0, &vals).map_err(|e| e.to_string())?;
+            let mut w = VlqWriter::new();
+            ergo_ser::ergo_tree::write_ergo_tree(&mut w, &tree).map_err(|e| format!("{e:?}"))?;
+            let written = w.result();
+            let mut r = ergo_primitives::reader::VlqReader::new(&written);
+            let back = ergo_ser::ergo_tree::read_ergo_tree(&mut r).map_err(|e| format!("{e:?}"))?;
+            // A mistyped operand the reader can widen (Int where Long belongs) parses
+            // as a different tree rather than failing; count that as a failure too.
+            if back != tree {
+                return Err("parses back to a different tree".into());
+            }
+            Ok(tree)
+        };
+        assert_eq!(roundtrip(PlaceholderOrder::Declaration).map(|_| ()), Ok(()));
+        let scala = roundtrip(PlaceholderOrder::Scala212);
+        assert!(
+            scala.is_err(),
+            "Scala's order should mis-bind these params: {scala:?}"
+        );
     }
 
     #[test]

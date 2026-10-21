@@ -16,7 +16,9 @@ infrastructure.
 
 ## [Unreleased]
 
-- **Compiler header (ISSUE-669):** `compile()` and the `/script/p2sAddress` and `/api/v1/script/*` routes now write the ErgoTree header for the requested tree version, as the reference node does (`defaultHeaderWithVersion(treeVersion)`): `0x19` at version 1, `0x1b` at version 3 (`0x0b` for a bare constant). Scripts using v6 types such as `UnsignedBigInt` now compile at tree version 3. Tree version 0 output is unchanged. P2S addresses for tree versions 1–7 change; P2SH addresses do not. Tree version 8 or above is refused.
+### Fixed
+
+- **Contract templates with five or more parameters bound values to the wrong constants.** `compile_contract` numbered the body's placeholders in Scala's hash-map order (to match Scala byte for byte) while each parameter's `constantIndex` follows declaration order, so `ContractTemplate::apply` put values where the body reads other parameters: the wrong keys or amounts when the swapped parameters share a type, a tree the deserializer rejects when they do not. Scala's `SigmaTemplateCompiler` has the same bug (reported as ergoplatform/sigmastate-interpreter#1205). Placeholders now follow declaration order at every parameter count, so templates of up to four parameters are unchanged and larger ones now differ from Scala's (wrong) bytes; `compile_contract_with_order(…, PlaceholderOrder::Scala212)` still reproduces Scala's bytes for comparison. Consensus is unaffected: no validation path compiles templates.
 
 ## [0.13.1] - 2026-10-19
 

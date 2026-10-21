@@ -77,7 +77,8 @@ pub use contract_parse::{
     ParsedContractTemplate,
 };
 pub use contract_template::{
-    compile_contract, ApplyError, ContractError, ContractTemplate, Parameter,
+    compile_contract, compile_contract_with_order, ApplyError, ContractError, ContractTemplate,
+    Parameter, PlaceholderOrder,
 };
 pub use emit::{emit, emit_with_version, EmitError};
 pub use env::{lift, EnvValue, ScriptEnv};
