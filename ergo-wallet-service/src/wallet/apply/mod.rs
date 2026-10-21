@@ -186,6 +186,106 @@ pub fn apply_block_to_wallet_rescan(
     Ok(())
 }
 
+/// Apply one block's effect for keys that are *new to an already populated*
+/// wallet, without touching the scan cursor.
+///
+/// Used to backfill a key from blocks the wallet has already passed (or never
+/// scanned, after an indexer-assisted restore). The caller supplies only the
+/// new keys' trees and pubkeys, so outputs to the wallet's older keys are
+/// neither re-inserted nor reclassified; inputs that spend an older key's box
+/// find it already spent and change nothing. A transaction the wallet had
+/// already recorded keeps its earlier outputs and inputs: the record is the
+/// union of both, in the transaction's own order, which is exactly what one
+/// scan with every key would have written.
+pub fn apply_block_to_wallet_backfill(
+    txn: &WriteTransaction,
+    tracked_p2pk_trees: &BTreeSet<Vec<u8>>,
+    cached_pubkeys: &BTreeMap<u64, [u8; 33]>,
+    block_height: u32,
+    block_id: &[u8; 32],
+    txs: &[BlockTx<'_>],
+) -> Result<(), redb::Error> {
+    for tx in txs {
+        let key = wallet_tx_key(block_height, &tx.tx_id);
+        let prior: Option<WalletTransaction> = {
+            let txs_tbl = txn.open_table(WALLET_TXS)?;
+            let row = txs_tbl.get(key)?;
+            let prior = row
+                .map(|raw| {
+                    bincode::deserialize(raw.value().as_slice()).map_err(|e| {
+                        redb::Error::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("WalletTransaction deserialize: {e}"),
+                        ))
+                    })
+                })
+                .transpose()?;
+            prior
+        };
+        apply_inputs(txn, tx, block_height)?;
+        apply_outputs(
+            txn,
+            tracked_p2pk_trees,
+            cached_pubkeys,
+            block_height,
+            block_id,
+            tx,
+        )?;
+        let Some(prior) = prior else {
+            continue;
+        };
+        let mut txs_tbl = txn.open_table(WALLET_TXS)?;
+        let current: Option<WalletTransaction> = {
+            let row = txs_tbl.get(key)?;
+            let current = row
+                .map(|raw| {
+                    bincode::deserialize(raw.value().as_slice()).map_err(|e| {
+                        redb::Error::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("WalletTransaction deserialize: {e}"),
+                        ))
+                    })
+                })
+                .transpose()?;
+            current
+        };
+        let mut merged = prior.clone();
+        if let Some(current) = current {
+            let outputs: BTreeSet<[u8; 32]> = prior
+                .wallet_outputs
+                .iter()
+                .chain(&current.wallet_outputs)
+                .copied()
+                .collect();
+            let inputs: BTreeSet<[u8; 32]> = prior
+                .wallet_inputs
+                .iter()
+                .chain(&current.wallet_inputs)
+                .copied()
+                .collect();
+            merged.wallet_outputs = tx
+                .outputs
+                .iter()
+                .map(|output| output.box_id)
+                .filter(|id| outputs.contains(id))
+                .collect();
+            merged.wallet_inputs = tx
+                .inputs
+                .iter()
+                .copied()
+                .filter(|id| inputs.contains(id))
+                .collect();
+        }
+        let bytes = bincode::serialize(&merged).map_err(|e| {
+            redb::Error::Io(std::io::Error::other(format!(
+                "WalletTransaction serialize: {e}"
+            )))
+        })?;
+        txs_tbl.insert(key, bytes)?;
+    }
+    Ok(())
+}
+
 /// Read the persistent "scan invalidated" flag. Returns false if
 /// the table doesn't exist yet (fresh wallet) or contains false.
 pub fn is_scan_invalidated(txn: &WriteTransaction) -> Result<bool, redb::Error> {

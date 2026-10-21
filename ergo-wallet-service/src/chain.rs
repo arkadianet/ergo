@@ -355,6 +355,10 @@ pub enum ChainClientError {
     },
     #[error("chain history is pruned (minimum height: {minimum_height:?})")]
     HistoryPruned { minimum_height: Option<u32> },
+    /// A `blocks-since` body went over the response cap. The caller may ask
+    /// again with a smaller page; at `blocks == 1` no smaller request exists.
+    #[error("a {blocks}-block page does not fit the {limit}-byte response cap")]
+    PageTooLarge { blocks: u32, limit: usize },
     #[error("chain history is unavailable: {reason}")]
     UnsupportedHistory { reason: String },
     #[error("chain client failure: {0}")]
@@ -426,7 +430,47 @@ impl TryFrom<(&ergo_wallet_protocol::chain::BoxLookupRequest, CommittedTip)> for
     }
 }
 
+/// A transaction the node's address index lists for a queried address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexedTransaction {
+    pub tx_id: TxId,
+    pub height: u32,
+    pub block_id: BlockId,
+}
+
+/// What the node's address index reports for a set of addresses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddressHistory {
+    /// Highest block the index had processed when it answered.
+    pub indexed_height: u32,
+    /// Every distinct transaction that spends from or pays to a queried
+    /// address, in no particular order.
+    pub transactions: Vec<IndexedTransaction>,
+}
+
 pub trait ChainClient: Send + Sync {
+    /// Look the given ErgoTrees up in the node's address index. `Ok(None)`
+    /// means the node cannot answer (no index, still syncing, halted), which
+    /// callers treat as "scan the blocks instead", never as "no history".
+    fn address_history(
+        &self,
+        _network: ergo_ser::address::NetworkPrefix,
+        _ergo_trees: &[Vec<u8>],
+    ) -> Result<Option<AddressHistory>, ChainClientError> {
+        Ok(None)
+    }
+
+    /// For each ErgoTree, whether the node's address index has ever seen a
+    /// transaction touch it. Same `Ok(None)` meaning as
+    /// [`Self::address_history`].
+    fn addresses_used(
+        &self,
+        _network: ergo_ser::address::NetworkPrefix,
+        _ergo_trees: &[Vec<u8>],
+    ) -> Result<Option<Vec<bool>>, ChainClientError> {
+        Ok(None)
+    }
+
     fn block_at(&self, _height: u32, _tip: CommittedTip) -> Result<ChainBlock, ChainClientError> {
         Err(ChainClientError::Unsupported)
     }

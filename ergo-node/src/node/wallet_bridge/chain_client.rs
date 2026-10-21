@@ -623,6 +623,11 @@ fn map_service_error(error: ChainClientError) -> WalletChainError {
             WalletChainError::Overloaded(detail)
         }
         ChainClientError::Protocol(detail) => WalletChainError::Failure(detail),
+        // Raised only by a remote client's response cap; this in-process
+        // client never produces it.
+        error @ ChainClientError::PageTooLarge { .. } => {
+            WalletChainError::Failure(error.to_string())
+        }
         ChainClientError::Overloaded(detail) => WalletChainError::Overloaded(detail),
         ChainClientError::ShuttingDown(detail) => WalletChainError::ShuttingDown(detail),
         ChainClientError::Timeout(detail) => WalletChainError::Timeout(detail),

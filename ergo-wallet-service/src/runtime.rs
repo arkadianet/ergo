@@ -977,6 +977,9 @@ impl WalletStore for GenerationWalletStore {
             still_owns: self.still_owns.clone(),
         }))
     }
+    fn rebuilds_history_on_key_additions(&self) -> bool {
+        self.inner.rebuilds_history_on_key_additions()
+    }
 }
 struct GenerationWalletWrite {
     inner: Box<dyn crate::wallet::WalletWrite>,
@@ -1050,6 +1053,56 @@ impl crate::wallet::WalletWrite for GenerationWalletWrite {
         meta: &crate::wallet::TrackedPubkeyMeta,
     ) -> Result<(), WalletStoreError> {
         self.inner.insert_tracked_pubkey(path_idx, pubkey, meta)
+    }
+    fn insert_tracked_pubkey_keep_history(
+        &mut self,
+        path_idx: u64,
+        pubkey: [u8; 33],
+        meta: &crate::wallet::TrackedPubkeyMeta,
+    ) -> Result<(), WalletStoreError> {
+        self.inner
+            .insert_tracked_pubkey_keep_history(path_idx, pubkey, meta)
+    }
+    fn begin_fresh_wallet(
+        &mut self,
+        height: u32,
+        header_id: &[u8; 32],
+    ) -> Result<bool, WalletStoreError> {
+        self.inner.begin_fresh_wallet(height, header_id)
+    }
+    fn fresh_anchor(&self) -> Result<Option<(u32, [u8; 32])>, WalletStoreError> {
+        self.inner.fresh_anchor()
+    }
+    fn clear_fresh_anchor(&mut self) -> Result<(), WalletStoreError> {
+        self.inner.clear_fresh_anchor()
+    }
+    fn backfill_block(
+        &mut self,
+        height: u32,
+        tracked_p2pk_trees: &BTreeSet<Vec<u8>>,
+        cached_pubkeys: &BTreeMap<u64, [u8; 33]>,
+        block: &crate::wallet::scan::RescanBlock,
+    ) -> Result<(), WalletStoreError> {
+        self.inner
+            .backfill_block(height, tracked_p2pk_trees, cached_pubkeys, block)
+    }
+    fn promote_matured(&mut self, height: u32) -> Result<(), WalletStoreError> {
+        self.inner.promote_matured(height)
+    }
+    fn record_applied_header(
+        &mut self,
+        height: u32,
+        header_id: &[u8; 32],
+    ) -> Result<(), WalletStoreError> {
+        self.inner.record_applied_header(height, header_id)
+    }
+    fn declare_history_start(
+        &mut self,
+        anchor_height: u32,
+        anchor_header_id: &[u8; 32],
+    ) -> Result<(), WalletStoreError> {
+        self.inner
+            .declare_history_start(anchor_height, anchor_header_id)
     }
     fn rebuild_visible_addresses(&mut self) -> Result<(), WalletStoreError> {
         self.inner.rebuild_visible_addresses()

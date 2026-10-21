@@ -151,10 +151,16 @@ impl<'de> Deserialize<'de> for DerivationMode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DeriveKeyRequest {
-    Next,
+    #[serde(rename_all = "camelCase")]
+    Next {
+        /// The caller states the key has never been used on chain.
+        fresh: bool,
+    },
     #[serde(rename_all = "camelCase")]
     Path {
         derivation_path: String,
+        /// The caller states the key has never been used on chain.
+        fresh: bool,
     },
 }
 
@@ -167,11 +173,13 @@ impl<'de> Deserialize<'de> for DeriveKeyRequest {
             ty: String,
             #[serde(default)]
             derivation_path: Option<String>,
+            #[serde(default)]
+            fresh: bool,
         }
         let r = Raw::deserialize(d)?;
         match r.ty.as_str() {
             "next" => match r.derivation_path {
-                None => Ok(DeriveKeyRequest::Next),
+                None => Ok(DeriveKeyRequest::Next { fresh: r.fresh }),
                 Some(_) => Err(serde::de::Error::custom(
                     "`next` does not take a derivationPath",
                 )),
@@ -180,7 +188,10 @@ impl<'de> Deserialize<'de> for DeriveKeyRequest {
                 let derivation_path = r
                     .derivation_path
                     .ok_or_else(|| serde::de::Error::missing_field("derivationPath"))?;
-                Ok(DeriveKeyRequest::Path { derivation_path })
+                Ok(DeriveKeyRequest::Path {
+                    derivation_path,
+                    fresh: r.fresh,
+                })
             }
             other => Err(serde::de::Error::unknown_variant(other, &["next", "path"])),
         }
@@ -251,7 +262,11 @@ mod tests {
     fn keys_dto_shapes() {
         // DeriveKeyRequest is tagged next|path.
         let n: DeriveKeyRequest = serde_json::from_str(r#"{"type":"next"}"#).unwrap();
-        assert!(matches!(n, DeriveKeyRequest::Next));
+        assert!(matches!(n, DeriveKeyRequest::Next { fresh: false }));
+        // `fresh` is an opt-in the caller makes; absent means unknown.
+        let f: DeriveKeyRequest =
+            serde_json::from_str(r#"{"type":"path","derivationPath":"m/1","fresh":true}"#).unwrap();
+        assert!(matches!(f, DeriveKeyRequest::Path { fresh: true, .. }));
         let p: DeriveKeyRequest =
             serde_json::from_str(r#"{"type":"path","derivationPath":"m/44'/429'/0'/0/3"}"#)
                 .unwrap();

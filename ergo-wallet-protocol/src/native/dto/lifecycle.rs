@@ -131,4 +131,11 @@ pub struct SetChangeAddressRequest {
 pub struct RescanRequest {
     #[serde(default)]
     pub from_height: u32,
+    /// With `fromHeight > 0` on an invalidated scan: the caller states the
+    /// wallet had no activity before `fromHeight`. The stored history is
+    /// cleared, scanning restarts there, and status records that history below
+    /// it is not reconstructed. Without it an invalidated scan refuses a
+    /// partial rescan.
+    #[serde(default)]
+    pub no_activity_before: bool,
 }

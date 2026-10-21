@@ -203,6 +203,14 @@ pub const WALLET_SCAN_INVALIDATED: TableDefinition<(), bool> =
 pub const WALLET_RESCAN_STATE: TableDefinition<(), Vec<u8>> =
     TableDefinition::new("wallet_rescan_state");
 
+/// The block a wallet created by `init` was born at (one row: height and
+/// header id). A fresh mnemonic cannot have history, so its first keys are
+/// tracked from this block instead of replaying the chain. Written by `init`,
+/// consumed by the first unlock; a row that no longer matches the scan cursor
+/// is ignored. Standalone stores only.
+pub const WALLET_FRESH_ANCHOR: TableDefinition<(), (u32, [u8; 32])> =
+    TableDefinition::new("wallet_fresh_anchor");
+
 /// Atomic publication metadata for current-UTXO discovery. JSON, versioned.
 pub const WALLET_UTXO_DISCOVERY: TableDefinition<(), Vec<u8>> =
     TableDefinition::new("wallet_utxo_discovery");
