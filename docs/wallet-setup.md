@@ -77,7 +77,7 @@ the node only needs its hash, which `init` prints.
    daemon finds the wallet's used addresses and reads only the blocks that
    touched them, in seconds; otherwise it scans every block from the start,
    which takes hours on mainnet and leaves balances unavailable until it
-   finishes. Keys added later (`deriveKey`, `deriveNextKey`) are checked against
+   finishes. To get that fast path the wallet's node key must be able to read `/api/v1/indexer/status` (the daemon checks the index is complete before trusting it); without access it scans blocks. Keys added later (`deriveKey`, `deriveNextKey`) are checked against
    the same index and need no rescan when it is available. Without an index,
    pass `"fresh": true` (`?fresh=true` on `deriveNextKey`) only when you know
    the new address has never been used.

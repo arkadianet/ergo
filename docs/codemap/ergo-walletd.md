@@ -297,8 +297,10 @@ keys.
   there is no usable index: an index that is caught up, healthy and has the
   key's history wins and the key is backfilled; an index behind the wallet's
   cursor cannot vouch for "never used". Health comes from
-  `/api/v1/indexer/status` (`repair.pending` / `repair.skipped`); a node that
-  will not report it, as for a scoped key, is taken as healthy.
+  `/api/v1/indexer/status` (`repair.pending` / `repair.skipped`); health the
+  wallet cannot read (no access for a scoped key, 404/503, an unparseable
+  answer) counts as unusable, so the node key needs read access to that route
+  for the fast paths.
 - **A declared start.** `POST /wallet/rescan` with `fromHeight > 0` and
   `"noActivityBefore": true` restarts an *invalidated* scan at that height: the
   stored history is cleared, the cursor goes to the block before it, and the same

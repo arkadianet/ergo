@@ -489,11 +489,12 @@ impl HttpChainClient {
         Ok(u32::try_from(status.indexed_height).ok())
     }
 
-    /// False when the index knows it is incomplete: a rebuild is pending or it
-    /// skipped boxes it could not decode (`/api/v1/indexer/status`). That
-    /// route is outside a scoped key's reach, so a node that will not say
-    /// (401/403/404/503) is taken as healthy, which is what the Scala-compat
-    /// `/blockchain/*` routes alone would have told us.
+    /// True only when `/api/v1/indexer/status` says the index is complete: no
+    /// rebuild pending and no boxes skipped. Health the wallet cannot read
+    /// (401/403/404/503, or a body that does not parse) is NOT healthy: the
+    /// worst outcome of trusting a damaged index is a silently missed coin,
+    /// while the fallback only costs time. The node key needs read access to
+    /// that route for the fast paths.
     fn index_healthy(&self) -> Result<bool, ChainClientError> {
         let status = self.outside_runtime(|| {
             let response = self.send("api/v1/indexer/status", None)?;
@@ -502,9 +503,9 @@ impl HttpChainClient {
             }
             let body = read_body(response, self.max_response_body_bytes)
                 .map_err(ChainClientError::from)?;
-            parse_json::<IndexerHealthBody>(&body).map(Some)
+            Ok(parse_json::<IndexerHealthBody>(&body).ok())
         })?;
-        Ok(status.is_none_or(|status| !status.repair.pending && status.repair.skipped == 0))
+        Ok(status.is_some_and(|status| !status.repair.pending && status.repair.skipped == 0))
     }
 
     fn index_address(

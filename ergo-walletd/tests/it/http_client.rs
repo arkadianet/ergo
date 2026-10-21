@@ -412,21 +412,31 @@ fn an_index_with_a_pending_or_skipped_repair_is_not_used() {
 }
 
 #[test]
-fn an_index_whose_health_the_node_will_not_report_is_still_used() {
-    // A scoped key cannot read /api/v1/indexer/status; that is not a fault.
-    let (url, handle) = serve_many(3, |path| {
-        if path.starts_with("/blockchain/indexedHeight") {
-            (200, CAUGHT_UP.to_string())
-        } else if path.starts_with("/api/v1/indexer/status") {
-            (403, "{}".to_string())
-        } else {
-            (200, r#"{"items":[],"total":0}"#.to_string())
-        }
-    });
-    let used = client(&url)
-        .addresses_used(ergo_ser::address::NetworkPrefix::Testnet, &[key_tree()])
-        .unwrap()
-        .unwrap();
-    assert_eq!(used.used, vec![false]);
-    handle.join().unwrap();
+fn an_index_whose_health_cannot_be_read_is_not_used() {
+    // A scoped key cannot read /api/v1/indexer/status, and a node may answer
+    // 404, 503 or something unparseable. Unknown health takes the safe path.
+    for (status, body) in [
+        (401, "{}"),
+        (403, "{}"),
+        (404, "{}"),
+        (503, "{}"),
+        (200, "not json"),
+        (200, r#"{"status":"caughtUp"}"#),
+    ] {
+        let (url, handle) = serve_many(2, move |path| {
+            if path.starts_with("/blockchain/indexedHeight") {
+                (200, CAUGHT_UP.to_string())
+            } else {
+                (status, body.to_string())
+            }
+        });
+        assert!(
+            client(&url)
+                .addresses_used(ergo_ser::address::NetworkPrefix::Testnet, &[key_tree()])
+                .unwrap()
+                .is_none(),
+            "{status} {body}"
+        );
+        handle.join().unwrap();
+    }
 }
