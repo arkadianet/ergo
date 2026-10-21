@@ -16,9 +16,9 @@
 //                 p1,p2:SigmaProp; n1,n2:BigInt
 //   cc  <hex>     compile (source→ErgoTree) with an EMPTY script env, reply
 //                 `OK <tree_hex> <p2s_address> <p2sh_address>` (mirrors
-//                 ScriptApiRoute.compileSource: header is ALWAYS
-//                 defaultHeaderWithVersion(0), ORACLE_TREE_VERSION only gates
-//                 method visibility, not the header)
+//                 ScriptApiRoute.compileSource: header is
+//                 defaultHeaderWithVersion(ORACLE_TREE_VERSION), the same
+//                 version that gates method visibility; ScriptApiRoute.scala:58)
 //   cce <hex>     compile with the DEMO env (same free vars as tce)
 //   ccs <hex>     compile with the SigmaTyperTest env (same free vars as tcs)
 //   ct  <hex>     contract template: reply `OK <ContractTemplate.serializer hex>`
@@ -281,10 +281,12 @@ object TyperOracle {
   // ----- compile driver for `cc`/`cce`/`ccs` -----
   //
   // Mirrors ScriptApiRoute.compileSource (pinned checkout ergo/.../ScriptApiRoute.scala:56-67)
-  // EXACTLY: the emitted ErgoTree header is ALWAYS defaultHeaderWithVersion(0),
-  // regardless of ORACLE_TREE_VERSION — the route never forwards its treeVersion
-  // param into the header either; VersionContext.withVersions(V, V) only gates
-  // method visibility during typecheck/compile. Root SSigmaProp -> fromProposition
+  // EXACTLY: the emitted ErgoTree header is defaultHeaderWithVersion(V) — the route
+  // forwards its treeVersion param into the header (ScriptApiRoute.scala:58;
+  // ScriptApiRouteSpec asserts header 0x10 at v0 and 0x19 at v1) as well as into
+  // VersionContext.withVersions. (Captures before ISSUE-669 used
+  // defaultHeaderWithVersion(0) here; compile_semantic_parity.rs re-expresses
+  // those v0-header trees in the route header.) Root SSigmaProp -> fromProposition
   // directly; root SBoolean -> .toSigmaProp first; anything else -> REJECT (same
   // catch-all as the `tc` path, so the reply grammar is identical).
   private def compileVerb(env: ScriptEnv, hexStr: String): String =
@@ -294,7 +296,7 @@ object TyperOracle {
         val source = new String(bytes, java.nio.charset.StandardCharsets.UTF_8)
         try
           VersionContext.withVersions(V, V) {
-            val header = ErgoTree.defaultHeaderWithVersion(0.toByte)
+            val header = ErgoTree.defaultHeaderWithVersion(V)
             val result = compiler.compile(env, source)(new CompiletimeIRContext)
             val tree = result.buildTree match {
               case s: Value[SSigmaProp.type @unchecked] if s.tpe == SSigmaProp =>

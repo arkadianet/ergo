@@ -13,7 +13,7 @@
 //! scattered across files. The rest is split across submodules:
 //! - `assemble` — [`CompileResult`], `build_tree`, and constant
 //!   segregation.
-//! - `v0_gate` — the v0-header-unserializable-data walker.
+//! - `v0_gate` — the walker for constant DATA a pre-v3 header cannot carry.
 //! - `lambda_gate` — the GraphBuilding lambda/application verdict-parity
 //!   reject gate.
 //! - `walk` — `push_children`, the `Payload` child-walker shared by both
@@ -57,7 +57,13 @@ pub(crate) use walk::*;
 /// Extracted verbatim from `compile` so both surfaces stay byte-identical; the
 /// only difference between the two callers is whether the emitted root carried
 /// `ConstantPlaceholder` nodes for named params.
-pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
+///
+/// `header_version` is the ErgoTree header version the result will be
+/// serialized under; it only decides whether the v0-header data gate below
+/// runs (it does iff `header_version < 3`). [`compile`] passes its
+/// `tree_version` (the header it writes); the contract-template assembler,
+/// whose `expressionTree` carries no header, passes 0.
+pub(crate) fn graph_build(root: Expr, header_version: u8) -> Result<Expr, CompileError> {
     // GraphBuilding verdict-parity gates (ergo-compiler/docs/compiler-design-ledger.md D-C5): reject the emitted
     // shapes Scala's full compiler rejects — lambda/application rules first.
     if let Some(e) = graph_building_lambda_reject(&root) {
@@ -132,22 +138,24 @@ pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
     // wrongly hoist a used-only-in-dead-code subexpression.
     let root = crate::inline::prune_dead_vals(root);
 
-    // v0-header data gate — Scala's compile route cannot serialize v6-only
-    // constant DATA: `ErgoTreeSerializer.serializeErgoTree` re-pins
+    // Pre-v3-header data gate — Scala cannot serialize v6-only constant DATA
+    // under a header below v3: `ErgoTreeSerializer.serializeErgoTree` re-pins
     // `VersionContext.withVersions(_, treeVersion = ergoTree.version)`
-    // (`data/.../ErgoTreeSerializer.scala:105-112`), and the route's header
-    // is ALWAYS `defaultHeaderWithVersion(0)` — so even a `tree_version = 3`
-    // compile serializes under `treeVersion = 0`, where
-    // `CoreDataSerializer.serialize`'s v3-gated arms (`SUnsignedBigInt` at
-    // :39, `SOption` at :78) fall through to the :86 catch-all
-    // `SerializerException`. Mirror the reject (oracle:
-    // `cc unsignedBigInt("5") > unsignedBigInt("3")` → `REJECT 0:0
+    // (`data/.../ErgoTreeSerializer.scala:105-112`), and the route's header is
+    // `defaultHeaderWithVersion(treeVersion)` (`ScriptApiRoute.scala:58`). So
+    // under a header version < 3, `CoreDataSerializer.serialize`'s v3-gated
+    // arms (`SUnsignedBigInt` at :39, `SOption` at :78) fall through to the
+    // :86 catch-all `SerializerException`. Mirror the reject (oracle, header
+    // v0: `cc unsignedBigInt("5") > unsignedBigInt("3")` → `REJECT 0:0
     // SerializerException`). Our wire layer is deliberately
     // version-independent (ergo-ser stays consensus-lenient), so the gate
-    // lives here in the compile surface; when `build_tree` grows versioned
-    // headers, gate on the emitted header version < 3 instead.
-    if let Some(what) = find_v0_unserializable(&root) {
-        return Err(CompileError::Serializer { what });
+    // lives here in the compile surface, keyed on the emitted header version.
+    if header_version < 3 {
+        if let Some(what) = find_v0_unserializable(&root) {
+            return Err(CompileError::Serializer {
+                what: format!("{what} (ErgoTree header version {header_version} < 3)"),
+            });
+        }
     }
 
     // Lowering block: AFTER every gate/fold above, BEFORE constant
@@ -247,11 +255,14 @@ pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
 /// 1. **`tree_version` (axis 1, frontend gate ONLY):** threads the v5/v6
 ///    method-table + predef visibility gate through parse/bind/typecheck
 ///    (`tree_version >= 3` ⇔ `VersionContext.isV3OrLaterErgoTreeVersion`).
-///    Scala's route forwards its `treeVersion` param ONLY into
-///    `VersionContext.withVersions` — never into the tree header.
-/// 2. **Wire header version (axis 2):** fixed at 0 (matching the route's
-///    `ErgoTree.defaultHeaderWithVersion(0.toByte)` unconditionally). See
-///    `build_tree`.
+///    Scala's route forwards the same `treeVersion` param into
+///    `VersionContext.withVersions` AND into the tree header (axis 2).
+/// 2. **Wire header version (axis 2):** equals `tree_version`, with the size
+///    bit set iff `tree_version > 0` — the route's
+///    `ErgoTree.defaultHeaderWithVersion(treeVersion)`
+///    (`ScriptApiRoute.scala:58`, ergo 6.0.7/6.0.8; `ScriptApiRouteSpec`
+///    asserts header `0x10` at v0 and `0x19` at v1). `tree_version = 0`
+///    keeps the `0x00`/`0x10` headers. See `build_tree`.
 /// 3. **Activated script version (axis 3):** the EVALUATOR's
 ///    block-consensus version; a compile-time no-op here — it decides how a
 ///    node executes the tree, not what bytes we produce.
@@ -288,8 +299,9 @@ pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
 ///   D-C5, exact `GraphBuildingException` class).
 /// - `xorOf` over `Coll[SigmaProp]`: rejected in `emit` (Scala GraphBuilding
 ///   `AssertionError`; see the `XorOf` arm).
-/// - v6-only constant data under the v0 header (`unsignedBigInt(..)`
-///   comparisons): rejected by the v0-header data gate below
+/// - v6-only constant data under a header below v3 (`unsignedBigInt(..)`
+///   comparisons at `tree_version < 3`): rejected by the data gate in
+///   `graph_build`
 ///   ([`CompileError::Serializer`], mirroring Scala's
 ///   `SerializerException`).
 /// - Residual `SigmaPropIsProven` in mixed `Bool`/`SigmaProp` logical
@@ -373,7 +385,7 @@ fn compile_inner(
     // The emit-time tree, kept for the source map's alignment against the
     // final tree (see `crate::source_map`).
     let emit_root = origins.as_ref().map(|_| root.clone());
-    let root = graph_build(root)?;
+    let root = graph_build(root, tree_version)?;
     let pre_segregation_root = origins.as_ref().map(|_| root.clone());
 
     // P2SH proposition bytes — Scala's `Pay2SHAddress.apply(script: ErgoTree)`
@@ -388,7 +400,7 @@ fn compile_inner(
     write_expr(&mut pw, &root, false)?;
     let proposition_bytes = pw.result();
 
-    let ergo_tree = build_tree(root)?;
+    let ergo_tree = build_tree(root, tree_version)?;
     let source_map = match (&origins, &emit_root, &pre_segregation_root) {
         (Some(o), Some(emitted), Some(pre)) => {
             Some(crate::source_map::resolve(emitted, pre, &ergo_tree.body, o))
@@ -400,13 +412,15 @@ fn compile_inner(
     write_ergo_tree(&mut w, &ergo_tree)?;
     let tree_bytes = w.result();
 
-    // Post-write self-check: reject outputs our header-scoped reader refuses
-    // before deriving addresses. The frontend version sets ambient activation;
-    // it cannot replace the emitted header0 type table. Pinned6.0.6 examples
-    // in compiled-reader compile successfully in Scala but their header0 type9
-    // outputs fail its independent reader. This local validation policy refuses
-    // those outputs without changing the header or incoming consensus gates.
-    // A local successful parse is not a proof of arbitrary spendability.
+    // Post-write self-check on the EMITTED bytes (header version =
+    // `tree_version`): reject outputs our header-scoped reader refuses before
+    // deriving addresses. Under a v0 header the reader's type table refuses
+    // v6-only type codes (e.g. `SUnsignedBigInt`, code 9) even when the
+    // frontend allowed them — Scala's own reader refuses those v0-header
+    // bytes too (compiled-reader cases). Under the v3 header Scala writes for
+    // `tree_version = 3`, the same tree re-reads cleanly. Only bytes that pass
+    // here get a P2S address. A local successful parse is not a proof of
+    // arbitrary spendability.
     {
         use ergo_primitives::reader::VlqReader;
         use ergo_ser::ergo_tree::read_ergo_tree_with_activated_version;
@@ -485,13 +499,38 @@ mod tests {
     const ORACLE_HGT_P2SH: &str = "qT5wgrLU3mrxjSQ8FLdaxK3TYcHcHsSLizxPe4S";
 
     fn compile_testnet(env: &ScriptEnv, source: &str) -> Result<CompileResult, CompileError> {
-        // tree_version 0 = the route default; axis-1 only gates v6 method
-        // visibility, which none of these sources touch.
+        // tree_version 0 = the route default (header 0x00/0x10, no size
+        // field); none of these sources touch the v6 method tables.
         compile(env, source, 0, NetworkPrefix::Testnet)
     }
 
     fn ct(source: &str) -> Result<CompileResult, CompileError> {
         compile_testnet(&ScriptEnv::new(), source)
+    }
+
+    /// Re-express a v0-header tree hex (header `0x00`/`0x10`, no size field)
+    /// in the header Scala's compile route writes for `tree_version`:
+    /// `defaultHeaderWithVersion(tree_version)` — version bits plus the size
+    /// bit for version > 0, then the VLQ body length (`ScriptApiRoute.scala:58`,
+    /// `ErgoTree.setRequiredBits`, `ErgoTreeSerializer.serializeErgoTree`).
+    ///
+    /// Several oracle captures below were taken with a harness that attached
+    /// `defaultHeaderWithVersion(0)` regardless of the frontend version; the
+    /// body bytes they pin are header-independent, so they stay the source of
+    /// truth and this helper supplies the real route header. The helper itself
+    /// is pinned against Scala's own header-3 bytes (`compile_ubi_*`,
+    /// `compile_bi_*`, and the compiled-reader `header3_control_hex` cases).
+    fn at_route_header(tree_version: u8, v0_hex: &str) -> String {
+        let v0 = hex::decode(v0_hex).expect("hex");
+        assert_eq!(v0[0] & 0x0f, 0, "input must be a v0 header without size");
+        if tree_version == 0 {
+            return v0_hex.to_string();
+        }
+        let mut w = VlqWriter::new();
+        w.put_u8(v0[0] | 0x08 | tree_version);
+        w.put_u32((v0.len() - 1) as u32);
+        w.put_bytes(&v0[1..]);
+        hex::encode(w.result())
     }
 
     /// The [`fold_direct_const_casts`] output BEFORE `build_tree`/
@@ -533,6 +572,15 @@ mod tests {
     fn reparse(bytes: &[u8]) -> ErgoTree {
         let mut r = VlqReader::new(bytes);
         read_ergo_tree(&mut r).expect("compiled tree must reparse")
+    }
+
+    /// [`reparse`] with activated script version 3, for v3-header trees.
+    fn reparse_v3(bytes: &[u8]) -> ErgoTree {
+        let mut r = VlqReader::new(bytes);
+        let t = ergo_ser::ergo_tree::read_ergo_tree_with_activated_version(&mut r, 3)
+            .expect("compiled v3 tree must reparse");
+        assert!(r.is_empty(), "trailing bytes after v3 re-read");
+        t
     }
 
     // ----- happy path -----
@@ -754,18 +802,136 @@ mod tests {
         .unwrap();
         let source = fixture["source"].as_str().unwrap();
         let compiled = compile(&ScriptEnv::new(), source, 3, NetworkPrefix::Testnet).unwrap();
+        // The fixture's `tree_hex` was captured under a v0 header; the folded
+        // body is header-independent, and the route writes header v3 here.
         assert_eq!(
             hex::encode(&compiled.tree_bytes),
-            fixture["tree_hex"].as_str().unwrap()
+            at_route_header(3, fixture["tree_hex"].as_str().unwrap())
         );
+        assert_eq!(compiled.ergo_tree.version, 3);
+        let mut reader = VlqReader::new(&compiled.tree_bytes);
+        let parsed =
+            ergo_ser::ergo_tree::read_ergo_tree_with_activated_version(&mut reader, 3).unwrap();
+        assert!(reader.is_empty());
+        assert_eq!(parsed, compiled.ergo_tree);
+        // The same source at tree_version 0 is not possible (the v6 type is
+        // frontend-gated), so the fixture's own header-0 bytes are checked
+        // directly against the activated-1..3 reader results it records.
+        let fixture_bytes = hex::decode(fixture["tree_hex"].as_str().unwrap()).unwrap();
         for activation in 1..=3 {
-            let mut reader = VlqReader::new(&compiled.tree_bytes);
-            let parsed =
-                ergo_ser::ergo_tree::read_ergo_tree_with_activated_version(&mut reader, activation)
-                    .unwrap();
+            let mut reader = VlqReader::new(&fixture_bytes);
+            ergo_ser::ergo_tree::read_ergo_tree_with_activated_version(&mut reader, activation)
+                .unwrap();
             assert!(reader.is_empty());
-            assert_eq!(parsed, compiled.ergo_tree);
         }
+    }
+
+    // ----- route header (ISSUE-669) -----
+
+    const UBI_SRC: &str = "{\n  val u = Global.fromBigEndianBytes[UnsignedBigInt](SELF.id)\n  sigmaProp(u.toBytes.size > 0)\n}";
+    const BI_SRC: &str = "{\n  val b = Global.fromBigEndianBytes[BigInt](SELF.id)\n  sigmaProp(b.toBytes.size > 0)\n}";
+
+    #[test]
+    fn compile_ubi_at_tree_version_3_matches_scala_header3_bytes() {
+        // ISSUE-669 reproducer. Scala 6.0.8 / sigma-state 6.0.7 under
+        // `VersionContext.withVersions(3, 3)` with header v3 emits exactly
+        // these bytes; the type code 9 in the body needs header >= 3.
+        let r = compile(&ScriptEnv::new(), UBI_SRC, 3, NetworkPrefix::Mainnet)
+            .expect("ubi.es must compile at tree_version 3");
+        assert_eq!(
+            hex::encode(&r.tree_bytes),
+            "1b13010400d191b1db0906dc6a05dd01c5a7097300"
+        );
+        assert_eq!(r.ergo_tree.version, 3);
+        assert!(r.ergo_tree.has_size);
+        assert!(r.ergo_tree.constant_segregation);
+        assert_eq!(reparse_v3(&r.tree_bytes), r.ergo_tree);
+        assert_eq!(
+            r.p2s_address,
+            encode_p2s(NetworkPrefix::Mainnet, &r.tree_bytes)
+        );
+    }
+
+    #[test]
+    fn compile_bi_at_tree_version_3_matches_scala_header3_bytes() {
+        // ISSUE-669 control: Scala's header-v3 bytes for the BigInt script.
+        let r = compile(&ScriptEnv::new(), BI_SRC, 3, NetworkPrefix::Mainnet)
+            .expect("bi.es must compile at tree_version 3");
+        assert_eq!(
+            hex::encode(&r.tree_bytes),
+            "1b13010400d191b1db0606dc6a05dd01c5a7067300"
+        );
+        assert_eq!(reparse_v3(&r.tree_bytes), r.ergo_tree);
+    }
+
+    #[test]
+    fn compile_ubi_at_tree_version_0_is_refused() {
+        // The dotted v6 method is not in the v5 SGlobal table, so the
+        // frontend refuses it; no address is derived.
+        compile(&ScriptEnv::new(), UBI_SRC, 0, NetworkPrefix::Mainnet)
+            .expect_err("ubi.es must be refused at tree_version 0");
+    }
+
+    #[test]
+    fn compile_header_follows_tree_version_like_scala_route_spec() {
+        // `ScriptApiRouteSpec`: a trivial non-constant script has header
+        // 0x10 at treeVersion 0 and 0x19 at treeVersion 1. The P2SH address
+        // hashes the proposition, so it does not move with the header.
+        let src = "sigmaProp(HEIGHT > 100)";
+        let v0 = compile(&ScriptEnv::new(), src, 0, NetworkPrefix::Testnet).unwrap();
+        let v1 = compile(&ScriptEnv::new(), src, 1, NetworkPrefix::Testnet).unwrap();
+        let v2 = compile(&ScriptEnv::new(), src, 2, NetworkPrefix::Testnet).unwrap();
+        let v3 = compile(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet).unwrap();
+        assert_eq!(hex::encode(&v0.tree_bytes), "100104c801d191a37300");
+        assert_eq!(v0.p2s_address, ORACLE_HGT_P2S);
+        assert_eq!(v1.tree_bytes[0], 0x19);
+        assert_eq!(v2.tree_bytes[0], 0x1a);
+        assert_eq!(v3.tree_bytes[0], 0x1b);
+        assert_eq!(
+            hex::encode(&v1.tree_bytes),
+            at_route_header(1, "100104c801d191a37300")
+        );
+        assert_ne!(v0.p2s_address, v1.p2s_address);
+        for r in [&v1, &v2, &v3] {
+            assert_eq!(r.p2sh_address, ORACLE_HGT_P2SH);
+            assert!(r.ergo_tree.has_size);
+        }
+        assert!(!v0.ergo_tree.has_size);
+    }
+
+    #[test]
+    fn compile_bare_constant_at_tree_version_3_has_header_0b() {
+        // Bare `SigmaPropConstant` root: `withoutSegregation`, so only the
+        // version bits and the size bit — 0x0B at v3.
+        let r = compile(
+            &ScriptEnv::new(),
+            r#"PK("3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN")"#,
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .unwrap();
+        assert_eq!(r.tree_bytes[0], 0x0b);
+        assert!(!r.ergo_tree.constant_segregation);
+        assert!(r.ergo_tree.constants.is_empty());
+        assert_eq!(
+            hex::encode(&r.tree_bytes),
+            at_route_header(3, ORACLE_PK_TREE_HEX)
+        );
+        assert_eq!(r.p2sh_address, ORACLE_PK_P2SH);
+        assert_eq!(reparse_v3(&r.tree_bytes), r.ergo_tree);
+    }
+
+    #[test]
+    fn compile_tree_version_above_7_is_refused() {
+        // Scala `setVersionBits` requires version < 8.
+        let err = compile(
+            &ScriptEnv::new(),
+            "sigmaProp(HEIGHT > 100)",
+            8,
+            NetworkPrefix::Testnet,
+        )
+        .expect_err("tree_version 8 does not fit the header");
+        assert!(matches!(err, CompileError::Write(_)), "{err:?}");
     }
 
     // ----- error paths -----
@@ -794,26 +960,31 @@ mod tests {
     }
 
     #[test]
-    fn compile_unsigned_bigint_constant_rejects_serializer_class() {
-        // Oracle (compile_seed.json, ORACLE_TREE_VERSION=3, captured
-        // 2026-07-07): both UnsignedBigInt comparison sources reply
-        // `REJECT 0:0 SerializerException` — the route's fixed v0 header
-        // cannot carry UnsignedBigInt constant DATA (the v0-header data gate
-        // in `compile`; mechanism citations there). tree_version = 3: the
-        // FRONTEND accepts the v6 predef; the reject is the WIRE header's —
-        // the two version axes are independent.
+    fn compile_unsigned_bigint_constant_accepts_under_v3_header() {
+        // The route writes header v3 at tree_version 3
+        // (`defaultHeaderWithVersion(treeVersion)`, `ScriptApiRoute.scala:58`),
+        // and `CoreDataSerializer` serializes UnsignedBigInt DATA under a v3
+        // tree version, so the pre-v3 data gate does not run.
+        //
+        // NOTE: compile_seed.json's `REJECT 0:0 SerializerException` for these
+        // sources was captured with a harness that attached a v0 header at
+        // ORACLE_TREE_VERSION=3; that verdict is the v0-header behaviour, not
+        // the route's. These bytes are a self-pin (not oracle-captured).
         for src in [
             r#"unsignedBigInt("5") == unsignedBigInt("3")"#,
             r#"unsignedBigInt("5") > unsignedBigInt("3")"#,
         ] {
-            let err = compile(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet)
-                .expect_err("UBI constant under a v0 header must reject");
+            let r = compile(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet)
+                .unwrap_or_else(|e| panic!("{src}: {e:?}"));
+            assert_eq!(r.tree_bytes[0], 0x1b, "{src}");
+            assert_eq!(reparse_v3(&r.tree_bytes), r.ergo_tree, "{src}");
             assert!(
-                matches!(&err, CompileError::Serializer { .. }),
-                "{src}: {err:?}"
+                r.ergo_tree
+                    .constants
+                    .iter()
+                    .any(|(t, _)| *t == SigmaType::SUnsignedBigInt),
+                "{src}: UBI data is on the wire"
             );
-            assert_eq!(err.class(), "SerializerException", "{src}");
-            assert_eq!(err.pos(), 0, "{src}");
         }
     }
 
@@ -827,15 +998,26 @@ mod tests {
         // identically, BEFORE `build_tree`/`segregate` ever runs. This pins
         // that the gate never needs to walk the post-segregation constants
         // table instead.
-        let err = compile(
-            &ScriptEnv::new(),
-            r#"unsignedBigInt("5") == unsignedBigInt("3")"#,
-            3,
-            NetworkPrefix::Testnet,
-        )
-        .expect_err("UBI data must reject at the pre-segregation v0 gate");
-        assert!(matches!(&err, CompileError::Serializer { .. }), "{err:?}");
-        assert_eq!(err.class(), "SerializerException");
+        //
+        // The gate runs only when the emitted header version is < 3, so it is
+        // driven through `graph_build` with header version 0 directly: no
+        // source can reach UBI data at a tree_version < 3 (the v6 predef is
+        // frontend-gated), and at tree_version 3 the header is v3.
+        let src = r#"unsignedBigInt("5") == unsignedBigInt("3")"#;
+        let typed =
+            typecheck_with_network(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet).unwrap();
+        let emitted = emit_with_version(&typed, 3).unwrap();
+        let root = Expr::Op(IrNode {
+            opcode: 0xD1,
+            payload: Payload::One(Box::new(emitted)),
+        });
+        for header_version in [0u8, 1, 2] {
+            let err = graph_build(root.clone(), header_version)
+                .expect_err("UBI data must reject at the pre-segregation pre-v3 gate");
+            assert!(matches!(&err, CompileError::Serializer { .. }), "{err:?}");
+            assert_eq!(err.class(), "SerializerException");
+        }
+        graph_build(root, 3).expect("the gate is off under a v3 header");
     }
 
     // ----- error paths -----
@@ -1292,7 +1474,10 @@ mod tests {
         assert_eq!(get_reg.tree_bytes, r5.tree_bytes);
         // Segregated header 0x10, zero-entry table (no literal constant in
         // this register-accessor body) — byte-identical to the oracle capture.
-        assert_eq!(hex::encode(&get_reg.tree_bytes), "1000d1e6c6a70504");
+        assert_eq!(
+            hex::encode(&get_reg.tree_bytes),
+            at_route_header(3, "1000d1e6c6a70504")
+        );
         assert_eq!(
             get_reg.p2sh_address,
             "qzYN3szTjLnSbqXUA55vyCopdNpu88qJuPzmoks"
@@ -1306,7 +1491,10 @@ mod tests {
             NetworkPrefix::Testnet,
         )
         .expect("compile");
-        assert_eq!(hex::encode(&dynamic.tree_bytes), "1000d1e6dc6313a701a304");
+        assert_eq!(
+            hex::encode(&dynamic.tree_bytes),
+            at_route_header(3, "1000d1e6dc6313a701a304")
+        );
         assert_eq!(
             dynamic.p2sh_address,
             "q1RuFk3PeKdvEbAb6dUZqVxYDZ5i8QdWg4DkK4Z"
@@ -1335,11 +1523,14 @@ mod tests {
             NetworkPrefix::Testnet,
         )
         .expect("both-accept residual must still compile");
-        // Self-pin (NOT an oracle vector): header 0x10, one SInt(4) constant
+        // Self-pin (NOT an oracle vector): route header v3, one SInt(4) constant
         // slot, dynamic getReg MethodCall over ConstPlaceholder(0) — differs
         // from the oracle's static `1000d1e6c6a70404` on the getReg lowering
         // only. A regression guard on our own deterministic output.
-        assert_eq!(hex::encode(&r.tree_bytes), "10010408d1e6dc6313a701730004");
+        assert_eq!(
+            hex::encode(&r.tree_bytes),
+            at_route_header(3, "10010408d1e6dc6313a701730004")
+        );
     }
 
     #[test]
@@ -1369,7 +1560,7 @@ mod tests {
         // Segregated, byte-identical to the oracle capture above.
         assert_eq!(
             hex::encode(&annotated.tree_bytes),
-            "10040e020102040004020402d193b1b47300730173027303"
+            at_route_header(3, "10040e020102040004020402d193b1b47300730173027303")
         );
         assert_eq!(
             annotated.p2sh_address,
@@ -1395,7 +1586,7 @@ mod tests {
         .expect("compile");
         assert_eq!(
             hex::encode(&bytes.tree_bytes),
-            "10020e040000000a0408d193b173007301"
+            at_route_header(3, "10020e040000000a0408d193b173007301")
         );
         assert_eq!(
             bytes.p2sh_address,
@@ -1410,7 +1601,7 @@ mod tests {
         .expect("compile");
         assert_eq!(
             hex::encode(&bits.tree_bytes),
-            "10020d20000000500440d193b173007301"
+            at_route_header(3, "10020d20000000500440d193b173007301")
         );
         assert_eq!(bits.p2sh_address, "qse65TyiDnutjxRzCP1mnCttRKWZqPrhnsvG7cg");
     }
@@ -1430,9 +1621,10 @@ mod tests {
         let env = ScriptEnv::new();
         let cv3 = |src| compile(&env, src, 3, NetworkPrefix::Testnet);
         let or = cv3("sigmaProp((5.toByte.bitwiseOr(3.toByte)) == 7.toByte)").expect("compile");
-        assert_eq!(hex::encode(&or.tree_bytes), "10010101d17300");
+        let folded_true = at_route_header(3, "10010101d17300");
+        assert_eq!(hex::encode(&or.tree_bytes), folded_true);
         let xor = cv3("sigmaProp((5.toByte.bitwiseXor(3.toByte)) == 6.toByte)").expect("compile");
-        assert_eq!(hex::encode(&xor.tree_bytes), "10010101d17300");
+        assert_eq!(hex::encode(&xor.tree_bytes), folded_true);
     }
 
     #[test]
@@ -1578,8 +1770,11 @@ mod tests {
         // (`10010101d17300`). The SizeOf fold erases the empty
         // `Coll[UnsignedBigInt]()` BEFORE the v0-data gate, so the
         // stranded-funds invariant above holds here too.
-        assert_eq!(hex::encode(&r.tree_bytes), "10010101d17300");
-        assert_eq!(reparse(&r.tree_bytes), r.ergo_tree);
+        assert_eq!(
+            hex::encode(&r.tree_bytes),
+            at_route_header(3, "10010101d17300")
+        );
+        assert_eq!(reparse_v3(&r.tree_bytes), r.ergo_tree);
         let r = compile(
             &ScriptEnv::new(),
             "sigmaProp(Coll[UnsignedBigInt]().size.toLong == SELF.value)",
@@ -1590,7 +1785,10 @@ mod tests {
         // Shape-identical to the oracle here (the `.size` fold matches Scala,
         // the surrounding expression is un-foldable on BOTH sides) — so our
         // segregated bytes are byte-identical to the oracle capture.
-        assert_eq!(hex::encode(&r.tree_bytes), "10010400d1937e730005c1a7");
+        assert_eq!(
+            hex::encode(&r.tree_bytes),
+            at_route_header(3, "10010400d1937e730005c1a7")
+        );
         assert_eq!(r.p2sh_address, "pvyEFnLjY1hb7ebaccofdS88Z9v1WwKxUzUB4y9");
         // The `.size` fold covers NON-constant elements too (a `Coll(HEIGHT)`
         // literal folds to Int 1 regardless of item constancy); the generic
@@ -1606,7 +1804,7 @@ mod tests {
     }
 
     #[test]
-    fn compiled_header0_v6_type_outputs_refused_by_pinned_reader_do_not_get_addresses() {
+    fn compiled_v6_type_outputs_carry_scala_header3_bytes() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../test-vectors/ergoscript/compiled-reader/cases.json"
         ))
@@ -1618,11 +1816,29 @@ mod tests {
             for result in case["reader_results"].as_array().unwrap() {
                 assert_eq!(result["outcome"], "READ_ERROR");
             }
+            // The fixture's v0-header bytes are what the pinned reader
+            // refuses; the route writes header v3 at tree_version 3, and those
+            // bytes are the fixture's Scala-captured `header3_control_hex`.
             let source = case["source"].as_str().unwrap();
-            let result = compile(&ScriptEnv::new(), source, 3, NetworkPrefix::Testnet);
-            assert!(
-                matches!(result, Err(CompileError::Serializer { .. })),
-                "{}: {result:?}",
+            let r = compile(&ScriptEnv::new(), source, 3, NetworkPrefix::Testnet)
+                .unwrap_or_else(|e| panic!("{}: {e:?}", case["id"]));
+            assert_eq!(
+                hex::encode(&r.tree_bytes),
+                case["header3_control_hex"].as_str().unwrap(),
+                "{}",
+                case["id"]
+            );
+            assert_eq!(case["header3_control_result"]["outcome"], "READ_RIGHT");
+            assert_eq!(
+                at_route_header(3, case["tree_hex"].as_str().unwrap()),
+                case["header3_control_hex"].as_str().unwrap(),
+                "{}: helper vs Scala header-3 bytes",
+                case["id"]
+            );
+            assert_eq!(
+                r.p2s_address,
+                encode_p2s(NetworkPrefix::Testnet, &r.tree_bytes),
+                "{}",
                 case["id"]
             );
         }
@@ -1648,12 +1864,13 @@ mod tests {
             assert!(matches!(&err, CompileError::Emit(_)), "tv={tv}: {err:?}");
             assert_eq!(err.class(), "GraphBuildingException", "tv={tv}");
         }
-        // tv=3: accepts, byte-identical to the oracle capture.
+        // tv=3: accepts; body byte-identical to the oracle capture, under
+        // the route's v3 header.
         let r = compile(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet)
             .expect("bare fromBigEndianBytes accepts at tv=3");
         assert_eq!(
             hex::encode(&r.tree_bytes),
-            "100202000400d191dc6a05dd018301027300047301"
+            at_route_header(3, "100202000400d191dc6a05dd018301027300047301")
         );
         // The dotted `Global.fromBigEndianBytes` form stays typer-rejected at
         // tv<3 (method not in the v5 SGlobal table) — the leak was bare-only.
@@ -1707,8 +1924,12 @@ mod tests {
         // `85` bool-pair compaction extracts ZERO constants, header `0x10`/`00`).
         for src in ["sigmaProp(true) && (1 == 1)", "(1 == 1) && sigmaProp(true)"] {
             let r = compile(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet).expect(src);
-            assert_eq!(hex::encode(&r.tree_bytes), "1000d1ed8503", "{src}");
-            assert_eq!(reparse(&r.tree_bytes), r.ergo_tree, "{src}");
+            assert_eq!(
+                hex::encode(&r.tree_bytes),
+                at_route_header(3, "1000d1ed8503"),
+                "{src}"
+            );
+            assert_eq!(reparse_v3(&r.tree_bytes), r.ergo_tree, "{src}");
         }
     }
 
@@ -1722,8 +1943,12 @@ mod tests {
         // the oracle `BoolToSigmaProp(placeholder0=false)` (`10010100d17300`).
         for src in ["sigmaProp(true) ^ (1 == 1)", "(1 == 1) ^ sigmaProp(true)"] {
             let r = compile(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet).expect(src);
-            assert_eq!(hex::encode(&r.tree_bytes), "10010100d17300", "{src}");
-            assert_eq!(reparse(&r.tree_bytes), r.ergo_tree, "{src}");
+            assert_eq!(
+                hex::encode(&r.tree_bytes),
+                at_route_header(3, "10010100d17300"),
+                "{src}"
+            );
+            assert_eq!(reparse_v3(&r.tree_bytes), r.ergo_tree, "{src}");
         }
     }
 
@@ -1743,7 +1968,9 @@ mod tests {
             NetworkPrefix::Testnet,
         )
         .expect("compile");
-        assert_eq!(r.tree_bytes[0], 0x00, "bare root, no segregation");
+        // Route header v3 for a bare root: 0x0B (version 3 + size bit, no
+        // segregation bit).
+        assert_eq!(r.tree_bytes[0], 0x0b, "bare root, no segregation");
         assert!(matches!(
             &r.ergo_tree.body,
             Expr::Const {
@@ -1753,9 +1980,12 @@ mod tests {
         ));
         assert_eq!(
             hex::encode(&r.tree_bytes),
-            "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            at_route_header(
+                3,
+                "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            )
         );
-        assert_eq!(reparse(&r.tree_bytes), r.ergo_tree);
+        assert_eq!(reparse_v3(&r.tree_bytes), r.ergo_tree);
     }
 
     #[test]
@@ -1774,8 +2004,12 @@ mod tests {
             ),
         ] {
             let r = compile(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet).expect(src);
-            assert_eq!(hex::encode(&r.tree_bytes), oracle_hex, "{src}");
-            assert_eq!(reparse(&r.tree_bytes), r.ergo_tree, "{src}");
+            assert_eq!(
+                hex::encode(&r.tree_bytes),
+                at_route_header(3, oracle_hex),
+                "{src}"
+            );
+            assert_eq!(reparse_v3(&r.tree_bytes), r.ergo_tree, "{src}");
         }
     }
 
@@ -1793,7 +2027,10 @@ mod tests {
             NetworkPrefix::Testnet,
         )
         .expect("compile");
-        assert_eq!(hex::encode(&r.tree_bytes), "10010101d17300");
-        assert_eq!(reparse(&r.tree_bytes), r.ergo_tree);
+        assert_eq!(
+            hex::encode(&r.tree_bytes),
+            at_route_header(3, "10010101d17300")
+        );
+        assert_eq!(reparse_v3(&r.tree_bytes), r.ergo_tree);
     }
 }

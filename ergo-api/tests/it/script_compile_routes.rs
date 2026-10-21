@@ -155,6 +155,32 @@ async fn p2sh_address_route_matches_direct_compile() {
 }
 
 #[tokio::test]
+async fn p2s_address_route_header_follows_tree_version_like_scala() {
+    // Scala `ScriptApiRouteSpec` (ergo 6.0.7): the P2S tree's first byte is
+    // 0x10 at treeVersion 0 and 0x19 at treeVersion 1, because the route
+    // builds `ErgoTree.defaultHeaderWithVersion(treeVersion)`
+    // (`ScriptApiRoute.scala:58`). P2SH hashes the proposition only, so it
+    // does not move.
+    let source = "sigmaProp(HEIGHT > 100)";
+    let mut p2sh = Vec::new();
+    for (tree_version, head) in [(0u8, 0x10u8), (1, 0x19), (3, 0x1b)] {
+        let body = serde_json::json!({ "source": source, "treeVersion": tree_version }).to_string();
+        let (status, json) = post_json(app(), "/script/p2sAddress", &body).await;
+        assert_eq!(status, StatusCode::OK);
+        let tree = ergo_ser::address::decode_address_to_tree_bytes(
+            json["address"].as_str().unwrap(),
+            NetworkPrefix::Mainnet,
+        )
+        .expect("P2S address decodes");
+        assert_eq!(tree[0], head, "treeVersion {tree_version}");
+        let (status, json) = post_json(app(), "/script/p2shAddress", &body).await;
+        assert_eq!(status, StatusCode::OK);
+        p2sh.push(json["address"].as_str().unwrap().to_string());
+    }
+    assert!(p2sh.windows(2).all(|w| w[0] == w[1]), "{p2sh:?}");
+}
+
+#[tokio::test]
 async fn p2s_address_route_compiles_a_keyless_script() {
     // The env is empty, not an error: a script that doesn't reference
     // `myPubKey_N` compiles.

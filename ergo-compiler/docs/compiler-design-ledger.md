@@ -822,6 +822,20 @@ tests). Since our trees stay non-segregated (D-C1), the oracle-comparable
 byte surface is the P2SH address (hashes the constant-inlined
 proposition) — asserted for every lowering below.
 
+**Header correction (ISSUE-669).** The wave-2 captures were taken with a
+harness (`scripts/jvm_typer_oracle/TyperOracle.scala`) that attached
+`ErgoTree.defaultHeaderWithVersion(0)` at `ORACLE_TREE_VERSION = 3`, on the
+then-documented belief that the node's compile route never puts its
+`treeVersion` into the header. That belief was wrong: `ScriptApiRoute.compileSource`
+builds `ErgoTree.defaultHeaderWithVersion(treeVersion)` (`ScriptApiRoute.scala:58`,
+ergo 6.0.5/6.0.7), and `ScriptApiRouteSpec` asserts header `0x10` at v0 and
+`0x19` at v1. `compile()` now writes that header (version = `tree_version`,
+size bit iff `tree_version > 0`). The body bytes quoted below are
+header-independent; at `tree_version = 3` the emitted tree carries header
+`0x1b` (or `0x0b` for a bare constant) plus the size field. Statements below
+about "the v0 header" at `tree_version = 3` describe the old harness, not
+the route.
+
 1. **`Box.getReg[T](in-range literal)` → `ExtractRegisterAs` (0xC6)**
    (`emit_method_call`): `SELF.getReg[Int](5)` emits the
    SAME bytes as `SELF.R5[Int]` (oracle: both reply `1000d1e6c6a70504`);
@@ -829,7 +843,7 @@ proposition) — asserted for every lowering below.
    on both sides. RESIDUAL: Scala const-PROPAGATES a val-bound index
    (`{ val i = 4; …getReg[Int](i) }` lowers to reg 4, the val
    eliminated); our typed AST keeps the ValUse → the MethodCall survives,
-   both-accept but unevaluable on our side under the v0 header — the
+   both-accept but unevaluable on our side under the old harness's v0 header — the
    vector is therefore NOT committable (the semantic gate would grade it
    mixed Ok/Err); pinned verdict-only in `tree/mod.rs`
    (`compile_val_bound_get_reg_index_stays_residual_method_call`).
@@ -861,15 +875,17 @@ proposition) — asserted for every lowering below.
    multi-cast chains) stay residual MethodCalls. The Err/Err pair
    (PreV3V6Method, PreV3V6Method) these controls produce is audited in
    `compile_semantic_parity.rs` — both compilers keep byte-matching
-   MethodCalls that neither evaluator accepts under v0.
+   MethodCalls that neither evaluator accepts under v0. With both trees now
+   under the route's v3 header (ISSUE-669) these controls reduce on both
+   sides; the audited pair stays only for v0-header vectors.
 4. **`SizeOf(<collection literal>)` folds to the element count**
    (absorbed into `crate::fold`): Scala folds
    `.size` of a `ConcreteCollection` literal regardless of element
    constancy (`Coll(HEIGHT).size` folds; probed). Children fold BEFORE a
    parent's `SizeOf` (discarded elements stay verdict-checked —
    `Coll(2147483647 + 1).size` still rejects), and the fold runs BEFORE
-   serialization, so `Coll[UnsignedBigInt]().size == 0` emits clean v0
-   bytes (the v3-only elem-type code 9 never hits the wire — previously a
+   serialization, so `Coll[UnsignedBigInt]().size == 0` emits bytes free of
+   the v3-only elem-type code 9 (it never hits the wire — previously a
    stranded-funds P2S our own `read_ergo_tree` refused). `crate::fold` now
    ALSO folds the surrounding `== 0` (`Const == Const → true`), so
    `Coll[UnsignedBigInt]().size == 0`/`Coll(HEIGHT).size == 1`/`Coll(1,
@@ -877,37 +893,44 @@ proposition) — asserted for every lowering below.
    `SizeOf` over a `Coll` CONSTANT (not a literal — `x.toBytes.size`) is
    NOT folded (oracle-pinned; the `CollConst.length` graph rule does not
    fire for a lifted `toBytes`/`toBits` constant).
-5. **Post-write self-check** (`compile`): bytes are re-read before addresses
-   are derived; local read failure returns `CompileError::Serializer`. The
-   frontend version supplies ambient activation but cannot replace the emitted
-   header0 type table. Pinned6.0.6 `TypeSerializer.embeddableIdToType` chooses
-   table membership by ErgoTree version; activation selects validation rules.
-   (a) **V6 type codes under header0 — explicit validation refusal.** Scala's
-   frontend3 compiles all seven ordinary examples captured in
-   `test-vectors/ergoscript/compiled-reader`, including
-   `SELF.R4[UnsignedBigInt].isDefined` → `1000d1e6c6a70409`. Its independent
-   reader rejects all seven header0 outputs at activated1/2/3, while header3
-   controls parse at activated3. The earlier activated-table override and
-   “GENUINE ACCEPT” claim were incorrect. Rust now returns a structured local
-   validation error before address derivation. This deliberately differs from
-   the reference compiler's successful emission, preserves actual captured
-   outputs/verdicts, and does not alter incoming consensus gates or emit a new
-   header. A local successful read alone does not establish spendability.
+5. **Post-write self-check** (`compile`): the emitted bytes — under the
+   route header for `tree_version` — are re-read with
+   `read_ergo_tree_with_activated_version(.., tree_version)` before any
+   address is derived; a read failure or trailing bytes returns
+   `CompileError::Serializer`. Pinned 6.0.6 `TypeSerializer.embeddableIdToType`
+   chooses table membership by ErgoTree (header) version; activation selects
+   validation rules.
+   (a) **V6 type codes need header >= 3.** The seven ordinary examples in
+   `test-vectors/ergoscript/compiled-reader` (e.g.
+   `SELF.R4[UnsignedBigInt].isDefined`) compile under Scala's frontend 3.
+   Assembled under a v0 header (the old harness's choice), Scala's own
+   reader rejects them at activated 1/2/3; under the v3 header the route
+   actually writes, the `header3_control_hex` bytes parse at activated 3.
+   `compile(.., 3, ..)` now emits exactly those `header3_control_hex` bytes
+   (ISSUE-669: `ubi.es` → `1b13010400d191b1db0906dc6a05dd01c5a7097300`,
+   byte-identical to Scala 6.0.8 / sigma-state 6.0.7). The self-check stays as
+   a guard on whatever header is emitted: it would still refuse a v6 type
+   code under a pre-v3 header, which the frontend gates make unreachable from
+   source. A local successful read alone does not establish spendability.
    (b) **the UBI-fold family (NF-1)** — the INLINE-constant cases whose
    fold Scala performs now fold on OUR
    side too: `unsignedBigInt("1") == unsignedBigInt("1")` folds via the
-   generic engine's `Const == Const → true` to a byte-identical
-   `10010101d17300` BEFORE the v0 UBI-data gate sees the UBI — folds
-   always run before this gate (the NF-1 closure). This ACCEPT is
-   GENUINE (oracle-matched). The NON-foldable shapes still REJECT in parity
-   on BOTH sides (`unsignedBigInt("5") > unsignedBigInt("3")`,
-   `unsignedBigInt("5") == unsignedBigInt("3")` — unequal operands, Eq's
-   terminal case does not fold), so the v0-DATA gate (`find_v0_unserializable`,
-   which gates v6-only constant DATA/VALUES on the header-0 wire — distinct
-   from the embeddable-TYPE-code axis fixed in (a)) must NOT be weakened. The
-   val-bound `Coll[UnsignedBigInt]()` under `.size` folds the UBI off the
-   wire before either gate, so it too is byte-exact. The header0 type-code refusal in (a) remains an explicit compiler policy
-   distinction; folded v0 outputs do not carry that unsupported type.
+   generic engine's `Const == Const → true` to `sigmaProp(true)` (body
+   `0101d17300`) BEFORE the UBI-data gate sees the UBI — folds
+   always run before this gate (the NF-1 closure). The NON-foldable shapes
+   (`unsignedBigInt("5") > unsignedBigInt("3")`,
+   `unsignedBigInt("5") == unsignedBigInt("3")`) were captured as
+   `REJECT SerializerException` by the v0-header harness. That reject is a
+   property of a pre-v3 header: `CoreDataSerializer` writes UBI DATA only
+   under tree version >= 3. So the data gate (`find_v0_unserializable`) now
+   runs only when the emitted header version is < 3 (`graph_build`'s
+   `header_version` argument); at `tree_version = 3` these sources compile
+   under header `0x1b`. `compile_semantic_parity.rs` pins the two harness
+   rejects in `V0_HEADER_HARNESS_REJECTS` until the seed is recaptured with
+   the corrected harness. The contract-template assembler, whose
+   `expressionTree` carries no header, keeps the gate on (header version 0).
+   The val-bound `Coll[UnsignedBigInt]()` under `.size` folds the UBI off the
+   wire before either gate, so its body is byte-exact.
 
 ### D-C7 — no IR optimization pass: proposition-shape (and P2SH) parity only for transform-free trees (wave 3)
 

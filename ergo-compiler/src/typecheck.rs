@@ -59,8 +59,10 @@ use crate::typer::{assign_type, predefined_env, TyperCtx, TyperError};
 ///   dedicated Scala exception class — the route collapses every
 ///   non-`CompilerException` throwable into its catch-all.
 /// - [`CompileError::Serializer`] — the assembled tree contains constant DATA
-///   the v0 wire header cannot carry (e.g. an `UnsignedBigInt` constant);
-///   mirrors Scala's `SerializerException` (mechanism citations in `tree.rs`).
+///   a pre-v3 wire header cannot carry (e.g. an `UnsignedBigInt` constant at
+///   `tree_version < 3`), or its emitted bytes fail the post-write self-check;
+///   mirrors Scala's `SerializerException` (mechanism citations in
+///   `tree/mod.rs`).
 ///   A USER-reachable reject, unlike `Emit`/`Write`.
 /// - [`CompileError::Write`] — wire serialization of the assembled tree
 ///   failed (`ergo_ser::error::WriteError`); same compiler-bug surface.
@@ -85,14 +87,15 @@ pub enum CompileError {
     /// Emit-phase rejection (typed AST → opcode IR lowering failed).
     #[error("emit error: {0}")]
     Emit(#[from] EmitError),
-    /// The assembled tree carries constant data that cannot be serialized
-    /// under the M3-fixed v0 wire header (v6-only data such as an
-    /// `UnsignedBigInt` constant). Mirrors Scala's `SerializerException`
+    /// The assembled tree cannot be serialized (or re-read) under its emitted
+    /// ErgoTree header: v6-only constant data (such as an `UnsignedBigInt`
+    /// constant) under a header version below 3, or bytes the header-scoped
+    /// post-write self-check refuses. Mirrors Scala's `SerializerException`
     /// (`CoreDataSerializer.scala:86` catch-all after the v3-gated arms);
-    /// see `tree.rs` for the full mechanism.
-    #[error("tree not serializable under a v0 header: {what}")]
+    /// see `tree/mod.rs` for the full mechanism.
+    #[error("tree not serializable under its ErgoTree header: {what}")]
     Serializer {
-        /// What the v0 wire format cannot carry.
+        /// What the emitted header's wire format cannot carry.
         what: String,
     },
     /// Wire-write rejection (opcode IR → bytes failed).
@@ -159,9 +162,9 @@ impl CompileError {
             }
             // Scala throws `sigma.serialization.SerializerException` from
             // `CoreDataSerializer.scala:86` when v6-only constant data hits a
-            // v0-header serialization (oracle: `cc unsignedBigInt("5") >
-            // unsignedBigInt("3")` → `REJECT 0:0 SerializerException`,
-            // compile_seed.json).
+            // pre-v3-header serialization (oracle, v0 header: `cc
+            // unsignedBigInt("5") > unsignedBigInt("3")` → `REJECT 0:0
+            // SerializerException`, compile_seed.json).
             CompileError::Serializer { .. } => "SerializerException",
         }
     }

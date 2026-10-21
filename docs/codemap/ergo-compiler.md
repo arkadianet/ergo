@@ -74,9 +74,11 @@ the native `/api/v1/script/*` surface)
   rebuild, `:39`), `codec.rs` (child decompose/recompose).
 - `src/tree/` — `mod.rs` (`graph_build` + public `compile`, post-write
   self-check), `assemble.rs` (`CompileResult` `:12`, constant segregation
-  `:63`, `build_tree` `:108` — header fixed at version 0 / `has_size: false`),
+  `:66`, `build_tree` `:117` — header version = `tree_version`, `has_size`
+  iff `tree_version > 0`, Scala `defaultHeaderWithVersion(treeVersion)`),
   `cast_fold.rs`, `lambda_gate.rs` (D-C5 verdict-parity reject gate `:46`),
-  `v0_gate.rs` (v0-header-unserializable constant DATA walker), `walk.rs`.
+  `v0_gate.rs` (constant DATA a pre-v3 header cannot carry; run only when the
+  emitted header version is < 3), `walk.rs`.
 - `src/contract_parse.rs` / `src/contract_template.rs` — `@contract` doc-block
   + signature parser (`parse_contract` `:479`) and the
   `SigmaTemplateCompiler` mirror (`compile_contract` `:133`,
@@ -169,17 +171,22 @@ the native `/api/v1/script/*` surface)
   `StagingException`/`GraphBuildingException` class (D-C8).
 - **Three version axes.** (1) frontend `tree_version` gates the v5/v6 method
   tables and predef visibility (`>= 3` ⇔ `isV3OrLaterErgoTreeVersion`);
-  (2) the wire header is fixed at version 0 for `compile()` (contract
-  templates carry `tree_version` and `has_size = tree_version > 0`);
-  (3) the activated script version is the evaluator's, not the compiler's
-  (`src/tree/mod.rs:245-257`, `src/tree/assemble.rs:100-107`).
+  (2) the wire header version equals `tree_version`, with the size bit iff
+  `tree_version > 0` — Scala's route builds
+  `ErgoTree.defaultHeaderWithVersion(treeVersion)` (`ScriptApiRoute.scala:58`,
+  ergo 6.0.5/6.0.7; `ScriptApiRouteSpec` asserts `0x10` at v0 and `0x19` at
+  v1), so `tree_version = 3` gives `0x1b` (`0x0b` for a bare constant);
+  contract-template `apply` uses the same rule; (3) the activated script
+  version is the evaluator's, not the compiler's
+  (`src/tree/mod.rs:253-268`, `src/tree/assemble.rs:104-117`).
 - **Post-write self-check.** After writing `tree_bytes`, `compile` re-reads
   them using the header-selected type table and an activated rule version,
-  rejecting `CompileError::Serializer` on unreadable or trailing output. The
-  frontend can compile seven v6 type examples into header0 trees that the
-  pinned Scala reader rejects; this local output check deliberately refuses
-  them before address derivation. It is not a whole-spend verification. See
-  `test-vectors/ergoscript/compiled-reader` and ledger D-C6.
+  rejecting `CompileError::Serializer` on unreadable or trailing output;
+  addresses come only from bytes that pass. The seven v6 type examples in
+  `test-vectors/ergoscript/compiled-reader` are unreadable under a v0
+  header but compile at `tree_version = 3` to their Scala
+  `header3_control_hex` bytes. It is not a whole-spend verification. See
+  ledger D-C6 and ISSUE-669.
 - **Determinism.** `ScriptEnv`, CSE tables, and type substitutions use
   `BTreeMap`/sorted `Vec`, never randomized `HashMap`; CSE identity is decided
   solely by first-build scope, sibling thunks never share, and the
