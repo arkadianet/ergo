@@ -1078,3 +1078,57 @@ fn a_block_over_the_cap_even_alone_is_a_named_terminal_error() {
         RescanState::Failed { .. }
     ));
 }
+
+#[test]
+fn a_page_over_the_cap_at_one_block_is_terminal_whatever_the_client_reports() {
+    use ergo_wallet_service::{
+        ChainClientError, ChainSnapshot, SubmitRequest, SubmitResponse, UtxoLookup,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Reports a larger page than was asked for, so only the requested limit
+    /// can end the retry.
+    struct Misreporting {
+        calls: AtomicUsize,
+    }
+
+    impl ChainClient for Misreporting {
+        fn committed_tip(&self) -> Result<CommittedTip, ChainClientError> {
+            Ok(CommittedTip::new(3, [3; 32]))
+        }
+        fn snapshot(&self) -> Result<ChainSnapshot, ChainClientError> {
+            Err(ChainClientError::Unsupported)
+        }
+        fn blocks_since(
+            &self,
+            _request: ergo_wallet_service::BlocksSinceRequest,
+        ) -> Result<BlocksSinceResponse, ChainClientError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(ChainClientError::PageTooLarge {
+                blocks: 5,
+                limit: 4096,
+            })
+        }
+        fn lookup_utxo(
+            &self,
+            _: [u8; 32],
+            _: CommittedTip,
+        ) -> Result<UtxoLookup, ChainClientError> {
+            Err(ChainClientError::Unsupported)
+        }
+        fn submit(&self, _: SubmitRequest) -> Result<SubmitResponse, ChainClientError> {
+            Err(ChainClientError::Unsupported)
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let chain = Arc::new(Misreporting {
+        calls: AtomicUsize::new(0),
+    });
+    let store = Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
+    let syncer = build_syncer_with(chain.clone(), store, 16, 1);
+    let error = syncer.sync_once().unwrap_err();
+    assert!(matches!(error, SyncError::Protocol(_)), "{error}");
+    assert!(error.to_string().contains("4096-byte"), "{error}");
+    assert_eq!(chain.calls.load(Ordering::SeqCst), 1, "no retry");
+}

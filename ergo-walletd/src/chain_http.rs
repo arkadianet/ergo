@@ -466,11 +466,16 @@ impl HttpChainClient {
             if status.is_success() {
                 let body = read_body(response, self.max_response_body_bytes)
                     .map_err(ChainClientError::from)?;
-                return parse_json(&body).map(Some);
+                // A body the daemon cannot read is an index it cannot use.
+                return Ok(parse_json(&body).ok());
             }
             if matches!(
                 status,
-                StatusCode::NOT_FOUND | StatusCode::SERVICE_UNAVAILABLE | StatusCode::BAD_REQUEST
+                StatusCode::NOT_FOUND
+                    | StatusCode::SERVICE_UNAVAILABLE
+                    | StatusCode::BAD_REQUEST
+                    | StatusCode::UNAUTHORIZED
+                    | StatusCode::FORBIDDEN
             ) {
                 return Ok(None);
             }
@@ -544,12 +549,19 @@ impl HttpChainClient {
                     break;
                 }
                 for item in page.items {
+                    // An item the daemon cannot make sense of means an index it
+                    // cannot trust: scan the blocks instead.
+                    let (Ok(tx_id), Ok(height), Ok(block_id)) = (
+                        decode_id(&item.id, "indexed transaction id"),
+                        u32::try_from(item.inclusion_height),
+                        decode_id(&item.block_id, "indexed block id"),
+                    ) else {
+                        return Ok(None);
+                    };
                     found.push(IndexedTransaction {
-                        tx_id: decode_id(&item.id, "indexed transaction id")?,
-                        height: u32::try_from(item.inclusion_height).map_err(|_| {
-                            ChainClientError::Protocol("indexed height is negative".to_string())
-                        })?,
-                        block_id: decode_id(&item.block_id, "indexed block id")?,
+                        tx_id,
+                        height,
+                        block_id,
                     });
                 }
                 if found.len() as i64 >= page.total {

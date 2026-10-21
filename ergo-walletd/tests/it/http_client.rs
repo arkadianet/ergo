@@ -440,3 +440,42 @@ fn an_index_whose_health_cannot_be_read_is_not_used() {
         handle.join().unwrap();
     }
 }
+
+#[test]
+fn an_index_that_refuses_the_wallet_or_sends_nonsense_is_not_used() {
+    let bad_item = |id: &str, height: i64, block: &str| {
+        format!(
+            r#"{{"items":[{{"id":"{id}","inclusionHeight":{height},"blockId":"{block}"}}],"total":1}}"#
+        )
+    };
+    let good = hex::encode([1u8; 32]);
+    let cases = [
+        (401, "{}".to_string()),
+        (403, "{}".to_string()),
+        (200, "not json".to_string()),
+        (200, bad_item("zz", 5, &good)),
+        (200, bad_item(&good, -1, &good)),
+        (200, bad_item(&good, 5, "abcd")),
+    ];
+    for (status, body) in cases {
+        let listing_body = body.clone();
+        let (url, handle) = serve_many(3, move |path| {
+            if path.starts_with("/blockchain/indexedHeight") {
+                (200, CAUGHT_UP.to_string())
+            } else if path.starts_with("/api/v1/indexer/status") {
+                (200, HEALTHY.to_string())
+            } else {
+                (status, listing_body.clone())
+            }
+        });
+        let client = client(&url);
+        assert!(
+            client
+                .address_history(ergo_ser::address::NetworkPrefix::Testnet, &[key_tree()])
+                .unwrap()
+                .is_none(),
+            "{status} {body}"
+        );
+        handle.join().unwrap();
+    }
+}

@@ -717,6 +717,14 @@ impl StandaloneSyncer {
             match self.blocks_since(cursor.clone(), limit) {
                 Ok(response) => return Ok((response, limit)),
                 Err(SyncError::Chain(ChainClientError::PageTooLarge { blocks, limit: cap })) => {
+                    // Keyed on what was asked for, not on what the client says
+                    // it was: nothing smaller than one block exists to retry.
+                    if limit <= 1 {
+                        return Err(SyncError::Protocol(format!(
+                            "a 1-block page does not fit the {cap}-byte response cap; a single \
+                             block larger than the cap is terminal"
+                        )));
+                    }
                     let smaller = (limit / 2).max(1);
                     tracing::warn!(
                         blocks,
