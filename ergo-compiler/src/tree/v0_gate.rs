@@ -4,11 +4,13 @@ use ergo_ser::sigma_value::SigmaValue;
 
 use super::*;
 
-/// Scala-faithful predicate for constant DATA the v0 wire header cannot
+/// Scala-faithful predicate for constant DATA a pre-v3 wire header cannot
 /// carry: `CoreDataSerializer.serialize` (v6.0.2) gates `SUnsignedBigInt`
 /// (`:39`) and `SOption` (`:78`) data on `isV3OrLaterErgoTreeVersion` — under
-/// the compile route's pinned `treeVersion = 0` both fall through to the
-/// `:86` `SerializerException` catch-all. Collections/tuples recurse per
+/// a header version below 3 (the route writes
+/// `defaultHeaderWithVersion(treeVersion)`, `ScriptApiRoute.scala:58`) both
+/// fall through to the `:86` `SerializerException` catch-all. `graph_build`
+/// runs this walker only when the emitted header version is below 3. Collections/tuples recurse per
 /// ELEMENT: an EMPTY `Coll[UnsignedBigInt]` constant WRITES fine on both
 /// sides — only element DATA hits the gated arm; the TYPE-code write is
 /// ungated (`TypeSerializer.serialize`, `case p: SEmbeddable =>
@@ -34,8 +36,8 @@ fn v0_unserializable_data(tpe: &SigmaType, val: &SigmaValue) -> Option<&'static 
     }
 }
 
-/// Walk an emitted body for constants whose DATA cannot serialize under the
-/// v0 header (see the gate comment in [`compile`]). Returns a description
+/// Walk an emitted body for constants whose DATA cannot serialize under a
+/// pre-v3 header (see the gate comment in [`compile`]). Returns a description
 /// of the first offender, or `None` when the tree is v0-clean.
 pub(crate) fn find_v0_unserializable(expr: &Expr) -> Option<String> {
     let mut stack = vec![expr];

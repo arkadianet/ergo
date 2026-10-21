@@ -12,8 +12,11 @@ use ergo_ser::sigma_value::SigmaValue;
 pub struct CompileResult {
     /// Canonical wire bytes of `ergo_tree` (`write_ergo_tree` output).
     pub tree_bytes: Vec<u8>,
-    /// The assembled tree (always version 0, no size; constant-segregated
-    /// unless the root is a bare `SigmaPropConstant` — the D-C1 flip).
+    /// The assembled tree: header version = the requested `tree_version`,
+    /// size bit iff `tree_version > 0` (Scala
+    /// `defaultHeaderWithVersion(treeVersion)`, `ScriptApiRoute.scala:58`);
+    /// constant-segregated unless the root is a bare `SigmaPropConstant` —
+    /// the D-C1 flip.
     pub ergo_tree: ErgoTree,
     /// Pay-to-Script address over the FULL `tree_bytes`
     /// (`ergo_ser::address::encode_p2s`). Deliberately NOT routed through
@@ -92,24 +95,37 @@ fn segregate(root: &Expr) -> Result<(Expr, Vec<(SigmaType, SigmaValue)>), WriteE
 /// }
 /// ```
 ///
-/// **The D-C1 flip:** a bare-constant root (e.g. `PK("...")` →
+/// **The D-C1 flip** (header bytes quoted for `tree_version = 0`; at v3 they
+/// are `0x0b`/`0x1b`): a bare-constant root (e.g. `PK("...")` →
 /// `SigmaPropConstant`) takes `withoutSegregation` — header `0x00`, empty
 /// constants table, the constant itself as the body (byte-identical to Scala on
 /// both sides). EVERY other root takes `withSegregation` via [`segregate`] —
 /// header `0x10`, constants pulled into the table, `ConstPlaceholder` nodes in
 /// the body. Both forms are valid, parseable, semantically equal trees.
 ///
-/// Header provenance (route fact): the wire header always comes from
-/// `ErgoTree.defaultHeaderWithVersion(0)` — `ScriptApiRoute.compileSource`
-/// never forwards its `treeVersion` request parameter into the header; that
-/// parameter only gates frontend method visibility via
-/// `VersionContext.withVersions`. So `version` is fixed 0 and `has_size`
-/// false (the size bit is only required for version > 0).
-pub(crate) fn build_tree(root: Expr) -> Result<ErgoTree, WriteError> {
+/// Header provenance (route fact): the header is
+/// `ErgoTree.defaultHeaderWithVersion(treeVersion)` — the node's
+/// `ScriptApiRoute.compileSource` forwards its `treeVersion` request parameter
+/// straight into the header (`ScriptApiRoute.scala:58`, ergo 6.0.7/6.0.8;
+/// `ScriptApiRouteSpec` asserts header `0x10` at `treeVersion = 0` and `0x19`
+/// at `treeVersion = 1`). So `version = tree_version`, and `has_size` is set
+/// iff `tree_version > 0` (`ErgoTree.setRequiredBits`). `tree_version = 0`
+/// therefore yields the historical `0x00` / `0x10` headers byte-for-byte.
+///
+/// `tree_version >= 8` does not fit the 3-bit version field; Scala's
+/// `setVersionBits` `require(version < 8)` throws, and this returns
+/// [`WriteError::InvalidData`].
+pub(crate) fn build_tree(root: Expr, tree_version: u8) -> Result<ErgoTree, WriteError> {
+    if tree_version >= 8 {
+        return Err(WriteError::InvalidData(format!(
+            "ErgoTree.version should be < 8: {tree_version}"
+        )));
+    }
+    let has_size = tree_version > 0;
     if is_bare_sigma_prop_constant(&root) {
         Ok(ErgoTree {
-            version: 0,
-            has_size: false,
+            version: tree_version,
+            has_size,
             constant_segregation: false,
             reserved_header_bits: 0,
             constants: vec![],
@@ -118,8 +134,8 @@ pub(crate) fn build_tree(root: Expr) -> Result<ErgoTree, WriteError> {
     } else {
         let (body, constants) = segregate(&root)?;
         Ok(ErgoTree {
-            version: 0,
-            has_size: false,
+            version: tree_version,
+            has_size,
             constant_segregation: true,
             reserved_header_bits: 0,
             constants,

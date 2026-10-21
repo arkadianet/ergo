@@ -1012,7 +1012,7 @@ mod tests {
         } else {
             mat
         };
-        let tree = crate::tree::build_tree(final_root).expect("build_tree");
+        let tree = crate::tree::build_tree(final_root, 0).expect("build_tree");
         let mut w = VlqWriter::new();
         write_ergo_tree(&mut w, &tree).expect("write_ergo_tree");
         hex(&w.result())
