@@ -2356,7 +2356,9 @@ components:
             Wallet daemon only (`ergo-walletd`). States that the key has never been used on chain,
             so it is tracked from the current tip with no rescan. When absent the daemon checks the
             node's address index (a key it has never seen is added with no rescan; a key with history
-            is backfilled from the index) and otherwise rescans from genesis. Never assumed.
+            is backfilled from the index) and otherwise rescans from genesis. Never assumed. The flag only
+            applies when there is no usable index: a caught-up, healthy index that has the key's
+            history wins and the key is backfilled.
 
     DeriveKeyResult:
       type: object

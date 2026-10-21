@@ -448,6 +448,14 @@ pub struct AddressHistory {
     pub transactions: Vec<IndexedTransaction>,
 }
 
+/// Which of a set of addresses the node's address index has seen used, and
+/// how far the index had got when it said so.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddressUsage {
+    pub indexed_height: u32,
+    pub used: Vec<bool>,
+}
+
 pub trait ChainClient: Send + Sync {
     /// Look the given ErgoTrees up in the node's address index. `Ok(None)`
     /// means the node cannot answer (no index, still syncing, halted), which
@@ -461,13 +469,13 @@ pub trait ChainClient: Send + Sync {
     }
 
     /// For each ErgoTree, whether the node's address index has ever seen a
-    /// transaction touch it. Same `Ok(None)` meaning as
+    /// transaction touch it, with the height the index had reached. Same `Ok(None)` meaning as
     /// [`Self::address_history`].
     fn addresses_used(
         &self,
         _network: ergo_ser::address::NetworkPrefix,
         _ergo_trees: &[Vec<u8>],
-    ) -> Result<Option<Vec<bool>>, ChainClientError> {
+    ) -> Result<Option<AddressUsage>, ChainClientError> {
         Ok(None)
     }
 

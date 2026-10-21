@@ -154,12 +154,14 @@ pub enum DeriveKeyRequest {
     #[serde(rename_all = "camelCase")]
     Next {
         /// The caller states the key has never been used on chain.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
         fresh: bool,
     },
     #[serde(rename_all = "camelCase")]
     Path {
         derivation_path: String,
         /// The caller states the key has never been used on chain.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
         fresh: bool,
     },
 }
@@ -263,6 +265,11 @@ mod tests {
         // DeriveKeyRequest is tagged next|path.
         let n: DeriveKeyRequest = serde_json::from_str(r#"{"type":"next"}"#).unwrap();
         assert!(matches!(n, DeriveKeyRequest::Next { fresh: false }));
+        // Serialising an unset `fresh` leaves the JSON as it always was.
+        assert_eq!(
+            serde_json::to_value(&n).unwrap(),
+            serde_json::json!({ "type": "next" })
+        );
         // `fresh` is an opt-in the caller makes; absent means unknown.
         let f: DeriveKeyRequest =
             serde_json::from_str(r#"{"type":"path","derivationPath":"m/1","fresh":true}"#).unwrap();

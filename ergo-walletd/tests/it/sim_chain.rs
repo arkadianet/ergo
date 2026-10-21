@@ -18,7 +18,7 @@ use ergo_ser::ergo_box::{serialize_ergo_box, ErgoBox, ErgoBoxCandidate};
 use ergo_ser::ergo_tree::read_ergo_tree;
 use ergo_ser::register::AdditionalRegisters;
 use ergo_wallet_service::{
-    AddressHistory, BlocksSinceRequest, BlocksSinceResponse, ChainBlock, ChainClient,
+    AddressHistory, AddressUsage, BlocksSinceRequest, BlocksSinceResponse, ChainBlock, ChainClient,
     ChainClientError, ChainInput, ChainOutput, ChainSnapshot, ChainTransaction, CommittedTip,
     ForwardBlocksSince, IndexedTransaction, SubmitRequest, SubmitResponse, UtxoLookup,
 };
@@ -64,6 +64,8 @@ pub struct SimChain {
     pub usage_calls: AtomicUsize,
     /// Calls of any kind, for tests that assert the node was never asked.
     pub calls: AtomicUsize,
+    /// The node reports a tip this many blocks below its real one.
+    pub behind: AtomicU32,
     /// While set, every `blocks-since` fails with a transport error.
     pub down: AtomicBool,
 }
@@ -80,6 +82,7 @@ impl SimChain {
             history_calls: AtomicUsize::new(0),
             usage_calls: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
+            behind: AtomicU32::new(0),
             down: AtomicBool::new(false),
         })
     }
@@ -90,7 +93,16 @@ impl SimChain {
 
     pub fn tip(&self) -> CommittedTip {
         let inner = self.inner.lock().unwrap();
-        tip_of(&inner)
+        self.visible_tip(&inner)
+    }
+
+    /// The tip the node reports: the real one, less `behind` blocks.
+    fn visible_tip(&self, inner: &Inner) -> CommittedTip {
+        let height = (inner.blocks.len() as u32).saturating_sub(self.behind.load(Ordering::SeqCst));
+        match height {
+            0 => CommittedTip::new(0, [0; 32]),
+            height => CommittedTip::new(height, inner.blocks[height as usize - 1].block_id),
+        }
     }
 
     pub fn push_empty(&self, count: u32) {
@@ -186,13 +198,6 @@ fn tx_id(height: u32, position: u32) -> [u8; 32] {
     id
 }
 
-fn tip_of(inner: &Inner) -> CommittedTip {
-    match inner.blocks.last() {
-        Some(block) => CommittedTip::new(inner.blocks.len() as u32, block.block_id),
-        None => CommittedTip::new(0, [0; 32]),
-    }
-}
-
 fn output_box(tx: [u8; 32], index: u16, tree: &[u8], value: u64, height: u32) -> ChainOutput {
     let parsed = read_ergo_tree(&mut VlqReader::new(tree)).expect("fixture tree parses");
     let candidate = ErgoBoxCandidate::new(
@@ -281,7 +286,7 @@ impl ChainClient for SimChain {
             return Err(ChainClientError::Transport("connection refused".into()));
         }
         let inner = self.inner.lock().unwrap();
-        let tip = tip_of(&inner);
+        let tip = self.visible_tip(&inner);
         let cursor = &request.cursor;
         let on_chain = if cursor.height == 0 {
             cursor.is_genesis_sentinel()
@@ -308,7 +313,7 @@ impl ChainClient for SimChain {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.block_at_log.lock().unwrap().push(height);
         let inner = self.inner.lock().unwrap();
-        let actual = tip_of(&inner);
+        let actual = self.visible_tip(&inner);
         if actual != tip {
             return Err(ChainClientError::stale_tip(tip, actual));
         }
@@ -341,15 +346,16 @@ impl ChainClient for SimChain {
         &self,
         _network: NetworkPrefix,
         ergo_trees: &[Vec<u8>],
-    ) -> Result<Option<Vec<bool>>, ChainClientError> {
+    ) -> Result<Option<AddressUsage>, ChainClientError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.usage_calls.fetch_add(1, Ordering::SeqCst);
         if !self.indexed.load(Ordering::SeqCst) {
             return Ok(None);
         }
         let indexed_height = self.indexed_height();
-        Ok(Some(
-            ergo_trees
+        Ok(Some(AddressUsage {
+            indexed_height,
+            used: ergo_trees
                 .iter()
                 .map(|tree| {
                     !self
@@ -357,7 +363,7 @@ impl ChainClient for SimChain {
                         .is_empty()
                 })
                 .collect(),
-        ))
+        }))
     }
 
     fn lookup_utxo(
@@ -423,6 +429,7 @@ pub fn p2pk(pubkey: &[u8; 33]) -> Vec<u8> {
 /// the way `ergo-walletd` builds them.
 pub struct Rig {
     _dir: tempfile::TempDir,
+    pub chain: Arc<SimChain>,
     pub store: Arc<ergo_wallet_service::RedbWalletStore>,
     pub host: ergo_walletd::host::WalletHost,
     pub syncer: Arc<ergo_walletd::sync::StandaloneSyncer>,
@@ -443,6 +450,7 @@ impl Rig {
                 .unwrap()
                 .rebuild_history_on_key_additions(),
         );
+        let chain_for_rig = chain.clone();
         let service = Arc::new(WalletService::new(store.clone(), chain.clone()));
         let host = WalletHost::new(
             store.clone(),
@@ -466,10 +474,33 @@ impl Rig {
         );
         Self {
             _dir: dir,
+            chain: chain_for_rig,
             store,
             host,
             syncer,
         }
+    }
+
+    /// A new host over the same wallet database after the secret files are
+    /// gone: what the operator gets by deleting `wallet/` to start over.
+    pub fn host_without_secret(&self) -> ergo_walletd::host::WalletHost {
+        use ergo_wallet_service::WalletService;
+        use ergo_walletd::config::Network;
+        use ergo_walletd::engine_chain::LifecycleChainAccess;
+        let secrets = self._dir.path().join("wallet");
+        std::fs::remove_dir_all(&secrets).unwrap();
+        let service = Arc::new(WalletService::new(self.store.clone(), self.chain.clone()));
+        ergo_walletd::host::WalletHost::new(
+            self.store.clone(),
+            service,
+            Arc::new(LifecycleChainAccess::new(
+                self.store.clone(),
+                self.chain.clone(),
+            )),
+            self._dir.path(),
+            Network::Testnet,
+        )
+        .unwrap()
     }
 
     pub async fn restore_and_unlock(&self, phrase: &str) {

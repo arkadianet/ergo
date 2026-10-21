@@ -166,13 +166,16 @@ pub(super) fn index_error(error: AddressIndexError) -> WalletAdminError {
 /// wallet with real history means hours with every balance unavailable. That
 /// is avoided whenever the key is known to need no replay:
 ///
-/// - the caller said the key is fresh (`fresh`): tracked from here on;
-/// - the node's address index has never seen the key used: nothing to replay;
+/// - the node's address index (caught up, and at least as far as the wallet)
+///   has never seen the key used: nothing to replay;
 /// - the index has history for it: backfilled from exactly the blocks it
-///   names, in the same transaction that adds the key.
+///   names, in the same transaction that adds the key, whatever the caller
+///   said;
+/// - with no usable index, the caller said the key is fresh (`fresh`):
+///   tracked from here on.
 ///
-/// Anything else, including an index that cannot answer, keeps the safe
-/// default of [`persist_tracked_pubkey`]. Freshness is never assumed.
+/// Anything else keeps the safe default of [`persist_tracked_pubkey`].
+/// Freshness is never assumed, and never outranks an index that can answer.
 fn track_derived_key(
     store: &dyn crate::wallet::WalletStore,
     indexer: Option<(&WalletService, ergo_ser::address::NetworkPrefix)>,
@@ -185,38 +188,6 @@ fn track_derived_key(
     if !store.rebuilds_history_on_key_additions() {
         return persist_tracked_pubkey(store, path_idx, pubkey, meta, new_derivation_head);
     }
-    if fresh {
-        return persist_tracked_pubkey_keeping_history(
-            store,
-            path_idx,
-            pubkey,
-            meta,
-            new_derivation_head,
-        );
-    }
-    let Some((service, network)) = indexer else {
-        return persist_tracked_pubkey(store, path_idx, pubkey, meta, new_derivation_head);
-    };
-    let usage = match service.indexed_key_usage(network, &[*pubkey]) {
-        Ok(usage) => usage,
-        Err(AddressIndexError::Unavailable(_)) => None,
-        Err(error) => return Err(index_error(error)),
-    };
-    match usage.as_deref() {
-        Some([false]) => {
-            return persist_tracked_pubkey_keeping_history(
-                store,
-                path_idx,
-                pubkey,
-                meta,
-                new_derivation_head,
-            );
-        }
-        Some([true]) => {}
-        _ => return persist_tracked_pubkey(store, path_idx, pubkey, meta, new_derivation_head),
-    }
-    // The key has history. Backfilling it needs a valid, settled wallet to add
-    // it to; a wallet already rebuilding picks the key up from that rebuild.
     let read = store
         .read()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
@@ -232,6 +203,37 @@ fn track_derived_key(
         .scan_cursor()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
     drop(read);
+    let cursor_height = cursor.as_ref().map_or(0, |cursor| cursor.height);
+    // "Used" is true however far the index has got. "Never seen" is only
+    // believed from an index that has reached the wallet's own position: a
+    // block the wallet has already passed but the index has not would hide a
+    // payment. An index that is behind cannot vouch for that, so it is no index.
+    let usage = match indexer {
+        Some((service, network)) => match service.indexed_key_usage(network, &[*pubkey]) {
+            Ok(Some(usage)) if usage.used.len() == 1 => match usage.used[0] {
+                true => Some(true),
+                false if usage.indexed_height >= cursor_height => Some(false),
+                false => None,
+            },
+            Ok(_) | Err(AddressIndexError::Unavailable(_)) => None,
+            Err(error) => return Err(index_error(error)),
+        },
+        None => None,
+    };
+    let keep = |store: &dyn crate::wallet::WalletStore| {
+        persist_tracked_pubkey_keeping_history(store, path_idx, pubkey, meta, new_derivation_head)
+    };
+    // A usable index outranks the caller's word: `fresh` only stands in for an
+    // index that cannot answer.
+    match usage {
+        Some(false) => return keep(store),
+        Some(true) => {}
+        None if fresh => return keep(store),
+        None => return persist_tracked_pubkey(store, path_idx, pubkey, meta, new_derivation_head),
+    }
+    // The key has history. Backfilling it needs a valid, settled wallet to add
+    // it to; a wallet already rebuilding picks the key up from that rebuild.
+    let (service, network) = indexer.expect("a usable index implies an indexer");
     let cursor = match cursor {
         Some(cursor) if settled => match (cursor.height, cursor.header_id) {
             (0, None) => Some(ChainCursor::genesis()),

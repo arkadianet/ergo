@@ -1122,7 +1122,7 @@ the node cannot provide it. `/status` retains cursor, node-tip, lag and sync dia
 The static wallet UI is public so a browser can enter its local credential.
 All API reads and writes remain authenticated.
 
-Commands and sync share a writer. A key addition atomically resets history and replays the chain unless the key needs no replay: a new wallet's first keys (`init` starts the wallet at the node tip), a key the node's address index has never seen or can backfill from the blocks it names, or a key the caller declares never used with `"fresh": true` (`deriveKey` body, `?fresh=true` on `deriveNextKey`). Freshness is never assumed.
+Commands and sync share a writer. A key addition atomically resets history and replays the chain unless the key needs no replay: a new wallet's first keys (`init` starts the wallet at the node tip), a key the node's address index has never seen or can backfill from the blocks it names, or a key the caller declares never used with `"fresh": true` (`deriveKey` body, `?fresh=true` on `deriveNextKey`). Freshness is never assumed, and `fresh` only applies when the node has no usable index (caught up, no pending repair or skipped boxes, and at least as far as the wallet); an index that has the key's history wins.
 Spending refreshes complete coherent node/pool context and fails before the
 engine when required data cannot be validated. Rescans fence mutations and
 suspend sync while their cancellable supervised replay runs. Restore marks

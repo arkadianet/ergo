@@ -585,3 +585,151 @@ async fn a_declared_start_restarts_an_invalidated_scan_where_the_caller_says() {
         Err(WalletAdminError::BadRequest(_))
     ));
 }
+
+// ----- review fixes -----
+
+#[tokio::test]
+async fn init_leaves_a_wallet_with_registered_scans_on_the_old_path() {
+    let chain = SimChain::new();
+    chain.push_empty(20);
+    let rig = Rig::new(chain.clone());
+    let scan = Scan {
+        scan_id: 11,
+        scan_name: "rule".to_string(),
+        tracking_rule: ScanningPredicate::ContainsAsset {
+            asset_id: [0xAB; 32],
+        },
+        wallet_interaction: WalletInteraction::Shared,
+        remove_offchain: true,
+    };
+    let mut write = rig.store.begin_write().unwrap();
+    write
+        .put_scan(11, serde_json::to_vec(&scan).unwrap(), 11)
+        .unwrap();
+    write.commit().unwrap();
+    // The scan alone keeps the daemon following the chain.
+    assert!(rig.host.sync_once(&rig.syncer).unwrap().is_some());
+    let cursor = rig.cursor();
+    assert_eq!(cursor.map(|cursor| cursor.0), Some(20));
+    chain.push_empty(5);
+
+    rig.host
+        .init("test".to_string(), String::new(), 12)
+        .await
+        .unwrap();
+    assert_eq!(
+        rig.cursor(),
+        cursor,
+        "the scan's history must not be skipped"
+    );
+    assert!(rig.read().fresh_anchor().unwrap().is_none());
+    assert_eq!(rig.read().registered_scan_count().unwrap(), 1);
+    // The first unlock rebuilds from genesis, as before.
+    rig.host.unlock("test".to_string()).await.unwrap();
+    assert!(rig.invalidated());
+}
+
+#[tokio::test]
+async fn restore_discards_a_fresh_wallet_anchor_left_by_an_earlier_init() {
+    let keys = Keys::from_phrase(PHRASE);
+    let chain = SimChain::new();
+    chain.push_empty(2);
+    chain.push_block(vec![pay(&p2pk(&keys.external(0)), 123_000)]);
+    chain.push_empty(7);
+    chain.indexed.store(false, Ordering::SeqCst);
+    let rig = Rig::new(chain);
+    rig.host
+        .init("test".to_string(), String::new(), 12)
+        .await
+        .unwrap();
+    assert!(rig.read().fresh_anchor().unwrap().is_some());
+
+    // Start over with the real mnemonic and keep the database.
+    let host = rig.host_without_secret();
+    host.restore(PHRASE.to_string(), String::new(), "test".to_string(), false)
+        .await
+        .unwrap();
+    assert!(rig.read().fresh_anchor().unwrap().is_none());
+    host.unlock("test".to_string()).await.unwrap();
+    assert!(rig.invalidated(), "a restored seed replays its history");
+    let report = loop {
+        if let Some(report) = host.sync_once(&rig.syncer).unwrap() {
+            if report.completed {
+                break report;
+            }
+        }
+    };
+    assert_eq!(report.wallet_height, 10);
+    assert_eq!(rig.summary().confirmed, 123_000);
+}
+
+#[tokio::test]
+async fn an_index_behind_the_wallet_cannot_vouch_that_a_key_was_never_used() {
+    let keys = Keys::from_phrase(PHRASE);
+    let chain = busy_chain(&keys, false);
+    let rig = Rig::new(chain.clone());
+    rig.restore_and_unlock(PHRASE).await;
+    rig.sync();
+    // Indexed to 40; the wallet has passed 45.
+    chain.index_lag.store(5, Ordering::SeqCst);
+    rig.host
+        .derive_key(derive(path(2, 0), false))
+        .await
+        .unwrap();
+    assert!(rig.invalidated(), "an index behind the wallet is no index");
+
+    // With the caller's word and no usable index, the flag stands.
+    let rig = Rig::new(busy_chain(&keys, false));
+    rig.restore_and_unlock(PHRASE).await;
+    rig.sync();
+    rig.chain.index_lag.store(5, Ordering::SeqCst);
+    rig.host.derive_key(derive(path(2, 0), true)).await.unwrap();
+    assert!(!rig.invalidated());
+}
+
+#[tokio::test]
+async fn a_usable_index_with_history_outranks_a_fresh_declaration() {
+    let (baseline, _rig) = scanned_baseline(true).await;
+    let keys = Keys::from_phrase(PHRASE);
+    let chain = busy_chain(&keys, true);
+    let rig = Rig::new(chain.clone());
+    rig.restore_and_unlock(PHRASE).await;
+    rig.sync();
+    rig.host.derive_key(derive(path(1, 0), true)).await.unwrap();
+    assert!(!rig.invalidated());
+    let mut got = rig.summary();
+    let mut expected = baseline;
+    got.keys.sort();
+    expected.keys.sort();
+    assert_eq!(got, expected, "the history was backfilled despite the flag");
+}
+
+#[tokio::test]
+async fn a_wallet_ahead_of_a_briefly_lagging_node_is_not_rescanned() {
+    let keys = Keys::from_phrase(PHRASE);
+    let chain = busy_chain(&keys, true);
+    let rig = Rig::new(chain.clone());
+    rig.restore_and_unlock(PHRASE).await;
+    rig.sync();
+    let before = rig.summary();
+    chain.behind.store(3, Ordering::SeqCst);
+    let error = rig
+        .host
+        .derive_key(derive(path(1, 0), false))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, WalletAdminError::NodeUnavailable(_)),
+        "{error:?}"
+    );
+    assert!(!rig.invalidated());
+    assert_eq!(rig.cursor().map(|cursor| cursor.0), Some(45));
+    assert_eq!(rig.summary(), before, "nothing was added or discarded");
+    // Once the node catches up the same request succeeds.
+    chain.behind.store(0, Ordering::SeqCst);
+    rig.host
+        .derive_key(derive(path(1, 0), false))
+        .await
+        .unwrap();
+    assert!(!rig.invalidated());
+}

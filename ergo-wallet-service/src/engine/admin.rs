@@ -292,6 +292,21 @@ impl WalletEngine {
         if !self.store.rebuilds_history_on_key_additions() || self.rescan.operations_fenced() {
             return;
         }
+        // Registered scans have history of their own below the tip. Moving the
+        // cursor would clear it and never rescan it, so such a wallet takes the
+        // old path: the first unlock rebuilds from genesis for the scans too.
+        match self
+            .store
+            .read()
+            .and_then(|read| read.registered_scan_count())
+        {
+            Ok(0) => {}
+            Ok(_) => return,
+            Err(error) => {
+                warn!(%error, "could not read the scan registry; the new wallet will replay from genesis");
+                return;
+            }
+        }
         let tip = match self.chain.committed_tip() {
             Ok(Some(tip)) if tip.height > 0 => tip,
             Ok(_) => return,
@@ -337,6 +352,17 @@ impl WalletEngine {
         if self.chain.is_pruned() {
             self.store
                 .persist_scan_invalidation(true)
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        }
+        // A restored seed may have history: no fresh-wallet anchor left by an
+        // earlier `init` (whose secret was since removed) may vouch for it.
+        if self.store.rebuilds_history_on_key_additions() {
+            self.store
+                .begin_write()
+                .and_then(|mut write| {
+                    write.clear_fresh_anchor()?;
+                    write.commit()
+                })
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         }
         storage
@@ -467,7 +493,7 @@ impl WalletEngine {
                 }
                 let pubkeys: Vec<[u8; 33]> = keys.iter().map(|(_, pubkey)| *pubkey).collect();
                 let used = match service.indexed_key_usage(network, &pubkeys) {
-                    Ok(Some(used)) => used,
+                    Ok(Some(usage)) => usage.used,
                     Ok(None) | Err(AddressIndexError::Unavailable(_)) => return Ok(0),
                     Err(error) => return Err(internal(&error)),
                 };

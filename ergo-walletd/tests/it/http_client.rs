@@ -250,6 +250,8 @@ fn page_of(path: &str, total: u32) -> String {
     format!(r#"{{"items":[{}],"total":{total}}}"#, items.join(","))
 }
 
+const HEALTHY: &str = r#"{"status":"caughtUp","indexedHeight":120,"fullHeight":120,"repair":{"pending":false,"skipped":0,"driftSkips":0},"totals":{"boxes":1,"txs":1}}"#;
+
 const CAUGHT_UP: &str = r#"{"indexedHeight":120,"fullHeight":120,"status":"caughtUp"}"#;
 
 fn key_tree() -> Vec<u8> {
@@ -259,9 +261,11 @@ fn key_tree() -> Vec<u8> {
 #[test]
 fn address_history_reads_every_page_of_the_index_listing() {
     // 120 transactions: three pages of 50, 50 and 20, after the height probe.
-    let (url, handle) = serve_many(4, |path| {
+    let (url, handle) = serve_many(5, |path| {
         if path.starts_with("/blockchain/indexedHeight") {
             (200, CAUGHT_UP.to_string())
+        } else if path.starts_with("/api/v1/indexer/status") {
+            (200, HEALTHY.to_string())
         } else {
             assert!(
                 path.starts_with("/blockchain/transaction/byAddress/"),
@@ -279,9 +283,9 @@ fn address_history_reads_every_page_of_the_index_listing() {
     assert_eq!(history.transactions[0].height, 1);
     assert_eq!(history.transactions[119].height, 120);
     let seen = handle.join().unwrap();
-    assert!(seen[1].contains("offset=0&limit=50"), "{seen:?}");
-    assert!(seen[2].contains("offset=50&limit=50"), "{seen:?}");
-    assert!(seen[3].contains("offset=100&limit=50"), "{seen:?}");
+    assert!(seen[2].contains("offset=0&limit=50"), "{seen:?}");
+    assert!(seen[3].contains("offset=50&limit=50"), "{seen:?}");
+    assert!(seen[4].contains("offset=100&limit=50"), "{seen:?}");
 }
 
 #[test]
@@ -290,9 +294,12 @@ fn a_listing_that_moves_while_it_is_read_is_read_again() {
     // arrived and shifted the pages. The second attempt sees a steady 61.
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = calls.clone();
-    let (url, handle) = serve_many(1 + 2 + 2, move |path| {
+    let (url, handle) = serve_many(2 + 2 + 2, move |path| {
         if path.starts_with("/blockchain/indexedHeight") {
             return (200, CAUGHT_UP.to_string());
+        }
+        if path.starts_with("/api/v1/indexer/status") {
+            return (200, HEALTHY.to_string());
         }
         let call = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let total = if call == 0 { 60 } else { 61 };
@@ -328,9 +335,11 @@ fn a_node_with_no_usable_index_answers_none_not_an_error() {
         handle.join().unwrap();
     }
     // A listing the index refuses while it is mid-sync is the same answer.
-    let (url, handle) = serve_many(2, |path| {
+    let (url, handle) = serve_many(3, |path| {
         if path.starts_with("/blockchain/indexedHeight") {
             (200, CAUGHT_UP.to_string())
+        } else if path.starts_with("/api/v1/indexer/status") {
+            (200, HEALTHY.to_string())
         } else {
             (503, r#"{"reason":"indexer-syncing"}"#.to_string())
         }
@@ -344,9 +353,12 @@ fn a_node_with_no_usable_index_answers_none_not_an_error() {
 
 #[test]
 fn addresses_used_asks_for_one_transaction_per_address() {
-    let (url, handle) = serve_many(3, |path| {
+    let (url, handle) = serve_many(4, |path| {
         if path.starts_with("/blockchain/indexedHeight") {
             return (200, CAUGHT_UP.to_string());
+        }
+        if path.starts_with("/api/v1/indexer/status") {
+            return (200, HEALTHY.to_string());
         }
         assert!(path.ends_with("offset=0&limit=1"), "{path}");
         // The plain script has history, the reward script has none.
@@ -370,6 +382,51 @@ fn addresses_used_asks_for_one_transaction_per_address() {
         .addresses_used(ergo_ser::address::NetworkPrefix::Testnet, &trees)
         .unwrap()
         .unwrap();
-    assert_eq!(used, vec![true, false]);
+    assert_eq!(used.used, vec![true, false]);
+    assert_eq!(used.indexed_height, 120);
+    handle.join().unwrap();
+}
+
+#[test]
+fn an_index_with_a_pending_or_skipped_repair_is_not_used() {
+    for repair in [
+        r#"{"pending":true,"skipped":0,"driftSkips":0}"#,
+        r#"{"pending":false,"skipped":3,"driftSkips":0}"#,
+    ] {
+        let body = format!(
+            r#"{{"status":"caughtUp","indexedHeight":120,"fullHeight":120,"repair":{repair},"totals":{{"boxes":1,"txs":1}}}}"#
+        );
+        let (url, handle) = serve_many(2, move |path| {
+            if path.starts_with("/blockchain/indexedHeight") {
+                (200, CAUGHT_UP.to_string())
+            } else {
+                (200, body.clone())
+            }
+        });
+        assert!(client(&url)
+            .addresses_used(ergo_ser::address::NetworkPrefix::Testnet, &[key_tree()])
+            .unwrap()
+            .is_none());
+        handle.join().unwrap();
+    }
+}
+
+#[test]
+fn an_index_whose_health_the_node_will_not_report_is_still_used() {
+    // A scoped key cannot read /api/v1/indexer/status; that is not a fault.
+    let (url, handle) = serve_many(3, |path| {
+        if path.starts_with("/blockchain/indexedHeight") {
+            (200, CAUGHT_UP.to_string())
+        } else if path.starts_with("/api/v1/indexer/status") {
+            (403, "{}".to_string())
+        } else {
+            (200, r#"{"items":[],"total":0}"#.to_string())
+        }
+    });
+    let used = client(&url)
+        .addresses_used(ergo_ser::address::NetworkPrefix::Testnet, &[key_tree()])
+        .unwrap()
+        .unwrap();
+    assert_eq!(used.used, vec![false]);
     handle.join().unwrap();
 }

@@ -41,9 +41,9 @@ use ergo_primitives::reader::VlqReader;
 use ergo_ser::ergo_box::{read_ergo_box, serialize_ergo_box};
 use ergo_wallet_protocol::chain as wire;
 use ergo_wallet_service::{
-    AddressHistory, ChainBlock, ChainBox, ChainClient, ChainClientError, ChainInput, ChainOutput,
-    ChainSnapshot, ChainTransaction, CommittedTip, IndexedTransaction, ReemissionInput,
-    SubmitRequest, SubmitResponse, UtxoLookup,
+    AddressHistory, AddressUsage, ChainBlock, ChainBox, ChainClient, ChainClientError, ChainInput,
+    ChainOutput, ChainSnapshot, ChainTransaction, CommittedTip, IndexedTransaction,
+    ReemissionInput, SubmitRequest, SubmitResponse, UtxoLookup,
 };
 use reqwest::blocking::{Client, Response};
 use reqwest::header::HeaderValue;
@@ -483,10 +483,28 @@ impl HttpChainClient {
         let Some(status) = self.index_get::<IndexedHeightBody>("blockchain/indexedHeight")? else {
             return Ok(None);
         };
-        if status.status != "caughtUp" {
+        if status.status != "caughtUp" || !self.index_healthy()? {
             return Ok(None);
         }
         Ok(u32::try_from(status.indexed_height).ok())
+    }
+
+    /// False when the index knows it is incomplete: a rebuild is pending or it
+    /// skipped boxes it could not decode (`/api/v1/indexer/status`). That
+    /// route is outside a scoped key's reach, so a node that will not say
+    /// (401/403/404/503) is taken as healthy, which is what the Scala-compat
+    /// `/blockchain/*` routes alone would have told us.
+    fn index_healthy(&self) -> Result<bool, ChainClientError> {
+        let status = self.outside_runtime(|| {
+            let response = self.send("api/v1/indexer/status", None)?;
+            if !response.status().is_success() {
+                return Ok(None);
+            }
+            let body = read_body(response, self.max_response_body_bytes)
+                .map_err(ChainClientError::from)?;
+            parse_json::<IndexerHealthBody>(&body).map(Some)
+        })?;
+        Ok(status.is_none_or(|status| !status.repair.pending && status.repair.skipped == 0))
     }
 
     fn index_address(
@@ -554,6 +572,18 @@ struct IndexedHeightBody {
     status: String,
 }
 
+/// The parts of `GET /api/v1/indexer/status` that say the index is incomplete.
+#[derive(serde::Deserialize)]
+struct IndexerHealthBody {
+    repair: IndexerRepairBody,
+}
+
+#[derive(serde::Deserialize)]
+struct IndexerRepairBody {
+    pending: bool,
+    skipped: u64,
+}
+
 /// The parts of the index's `{items, total}` transaction listing the daemon
 /// reads. The rest of each item (its boxes) is ignored: the wallet gets the
 /// block itself from the chain and trusts nothing else here.
@@ -601,10 +631,10 @@ impl ChainClient for HttpChainClient {
         &self,
         network: ergo_ser::address::NetworkPrefix,
         ergo_trees: &[Vec<u8>],
-    ) -> Result<Option<Vec<bool>>, ChainClientError> {
-        if self.indexed_height()?.is_none() {
+    ) -> Result<Option<AddressUsage>, ChainClientError> {
+        let Some(indexed_height) = self.indexed_height()? else {
             return Ok(None);
-        }
+        };
         let mut used = Vec::with_capacity(ergo_trees.len());
         for tree in ergo_trees {
             let address = Self::index_address(network, tree)?;
@@ -614,7 +644,10 @@ impl ChainClient for HttpChainClient {
             };
             used.push(page.total > 0);
         }
-        Ok(Some(used))
+        Ok(Some(AddressUsage {
+            indexed_height,
+            used,
+        }))
     }
 
     fn spending_context(&self) -> Result<wire::SpendingContext, ChainClientError> {

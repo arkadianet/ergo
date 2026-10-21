@@ -293,7 +293,12 @@ keys.
   named blocks in the same transaction that adds it; otherwise (no index, or the
   index cannot be trusted) the old safe default stands and the scan is
   invalidated. A caller can say `"fresh": true` on `deriveKey` / `deriveNextKey`
-  (`?fresh=true`) to add the key with no rescan on its own word.
+  (`?fresh=true`) to add the key with no rescan on its own word, but only when
+  there is no usable index: an index that is caught up, healthy and has the
+  key's history wins and the key is backfilled; an index behind the wallet's
+  cursor cannot vouch for "never used". Health comes from
+  `/api/v1/indexer/status` (`repair.pending` / `repair.skipped`); a node that
+  will not report it, as for a scoped key, is taken as healthy.
 - **A declared start.** `POST /wallet/rescan` with `fromHeight > 0` and
   `"noActivityBefore": true` restarts an *invalidated* scan at that height: the
   stored history is cleared, the cursor goes to the block before it, and the same

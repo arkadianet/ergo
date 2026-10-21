@@ -114,6 +114,13 @@ impl From<ChainClientError> for AddressIndexError {
     }
 }
 
+/// Which keys the index has seen used, and how far the index had got.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyUsage {
+    pub indexed_height: u32,
+    pub used: Vec<bool>,
+}
+
 /// What a backfill applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackfillReport {
@@ -132,7 +139,7 @@ impl WalletService {
         &self,
         network: NetworkPrefix,
         pubkeys: &[[u8; 33]],
-    ) -> Result<Option<Vec<bool>>, AddressIndexError> {
+    ) -> Result<Option<KeyUsage>, AddressIndexError> {
         let mut trees = Vec::with_capacity(pubkeys.len() * 2);
         for pubkey in pubkeys {
             trees.extend(key_trees(pubkey)?);
@@ -140,16 +147,19 @@ impl WalletService {
         let Some(used) = self.chain().addresses_used(network, &trees)? else {
             return Ok(None);
         };
-        if used.len() != trees.len() {
+        if used.used.len() != trees.len() {
             return Err(AddressIndexError::Unavailable(
                 "address index answered for the wrong number of addresses".to_string(),
             ));
         }
-        Ok(Some(
-            used.chunks(2)
+        Ok(Some(KeyUsage {
+            indexed_height: used.indexed_height,
+            used: used
+                .used
+                .chunks(2)
                 .map(|pair| pair.iter().any(|used| *used))
                 .collect(),
-        ))
+        }))
     }
 
     /// Apply, into `write`, the history of `keys` from the blocks the node's
@@ -193,9 +203,11 @@ impl WalletService {
             BackfillTarget::UpTo(cursor) => cursor.height,
         };
         if last > tip.height {
-            return Err(AddressIndexError::Unavailable(
+            // A node briefly behind the wallet (restart, shallow reorg) is a
+            // reason to retry later, not to throw the wallet's history away.
+            return Err(AddressIndexError::Chain(ChainClientError::Unavailable(
                 "wallet cursor is ahead of the node tip".to_string(),
-            ));
+            )));
         }
         // Heights to read, each with what the index claimed about it. A height
         // the index cannot vouch for (past `safe`) is read with no claim.
