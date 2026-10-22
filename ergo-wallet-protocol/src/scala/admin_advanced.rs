@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct DeriveKeyRequest {
     pub derivation_path: String,
+    /// The caller states the key has never been used on chain. A fresh key is
+    /// tracked from the current tip with no rescan. Absent means unknown: the
+    /// wallet then checks the node's address index, and rescans if the node
+    /// has none.
+    #[serde(default)]
+    pub fresh: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

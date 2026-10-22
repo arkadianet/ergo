@@ -634,7 +634,30 @@ impl WalletHost {
     }
 
     pub async fn derive_next_key(&self) -> Result<DeriveNextKeyResponse, WalletAdminError> {
-        self.call(|engine| engine.derive_next_key()).await
+        self.derive_next_key_declaring(false).await
+    }
+
+    /// `deriveNextKey` with the caller's declaration that the key was never
+    /// used on chain (see `WalletEngine::derive_next_key_declaring`).
+    pub async fn derive_next_key_declaring(
+        &self,
+        fresh: bool,
+    ) -> Result<DeriveNextKeyResponse, WalletAdminError> {
+        self.call(move |engine| engine.derive_next_key_declaring(fresh))
+            .await
+    }
+
+    /// Restart an invalidated scan at a block the caller declares nothing
+    /// happened before (`noActivityBefore`). The sync worker resumes there;
+    /// a failed pass parked on the old history is released.
+    pub async fn declare_history_start(&self, from_height: u32) -> Result<(), WalletAdminError> {
+        let inner = self.inner.clone();
+        self.call(move |engine| {
+            engine.declare_history_start(from_height)?;
+            inner.recovery_generation.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
     }
 
     pub async fn update_change_address(&self, address: String) -> Result<(), WalletAdminError> {
@@ -675,7 +698,7 @@ impl WalletHost {
             return Ok(None);
         }
         *terminal_tracking = None;
-        if tracking.0.is_empty() {
+        if !syncer.has_tracking()? {
             return Ok(None);
         }
         let result = syncer.sync_once().map(Some);
@@ -1026,9 +1049,10 @@ mod tests {
             .unwrap();
         assert_eq!(keys.len(), 3);
         host.update_change_address(derived.address).await.unwrap();
-        assert_eq!(fixture.chain.calls.load(Ordering::SeqCst), 1);
-        // The single node call above records added_at_height for derivation;
-        // initialization, passwords and lifecycle status are entirely local.
+        // `init` reads the node tip once to start the wallet there, and the
+        // derivation reads it again for added_at_height; passwords, unlock and
+        // lifecycle status are entirely local.
+        assert_eq!(fixture.chain.calls.load(Ordering::SeqCst), 2);
         host.shutdown().await.unwrap();
         assert!(matches!(
             host.status().await,
@@ -1057,7 +1081,9 @@ mod tests {
     async fn first_unlock_resets_old_cursor_atomically_but_wrong_password_preserves_it() {
         let fixture = Fixture::new();
         let host = fixture.host().unwrap();
-        host.init("test".to_string(), String::new(), 12)
+        // A restored wallet (unlike one `init` started at the tip) cannot
+        // trust a cursor it did not place itself.
+        host.restore(PHRASE.to_string(), String::new(), "test".to_string(), false)
             .await
             .unwrap();
         {

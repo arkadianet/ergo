@@ -47,21 +47,18 @@ sync_interval = "15s"            # How often the sync loop runs. Accepts plain
 sync_batch = 256                 # Apply budget: max blocks APPLIED per sync
                                  # pass (1..=1024). Not a request size — a pass
                                  # may reach the tip through many HTTP calls.
-blocks_page = 1                  # Request budget: max blocks asked for in ONE
-                                 # blocks-since call (1..=1024). This is what
-                                 # bounds a single response body, and it is
-                                 # independent of sync_batch: the wire form
+blocks_page = 128                # Request budget: the CEILING on blocks asked
+                                 # for in ONE blocks-since call (1..=1024). The
+                                 # page actually requested adapts below it:
+                                 # it starts small, grows while the served
+                                 # blocks are small, shrinks as their size
+                                 # nears the 16 MiB response cap (the wire form
                                  # hex-encodes every transaction and output
-                                 # box, so a page of N blocks costs roughly
-                                 # four times their bytes and must fit the
-                                 # daemon's 16 MiB response cap. 1 is the
-                                 # largest page whose *worst legal* body
-                                 # provably fits: one block at the documented
-                                 # 2 MiB maxBlockSize is 8 MiB of hex, so two
-                                 # would be 16 MiB before any JSON envelope. A block too large for even a
-                                 # one-block page is a terminal, named error —
-                                 # the daemon never retries with a smaller
-                                 # page.
+                                 # box, about four times their bytes), and is
+                                 # halved and retried when a page still goes
+                                 # over it. Independent of sync_batch. 1 turns
+                                 # adapting off. A single block larger than
+                                 # the cap is a terminal, named error.
 
 # ---------------------------------------------------------------------------
 # Local read-only API listener. At least one of the two is required. Specify

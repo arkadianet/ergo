@@ -177,6 +177,62 @@ pub fn publish_discovery(
     Ok(())
 }
 
+/// Record that history at or below `anchor_height` was deliberately not
+/// reconstructed because the operator declared the wallet had no activity
+/// there. Same row, same status reporting as a verified UTXO discovery, but
+/// with no state root and no matched boxes: nothing was traversed. Every
+/// currently tracked key counts as covered.
+pub fn declare_start(
+    txn: &redb::WriteTransaction,
+    anchor_height: u32,
+    anchor_header_id: &[u8; 32],
+) -> Result<(), WalletStoreError> {
+    let mut covered_pubkeys = Vec::new();
+    for entry in txn.open_table(WALLET_TRACKED_PUBKEYS)?.iter()? {
+        let (key, _) = entry?;
+        let (_, pubkey) = parse_tracked_pubkey_key(&key.value());
+        covered_pubkeys.push(hex::encode(pubkey));
+    }
+    let meta = DiscoveryCoverage {
+        version: 1,
+        anchor_height,
+        anchor_header_id: hex::encode(anchor_header_id),
+        state_root: String::new(),
+        history_complete: false,
+        matched_boxes: 0,
+        covered_pubkeys,
+    };
+    txn.open_table(WALLET_UTXO_DISCOVERY)?.insert(
+        (),
+        serde_json::to_vec(&meta).map_err(|e| corrupt(e.to_string()))?,
+    )?;
+    Ok(())
+}
+
+/// Count `pubkey` as covered by an existing incomplete-history record, for a
+/// key the caller has established needs no replay. No record, no change.
+pub fn cover_pubkey(
+    txn: &redb::WriteTransaction,
+    pubkey: &[u8; 33],
+) -> Result<(), WalletStoreError> {
+    let mut table = txn.open_table(WALLET_UTXO_DISCOVERY)?;
+    let Some(row) = table.get(())? else {
+        return Ok(());
+    };
+    let mut meta: DiscoveryCoverage =
+        serde_json::from_slice(&row.value()).map_err(|e| corrupt(e.to_string()))?;
+    drop(row);
+    let pubkey = hex::encode(pubkey);
+    if !meta.covered_pubkeys.contains(&pubkey) {
+        meta.covered_pubkeys.push(pubkey);
+        table.insert(
+            (),
+            serde_json::to_vec(&meta).map_err(|e| corrupt(e.to_string()))?,
+        )?;
+    }
+    Ok(())
+}
+
 /// Rollback below the discovery anchor cannot reconstruct boxes already spent
 /// before that anchor. Invalidate rather than silently presenting partial funds.
 pub fn invalidate_below_anchor(

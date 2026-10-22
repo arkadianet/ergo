@@ -1,7 +1,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,6 +13,7 @@ use ergo_wallet_service::{
 };
 use thiserror::Error;
 
+use crate::chain_http::MAX_RESPONSE_BODY_BYTES;
 use crate::tip::CachedNodeTip;
 
 const MAX_RETRY_ATTEMPTS: usize = 4;
@@ -33,30 +34,39 @@ const MAX_UNPROGRESSIVE_REWINDS: u32 = 64;
 /// for a page the node would reject or that `validate_page` would refuse.
 pub const MAX_SYNC_BLOCKS: u32 = 1024;
 
-/// Blocks requested per `blocks-since` HTTP call, by default.
+/// Ceiling on the blocks requested per `blocks-since` HTTP call, by default.
 ///
-/// This is deliberately **not** the apply budget. The adapter refuses any
-/// response body over `MAX_RESPONSE_BODY_BYTES` (16 MiB), and the chain
-/// protocol carries every transaction and every output box as hex strings, so
-/// a page's JSON body costs roughly four times the bytes of the blocks it
-/// carries. Consensus bounds one block's `BlockTransactions` section by the
-/// voted `maxBlockSize` parameter, and this node documents a
-/// `maxBlockSize = 2097152` (2 MiB) vote, so one maxed-out block is already
-/// 8 MiB of hex: two of them are 16 MiB *before* any JSON envelope, so a page
-/// of `2` is **not provably** under the cap while a page of `1` is — 8 MiB plus
-/// an envelope of a few hundred kilobytes, about half the cap. That is the whole reason this is `1` and not `2`: the
-/// safe default is the largest page whose *worst legal* body still fits, and a
-/// real mainnet page is far smaller. A page sized from `sync_batch` (the old
-/// behaviour: `min(batch, remaining)`) could ask for up to 1024 blocks and
-/// simply hit the cap on any real chain.
+/// This is deliberately **not** the apply budget, and it is only a ceiling:
+/// the page actually asked for adapts to the blocks being served (see
+/// [`StandaloneSyncer`]). The adapter refuses any response body over
+/// `MAX_RESPONSE_BODY_BYTES` (16 MiB), and the chain protocol carries every
+/// transaction and every output box as hex strings, so a page's JSON body
+/// costs roughly four times the bytes of the blocks it carries. Consensus
+/// bounds one block's `BlockTransactions` section by the voted `maxBlockSize`
+/// parameter, and this node documents a `maxBlockSize = 2097152` (2 MiB) vote,
+/// so one maxed-out block is already 8 MiB of hex: two of them are 16 MiB
+/// *before* any JSON envelope. A page of `1` is the only page whose worst legal
+/// body provably fits, and a real mainnet block is far smaller than that, so a
+/// fixed page of `1` costs about 1.9 million round trips for a full scan.
 ///
-/// Raising it is allowed and bounded (`1..=1024`), but it is an operator
-/// decision made against their own node's `maxBlockSize`, not a default.
+/// The adaptive page therefore starts small, grows while the served blocks are
+/// small, drops toward `1` as their estimated body approaches the cap, and is
+/// halved and retried when a page still goes over it. A block too large even
+/// for a one-block page is **terminal**: no smaller request exists, so
+/// `HttpChainClient` reports it as a bounded error naming the cap and the page
+/// size (see `crate::chain_http`).
 ///
-/// A block too large even for a one-block page is **not** retried smaller: the
-/// daemon never shrinks a page, so `HttpChainClient` reports it as a terminal
-/// bounded error naming the cap and the page size (see `crate::chain_http`).
-pub const DEFAULT_BLOCKS_PER_PAGE: u32 = 1;
+/// Raising or lowering the ceiling is allowed and bounded (`1..=1024`); `1`
+/// restores the old fixed page.
+pub const DEFAULT_BLOCKS_PER_PAGE: u32 = 128;
+
+/// Blocks the adaptive page starts at, before it has seen any served block.
+const INITIAL_PAGE: u32 = 16;
+
+/// The page's estimated body is steered toward this fraction of the response
+/// cap (a quarter), which leaves room for one block several times larger than
+/// the average of the page that sized it.
+const TARGET_PAGE_FRACTION: usize = 4;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SyncConfig {
@@ -64,9 +74,9 @@ pub struct SyncConfig {
     /// `sync_once`. Independent of how those blocks are fetched: a pass applies
     /// up to `batch` blocks and may therefore issue several HTTP calls.
     pub batch: u32,
-    /// Maximum blocks requested per `blocks-since` call. Bounds one response
-    /// body; see [`DEFAULT_BLOCKS_PER_PAGE`] for why it is separate from
-    /// `batch`.
+    /// Ceiling on the blocks requested per `blocks-since` call. Bounds one
+    /// response body; see [`DEFAULT_BLOCKS_PER_PAGE`] for why it is separate
+    /// from `batch` and how the page adapts below it.
     pub page: u32,
     pub retry_delay: Duration,
     pub max_retry_delay: Duration,
@@ -120,6 +130,16 @@ pub struct StandaloneSyncer {
     tip: Arc<CachedNodeTip>,
     fail_next_commit: Arc<AtomicBool>,
     cancelled: AtomicBool,
+    /// The response cap of the client behind `service`; see
+    /// [`Self::with_response_cap`].
+    response_cap: usize,
+    /// The network the wallet's addresses belong to. Needed to ask the node's
+    /// address index about them; without it restore always scans the blocks.
+    network: Option<ergo_ser::address::NetworkPrefix>,
+    /// Blocks the next `blocks-since` call asks for, never above
+    /// `config.page`. Shared by every pass so a learned size survives the gap
+    /// between passes.
+    page: AtomicU32,
     #[cfg(test)]
     panic_next_commit: AtomicBool,
 }
@@ -133,15 +153,34 @@ struct SyncStart {
 
 impl StandaloneSyncer {
     pub fn new(service: Arc<WalletService>, config: SyncConfig, tip: Arc<CachedNodeTip>) -> Self {
+        let page = AtomicU32::new(config.page.min(INITIAL_PAGE));
         Self {
             service,
             config,
             tip,
             fail_next_commit: Arc::new(AtomicBool::new(false)),
             cancelled: AtomicBool::new(false),
+            response_cap: MAX_RESPONSE_BODY_BYTES,
+            network: None,
+            page,
             #[cfg(test)]
             panic_next_commit: AtomicBool::new(false),
         }
+    }
+
+    /// Let a rebuild from genesis ask the node's address index where the
+    /// wallet's history is, instead of reading every block. The network is
+    /// that of the node, which rejects addresses of any other.
+    pub fn with_network(mut self, network: ergo_ser::address::NetworkPrefix) -> Self {
+        self.network = Some(network);
+        self
+    }
+
+    /// Steer the adaptive page toward a client whose response cap is not the
+    /// daemon's default `MAX_RESPONSE_BODY_BYTES`.
+    pub fn with_response_cap(mut self, cap: usize) -> Self {
+        self.response_cap = cap;
+        self
     }
 
     pub fn cancel(&self) {
@@ -167,6 +206,17 @@ impl StandaloneSyncer {
 
     pub fn service(&self) -> &Arc<WalletService> {
         &self.service
+    }
+
+    /// Whether a pass has anything to match blocks against: a tracked key or a
+    /// registered `/scan/*` rule. These are exactly the inputs of the matcher
+    /// (`tracked_keys` and `WalletScanMatcher::from_store`); watch-only
+    /// accounts are tracked keys too, so no other table counts. A caller that
+    /// finds nothing skips the pass: it would fetch the chain to match
+    /// nothing, and would create a cursor that a later first key must reset.
+    pub fn has_tracking(&self) -> Result<bool, SyncError> {
+        let read = self.service.store().read()?;
+        Ok(!read.tracked_pubkeys_with_paths()?.is_empty() || read.registered_scan_count()? > 0)
     }
 
     pub fn sync_once(&self) -> Result<SyncReport, SyncError> {
@@ -226,6 +276,13 @@ impl StandaloneSyncer {
             self.check_cancelled()?;
             if rebuild {
                 self.prepare_rebuild(&mut cursor, full_rebuild)?;
+                if full_rebuild {
+                    if let Some(seeded) = self.seed_from_index()? {
+                        cursor = seeded;
+                        // The seed read the chain after `tip` did.
+                        tip = self.tip()?;
+                    }
+                }
                 rebuild = false;
                 full_rebuild = false;
             }
@@ -257,8 +314,8 @@ impl StandaloneSyncer {
             let remaining = tip.height.saturating_sub(cursor.height).saturating_add(1);
             // Two independent ceilings: the page budget bounds this one
             // response body, the apply budget bounds the whole pass.
-            let limit = remaining
-                .min(self.config.page)
+            let mut limit = remaining
+                .min(self.page_limit())
                 .min(self.config.batch - processed);
             let response = if cursor.height > tip.height {
                 match self.probe_ancestor(&tip, limit, &mut rewinds_without_progress)? {
@@ -279,7 +336,9 @@ impl StandaloneSyncer {
                     }
                 }
             } else {
-                self.blocks_since(cursor.clone(), limit)?
+                let (response, used) = self.blocks_since_adaptive(cursor.clone(), limit)?;
+                limit = used;
+                response
             };
             self.check_cancelled()?;
             match response {
@@ -305,6 +364,7 @@ impl StandaloneSyncer {
                         }
                         continue;
                     }
+                    self.note_page(&forward.blocks);
                     let (tracked_trees, cached_pubkeys) = self.tracked_keys()?;
                     let matcher = WalletScanMatcher::from_store(self.service.store().as_ref())?;
                     for block in forward.blocks {
@@ -450,9 +510,9 @@ impl StandaloneSyncer {
                 ));
             }
             let probe = ChainCursor { height, header_id };
-            match self.blocks_since(probe.clone(), limit) {
-                Ok(BlocksSinceResponse::Forward(forward)) => {
-                    validate_page(&probe, &forward.blocks, &forward.tip, limit)?;
+            match self.blocks_since_adaptive(probe.clone(), limit) {
+                Ok((BlocksSinceResponse::Forward(forward), used)) => {
+                    validate_page(&probe, &forward.blocks, &forward.tip, used)?;
                     if forward.tip.height < probe.height {
                         return Err(SyncError::Protocol(
                             "probe is above response tip".to_string(),
@@ -463,7 +523,7 @@ impl StandaloneSyncer {
                         ancestor: probe,
                     })));
                 }
-                Ok(BlocksSinceResponse::Ancestor(ancestor)) => {
+                Ok((BlocksSinceResponse::Ancestor(ancestor), _)) => {
                     if ancestor.ancestor.height > probe.height {
                         return Err(SyncError::Protocol("ancestor is above probe".to_string()));
                     }
@@ -478,7 +538,7 @@ impl StandaloneSyncer {
                     }
                     ceiling = height - 1;
                 }
-                other => return other.map(Some),
+                other => return other.map(|(response, _)| Some(response)),
             }
         }
     }
@@ -543,6 +603,60 @@ impl StandaloneSyncer {
         Ok(())
     }
 
+    /// Replace the replay of every block from genesis with the blocks the
+    /// node's address index names. Returns the cursor the wallet is then valid
+    /// at, or `None` to scan as usual: no network or index, registered scans
+    /// (rules the index knows nothing about), or an index that disagrees with
+    /// the chain. Nothing is kept from a seed that did not complete.
+    fn seed_from_index(&self) -> Result<Option<ChainCursor>, SyncError> {
+        use ergo_wallet_service::address_index::{AddressIndexError, BackfillTarget};
+        let Some(network) = self.network else {
+            return Ok(None);
+        };
+        let read = self.service.store().read()?;
+        let keys: Vec<(u64, [u8; 33])> = read
+            .tracked_pubkeys_with_paths()?
+            .into_iter()
+            .map(|(index, pubkey, _)| (index, pubkey))
+            .collect();
+        let has_scans = read.registered_scan_count()? > 0;
+        drop(read);
+        if keys.is_empty() || has_scans {
+            return Ok(None);
+        }
+        let mut write = self.service.store().begin_write()?;
+        let report = match self.service.backfill_from_index(
+            write.as_mut(),
+            network,
+            &keys,
+            &BackfillTarget::ToTip,
+            &|| self.is_cancelled(),
+        ) {
+            Ok(report) => report,
+            Err(AddressIndexError::Cancelled) => return Err(SyncError::Cancelled),
+            Err(AddressIndexError::Chain(error)) if is_retryable(&error) => {
+                return Err(SyncError::Chain(error));
+            }
+            Err(error) => {
+                tracing::info!(%error, "address index not used; rebuilding from the blocks");
+                return Ok(None);
+            }
+        };
+        if report.cursor.is_genesis_sentinel() {
+            return Ok(None);
+        }
+        write.record_applied_header(report.cursor.height, &report.cursor.header_id)?;
+        write.set_scan_cursor(report.cursor.height, Some(&report.cursor.header_id))?;
+        write.set_scan_invalidated(false)?;
+        write.commit()?;
+        tracing::info!(
+            height = report.cursor.height,
+            blocks = report.blocks_applied,
+            "wallet history restored from the node's address index"
+        );
+        Ok(Some(report.cursor))
+    }
+
     fn finish_rebuild(&self, was_rebuild: bool) -> Result<(), SyncError> {
         if !was_rebuild {
             return Ok(());
@@ -583,6 +697,65 @@ impl StandaloneSyncer {
                 })
         })
         .map_err(map_chain_error)
+    }
+
+    /// The page the next request may ask for.
+    fn page_limit(&self) -> u32 {
+        self.page.load(Ordering::SeqCst).clamp(1, self.config.page)
+    }
+
+    /// `blocks_since`, retried with half the page when the body goes over the
+    /// response cap. Returns the response with the page size it was served at,
+    /// the bound `validate_page` must hold it to. A one-block page that is
+    /// still too large is terminal (see `map_chain_error`).
+    fn blocks_since_adaptive(
+        &self,
+        cursor: ChainCursor,
+        mut limit: u32,
+    ) -> Result<(ergo_wallet_service::BlocksSinceResponse, u32), SyncError> {
+        loop {
+            match self.blocks_since(cursor.clone(), limit) {
+                Ok(response) => return Ok((response, limit)),
+                Err(SyncError::Chain(ChainClientError::PageTooLarge { blocks, limit: cap })) => {
+                    // Keyed on what was asked for, not on what the client says
+                    // it was: nothing smaller than one block exists to retry.
+                    if limit <= 1 {
+                        return Err(SyncError::Protocol(format!(
+                            "a 1-block page does not fit the {cap}-byte response cap; a single \
+                             block larger than the cap is terminal"
+                        )));
+                    }
+                    let smaller = (limit / 2).max(1);
+                    tracing::warn!(
+                        blocks,
+                        cap,
+                        next_page = smaller,
+                        "blocks page went over the response cap; retrying with a smaller page"
+                    );
+                    self.page.store(smaller, Ordering::SeqCst);
+                    limit = smaller;
+                    self.check_cancelled()?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Steer the next page toward a quarter of the response cap using the
+    /// largest block just served, so one heavy block among light ones is not
+    /// averaged away: the page may fall to the size that fits at once, but
+    /// doubles at most.
+    fn note_page(&self, blocks: &[ChainBlock]) {
+        let Some(largest) = blocks.iter().map(estimated_wire_bytes).max() else {
+            return;
+        };
+        let target = (self.response_cap / TARGET_PAGE_FRACTION) as u64;
+        let fits = u32::try_from(target / largest.max(1)).unwrap_or(u32::MAX);
+        let current = self.page.load(Ordering::SeqCst);
+        let next = fits
+            .min(current.saturating_mul(2))
+            .clamp(1, self.config.page);
+        self.page.store(next, Ordering::SeqCst);
     }
 
     #[allow(clippy::type_complexity)]
@@ -701,6 +874,12 @@ fn map_chain_error(error: ChainClientError) -> SyncError {
         // failure:" prefix. It is never retried: `Protocol` has no retryable
         // arm, and a smaller page is not something the daemon will ask for.
         ChainClientError::Protocol(detail) => SyncError::Protocol(detail),
+        // No smaller page exists, so a single block over the cap cannot be
+        // fetched. Terminal, and named for the operator.
+        ChainClientError::PageTooLarge { blocks: 1, limit } => SyncError::Protocol(format!(
+            "a 1-block page does not fit the {limit}-byte response cap; a single block \
+             larger than the cap is terminal"
+        )),
         other => SyncError::Chain(other),
     }
 }
@@ -716,6 +895,30 @@ fn is_retryable(error: &ChainClientError) -> bool {
             | ChainClientError::Conflict
             | ChainClientError::StaleTip { .. }
     )
+}
+
+/// Rough size of one block in a `blocks-since` JSON body: the wire form carries
+/// the header, each transaction and each output box as hex, so the serialized
+/// bytes count twice (once as the transaction, once as its boxes) at two
+/// characters a byte, plus per-item JSON overhead. Only steers the page size;
+/// the response cap itself is enforced by the adapter.
+fn estimated_wire_bytes(block: &ChainBlock) -> u64 {
+    fn hex(len: usize) -> u64 {
+        (len as u64).saturating_mul(2)
+    }
+    let mut total = hex(block.header_bytes.len()).saturating_add(512);
+    for transaction in &block.transactions {
+        total = total
+            .saturating_add(hex(transaction.bytes.as_ref().map_or(0, Vec::len)))
+            .saturating_add(160)
+            .saturating_add(80 * transaction.inputs.len() as u64);
+        for output in &transaction.outputs {
+            total = total
+                .saturating_add(hex(output.bytes.len()))
+                .saturating_add(160);
+        }
+    }
+    total
 }
 
 fn validate_page(

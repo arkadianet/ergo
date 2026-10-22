@@ -18,19 +18,24 @@ use super::lifecycle::map_err;
 /// Per spec §6 + §8.1: rescan body is `{ "fromHeight": u32 }`.
 /// Optional; defaults to 0 (full from-genesis replay). Handler
 /// returns 200 immediately; the rebuild runs in the background via
-/// the writer task.
+/// the writer task. `noActivityBefore` (default false) lets an invalidated
+/// scan restart at `fromHeight` on the caller's word that the wallet had no
+/// activity before it.
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub(super) struct RescanBody {
     from_height: u32,
+    no_activity_before: bool,
 }
 
 pub(super) async fn rescan(
     State(admin): State<Arc<WalletApi>>,
     StrictJson(body): StrictJson<RescanBody>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
-    let from_height = body.from_height;
-    admin.rescan(from_height).await.map_err(map_err)?;
+    admin
+        .rescan_declaring(body.from_height, body.no_activity_before)
+        .await
+        .map_err(map_err)?;
     Ok(StatusCode::OK)
 }
 

@@ -1,3 +1,4 @@
+pub mod address_index;
 pub mod box_selector;
 pub mod chain;
 pub mod encrypted_db;
@@ -13,12 +14,13 @@ pub use box_selector::{
     BoxSummary, SelectionResult, SelectionTarget,
 };
 pub use chain::{
-    authenticate_header, AncestorBlocks, AncestorBlocksSince, BlocksSince, BlocksSinceRequest,
-    BlocksSinceResponse, BoxLookup, ChainBlock, ChainBox, ChainClient, ChainClientError,
-    ChainCursor, ChainHeader, ChainInput, ChainOutput, ChainSnapshot, ChainTip, ChainTransaction,
-    CommittedTip, ForwardBlocks, ForwardBlocksSince, HeaderAuthError, PrunedBlocks,
-    PrunedBlocksSince, ReemissionInput, Snapshot, Submit, SubmitError, SubmitRequest,
-    SubmitResponse, Tip, Utxo, UtxoLookup, UtxoLookupRequest,
+    authenticate_header, AddressHistory, AddressUsage, AncestorBlocks, AncestorBlocksSince,
+    BlocksSince, BlocksSinceRequest, BlocksSinceResponse, BoxLookup, ChainBlock, ChainBox,
+    ChainClient, ChainClientError, ChainCursor, ChainHeader, ChainInput, ChainOutput,
+    ChainSnapshot, ChainTip, ChainTransaction, CommittedTip, ForwardBlocks, ForwardBlocksSince,
+    HeaderAuthError, IndexedTransaction, PrunedBlocks, PrunedBlocksSince, ReemissionInput,
+    Snapshot, Submit, SubmitError, SubmitRequest, SubmitResponse, Tip, Utxo, UtxoLookup,
+    UtxoLookupRequest,
 };
 pub use runtime::{
     RescanReport, RescanRequest, WalletRuntime, WalletRuntimeError, WalletRuntimeStatus,

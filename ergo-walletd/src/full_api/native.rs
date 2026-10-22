@@ -406,8 +406,8 @@ pub(crate) async fn derive_address(
     StrictJson(req): StrictJson<dto::DeriveKeyRequest>,
 ) -> Result<Json<dto::DerivedAddress>, NativeErr> {
     let derived = match req {
-        dto::DeriveKeyRequest::Next => {
-            let r = admin.derive_next_key().await.map_err(error::map_err)?;
+        dto::DeriveKeyRequest::Next { fresh } => {
+            let r = admin.derive_next_key(fresh).await.map_err(error::map_err)?;
             // The bridge builds a canonical `m/44'/429'/0'/0/N` path, so its last
             // component is always a numeric index; a miss here is an internal bug.
             let index = index_from_path(&r.derivation_path).ok_or_else(|| {
@@ -423,7 +423,10 @@ pub(crate) async fn derive_address(
                 derivation_path: r.derivation_path,
             }
         }
-        dto::DeriveKeyRequest::Path { derivation_path } => {
+        dto::DeriveKeyRequest::Path {
+            derivation_path,
+            fresh,
+        } => {
             // Reject a caller path with no meaningful trailing index BEFORE
             // deriving (a bare `m/` would otherwise report a misleading index 0).
             let index = index_from_path(&derivation_path).ok_or_else(|| {
@@ -437,6 +440,7 @@ pub(crate) async fn derive_address(
                 .derive_key(
                     ergo_wallet_protocol::scala::admin_advanced::DeriveKeyRequest {
                         derivation_path: derivation_path.clone(),
+                        fresh,
                     },
                 )
                 .await
@@ -490,12 +494,15 @@ pub(crate) async fn change_address_put(
 
 /// `POST /api/v1/wallet/rescan` — trigger a wallet rescan (full rebuild when
 /// `fromHeight` is 0). `rescan_unavailable(409)` on a backend that cannot replay.
+/// `noActivityBefore: true` with `fromHeight > 0` restarts an invalidated scan
+/// at that height instead, on the caller's word that the wallet had no activity
+/// before it.
 pub(crate) async fn rescan(
     State(admin): State<Arc<WalletApi>>,
     StrictJson(req): StrictJson<dto::RescanRequest>,
 ) -> Result<StatusCode, NativeErr> {
     admin
-        .rescan(req.from_height)
+        .rescan_declaring(req.from_height, req.no_activity_before)
         .await
         .map_err(error::map_err)?;
     Ok(StatusCode::OK)

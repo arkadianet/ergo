@@ -262,7 +262,7 @@ impl WalletEngine {
                 )));
             }
         };
-        storage
+        let phrase = storage
             .init(strength_enum, &pass, &mnemonic_pass)
             .map_err(|e| match e {
                 ergo_wallet::error::WalletError::WalletAlreadyInitialized => {
@@ -272,7 +272,59 @@ impl WalletEngine {
                     WalletAdminError::InvalidMnemonic
                 }
                 _ => WalletAdminError::Internal(e.to_string()),
-            })
+            })?;
+        drop(storage);
+        self.anchor_fresh_wallet();
+        Ok(phrase)
+    }
+
+    /// A mnemonic `init` just generated cannot have history, so its wallet
+    /// starts at the node's committed tip instead of block 1. Best effort: the
+    /// seed is already saved and the caller is owed its phrase, so a node that
+    /// cannot be reached leaves the wallet to replay from genesis at first
+    /// unlock, as it always did.
+    ///
+    /// Every command, including a sync pass, takes the host's writer gate
+    /// before it runs, so no pass is in flight while this rewrites the cursor.
+    /// The rescan fence is checked as well: a cursor must never move under a
+    /// running rescan.
+    fn anchor_fresh_wallet(&self) {
+        if !self.store.rebuilds_history_on_key_additions() || self.rescan.operations_fenced() {
+            return;
+        }
+        // Registered scans have history of their own below the tip. Moving the
+        // cursor would clear it and never rescan it, so such a wallet takes the
+        // old path: the first unlock rebuilds from genesis for the scans too.
+        match self
+            .store
+            .read()
+            .and_then(|read| read.registered_scan_count())
+        {
+            Ok(0) => {}
+            Ok(_) => return,
+            Err(error) => {
+                warn!(%error, "could not read the scan registry; the new wallet will replay from genesis");
+                return;
+            }
+        }
+        let tip = match self.chain.committed_tip() {
+            Ok(Some(tip)) if tip.height > 0 => tip,
+            Ok(_) => return,
+            Err(error) => {
+                warn!(%error, "node tip unavailable; the new wallet will replay from genesis");
+                return;
+            }
+        };
+        let anchored = self.store.begin_write().and_then(|mut write| {
+            let recorded = write.begin_fresh_wallet(tip.height, &tip.header_id)?;
+            write.commit()?;
+            Ok(recorded)
+        });
+        match anchored {
+            Ok(true) => info!(height = tip.height, "new wallet starts at the node tip"),
+            Ok(false) => {}
+            Err(error) => warn!(%error, "could not start the new wallet at the node tip"),
+        }
     }
 
     pub fn restore(
@@ -302,6 +354,17 @@ impl WalletEngine {
                 .persist_scan_invalidation(true)
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         }
+        // A restored seed may have history: no fresh-wallet anchor left by an
+        // earlier `init` (whose secret was since removed) may vouch for it.
+        if self.store.rebuilds_history_on_key_additions() {
+            self.store
+                .begin_write()
+                .and_then(|mut write| {
+                    write.clear_fresh_anchor()?;
+                    write.commit()
+                })
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        }
         storage
             .restore(&mnemonic, &mnemonic_pass, &pass, use_pre_1627)
             .map_err(|e| match e {
@@ -321,6 +384,9 @@ impl WalletEngine {
             tracing::warn!("wallet unlock rejected: failed-attempt budget exhausted");
             return Err(WalletAdminError::RateLimited);
         }
+        // The first unlock of a wallet that `init` did not create is a
+        // restore: its keys beyond the first are still to be found.
+        let restoring = self.is_first_unlock_of_restored_wallet();
         let mut storage = self.storage.write();
         let mut state = self.state.write();
         let result = WalletBootService::unlock_and_sync(
@@ -344,6 +410,9 @@ impl WalletEngine {
             Ok(()) => {
                 self.unlock_limiter.record_success();
                 info!("wallet unlocked");
+                if restoring {
+                    self.discover_restored_keys();
+                }
             }
             Err(WalletAdminError::WrongPassword) => {
                 self.unlock_limiter.record_failure_at(unix_now());
@@ -354,6 +423,234 @@ impl WalletEngine {
             Err(_) => {}
         }
         result
+    }
+
+    /// No key is tracked yet and `init` did not start this wallet: the next
+    /// unlock derives its first keys from a seed that may have history.
+    fn is_first_unlock_of_restored_wallet(&self) -> bool {
+        let Ok(read) = self.store.read() else {
+            return false;
+        };
+        matches!(read.tracked_pubkeys_with_paths(), Ok(rows) if rows.is_empty())
+            && matches!(read.fresh_anchor(), Ok(None))
+    }
+
+    /// Find the used keys of a restored wallet through the node's address
+    /// index, so restore does not stop at the first address. Derives the EIP-3
+    /// external addresses in windows of [`GAP_LIMIT`], asks the index which
+    /// were ever used, stops after a full window past the last used one, and
+    /// tracks every key up to it. Best effort and silent when the node has no
+    /// index: the wallet keeps the keys the unlock derived, as before.
+    fn discover_restored_keys(&mut self) {
+        let Some(service) = self.service.clone() else {
+            return;
+        };
+        if !self.store.rebuilds_history_on_key_additions() {
+            return;
+        }
+        match self.track_discovered_keys(&service) {
+            Ok(0) => {}
+            Ok(added) => info!(
+                added,
+                "restored wallet keys found through the address index"
+            ),
+            Err(error) => {
+                warn!(%error, "address index key discovery failed; keeping the first keys")
+            }
+        }
+    }
+
+    fn track_discovered_keys(
+        &mut self,
+        service: &crate::runtime::WalletService,
+    ) -> Result<usize, WalletAdminError> {
+        use crate::address_index::{AddressIndexError, GAP_LIMIT, MAX_DISCOVERY_WINDOWS};
+        use ergo_wallet::derivation::{DerivationPath, HARDENED_OFFSET};
+        let network = self.config.network;
+        let internal =
+            |error: &dyn std::fmt::Display| WalletAdminError::Internal(error.to_string());
+        let mut derived: Vec<(u32, [u8; 33])> = Vec::new();
+        let mut last_used: Option<u32> = None;
+        {
+            let storage = self.storage.read();
+            let unlocked = storage.unlocked().ok_or(WalletAdminError::Locked)?;
+            for window in 0..MAX_DISCOVERY_WINDOWS {
+                let start = window * GAP_LIMIT;
+                let mut keys = Vec::with_capacity(GAP_LIMIT as usize);
+                for index in start..start + GAP_LIMIT {
+                    let path = DerivationPath::from_components(vec![
+                        HARDENED_OFFSET | 44,
+                        HARDENED_OFFSET | 429,
+                        HARDENED_OFFSET,
+                        0,
+                        index,
+                    ]);
+                    let pubkey = unlocked
+                        .master
+                        .derive_pubkey_at_path(&path)
+                        .map_err(|error| internal(&error))?;
+                    keys.push((index, pubkey));
+                }
+                let pubkeys: Vec<[u8; 33]> = keys.iter().map(|(_, pubkey)| *pubkey).collect();
+                let used = match service.indexed_key_usage(network, &pubkeys) {
+                    Ok(Some(usage)) => usage.used,
+                    Ok(None) | Err(AddressIndexError::Unavailable(_)) => return Ok(0),
+                    Err(error) => return Err(internal(&error)),
+                };
+                // An address only counts while it is within the gap limit of
+                // the last used one; a later hit past that is a different
+                // wallet's business, as it would be for a full address scan.
+                let horizon =
+                    |last: Option<u32>| last.map_or(GAP_LIMIT - 1, |last| last + GAP_LIMIT);
+                let mut exhausted = false;
+                for ((index, _), used) in keys.iter().zip(used) {
+                    if *index > horizon(last_used) {
+                        exhausted = true;
+                        break;
+                    }
+                    if used {
+                        last_used = Some(*index);
+                    }
+                }
+                derived.extend(keys);
+                if exhausted || horizon(last_used) < start + GAP_LIMIT {
+                    break;
+                }
+            }
+        }
+        let Some(last_used) = last_used else {
+            return Ok(0);
+        };
+        let read = self.store.read().map_err(|error| internal(&error))?;
+        let tracked = read
+            .tracked_pubkeys_with_paths()
+            .map_err(|error| internal(&error))?;
+        drop(read);
+        let mut next_index = tracked
+            .iter()
+            .map(|(index, _, _)| *index)
+            .max()
+            .map_or(0, |index| index + 1);
+        let mut write = self.store.begin_write().map_err(|error| internal(&error))?;
+        let mut added = 0;
+        for (index, pubkey) in derived.into_iter().filter(|(index, _)| *index <= last_used) {
+            let components = vec![
+                HARDENED_OFFSET | 44,
+                HARDENED_OFFSET | 429,
+                HARDENED_OFFSET,
+                0,
+                index,
+            ];
+            if tracked.iter().any(|(_, _, path)| *path == components) {
+                continue;
+            }
+            let meta = crate::wallet::types::TrackedPubkeyMeta {
+                derivation_path: components,
+                derivation_path_label: String::new(),
+                added_at_height: 0,
+            };
+            write
+                .insert_tracked_pubkey_keep_history(next_index, pubkey, &meta)
+                .map_err(|error| internal(&error))?;
+            next_index += 1;
+            added += 1;
+        }
+        write
+            .rebuild_visible_addresses()
+            .map_err(|error| internal(&error))?;
+        write.commit().map_err(|error| internal(&error))?;
+        let read = self.store.read().map_err(|error| internal(&error))?;
+        let hydration = crate::wallet::hydration::HydrationSnapshot::load(read.as_ref())
+            .map_err(|error| internal(&error))?;
+        self.state
+            .write()
+            .hydrate_from_reader(&hydration, network)
+            .map_err(|error| internal(&error))?;
+        Ok(added)
+    }
+
+    /// `POST /wallet/rescan` with `noActivityBefore`: the caller states the
+    /// wallet had no activity before `from_height`, so an invalidated scan can
+    /// restart there instead of at genesis. The stored history is cleared,
+    /// the cursor is placed on the block before `from_height`, and the scan is
+    /// valid again, with an incomplete-history record naming that block so
+    /// status never claims history below it. Block following then resumes at
+    /// `from_height`; there is no rescan job. An implicit partial rescan of an
+    /// invalidated scan stays refused (see [`Self::prepare_rescan`]).
+    pub fn declare_history_start(&mut self, from_height: u32) -> Result<(), WalletAdminError> {
+        let internal =
+            |error: &dyn std::fmt::Display| WalletAdminError::Internal(error.to_string());
+        if from_height == 0 {
+            return Err(WalletAdminError::BadRequest(
+                "noActivityBefore needs a fromHeight above 0".to_string(),
+            ));
+        }
+        let service = self.service.clone().ok_or_else(|| {
+            WalletAdminError::RescanUnavailable("this wallet has no chain client".to_string())
+        })?;
+        if self.rescan.operations_fenced() {
+            return Err(WalletAdminError::RescanUnavailable(
+                "wallet rescan is running".to_string(),
+            ));
+        }
+        let read = self.store.read().map_err(|error| internal(&error))?;
+        if !read.scan_invalidated().map_err(|error| internal(&error))? {
+            return Err(WalletAdminError::BadRequest(
+                "noActivityBefore applies only to an invalidated scan; a valid wallet can rescan \
+                 from any height without it"
+                    .to_string(),
+            ));
+        }
+        if read
+            .registered_scan_count()
+            .map_err(|error| internal(&error))?
+            > 0
+        {
+            return Err(WalletAdminError::BadRequest(
+                "noActivityBefore cannot restart a wallet that has registered scans".to_string(),
+            ));
+        }
+        drop(read);
+        let chain = service.chain();
+        let mut tip = chain
+            .committed_tip()
+            .map_err(|error| WalletAdminError::NodeUnavailable(error.to_string()))?;
+        if from_height > tip.height {
+            return Err(WalletAdminError::BadRequest(format!(
+                "fromHeight {from_height} is above the node tip {}",
+                tip.height
+            )));
+        }
+        let anchor = from_height - 1;
+        let anchor_id = if anchor == 0 {
+            crate::chain::GENESIS_CURSOR_ID
+        } else {
+            let mut attempts = 0;
+            loop {
+                match chain.block_at(anchor, tip.clone()) {
+                    Ok(block) => break block.block_id,
+                    Err(crate::chain::ChainClientError::StaleTip { actual, .. })
+                        if attempts < 3 =>
+                    {
+                        attempts += 1;
+                        tip = actual;
+                    }
+                    Err(error) => {
+                        return Err(WalletAdminError::NodeUnavailable(error.to_string()));
+                    }
+                }
+            }
+        };
+        let mut write = self.store.begin_write().map_err(|error| internal(&error))?;
+        write
+            .declare_history_start(anchor, &anchor_id)
+            .map_err(|error| internal(&error))?;
+        write.commit().map_err(|error| internal(&error))?;
+        info!(
+            from_height,
+            "wallet history restarted at a declared block; earlier history is not reconstructed"
+        );
+        Ok(())
     }
 
     pub fn lock(&mut self) -> Result<(), WalletAdminError> {

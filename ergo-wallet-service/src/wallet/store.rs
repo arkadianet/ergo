@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use crate::wallet::apply::{
     apply_block_to_scans, apply_block_to_scans_rescan, apply_block_to_wallet,
-    apply_block_to_wallet_rescan, clear_scan_registry, clear_scan_tracking, owned_to_block_txs,
-    rewind_scans_from_height, rollback_block_from_wallet, rollback_scans_from_block,
-    set_scan_cursor,
+    apply_block_to_wallet_backfill, apply_block_to_wallet_rescan, clear_scan_registry,
+    clear_scan_tracking, owned_to_block_txs, rewind_scans_from_height, rollback_block_from_wallet,
+    rollback_scans_from_block, set_scan_cursor,
 };
 pub use crate::wallet::error::WalletStoreError;
 use crate::wallet::maturity::{
@@ -83,6 +83,11 @@ pub trait WalletRead {
     }
     fn inclusion_height_known(&self, _box_id: [u8; 32]) -> Result<bool, WalletStoreError> {
         Ok(true)
+    }
+    /// The block `init` created this wallet at, while the scan cursor is still
+    /// exactly there. `None` for a wallet that was restored or has moved on.
+    fn fresh_anchor(&self) -> Result<Option<(u32, [u8; 32])>, WalletStoreError> {
+        Ok(None)
     }
     fn scan_cursor(&self) -> Result<Option<WalletScanCursor>, WalletStoreError>;
     fn chain_index_header(&self, height: u32) -> Result<Option<[u8; 32]>, WalletStoreError>;
@@ -185,6 +190,62 @@ pub trait WalletWrite {
         pubkey: [u8; 33],
         meta: &TrackedPubkeyMeta,
     ) -> Result<(), WalletStoreError>;
+    /// Track `pubkey` without discarding the wallet's history, whatever the
+    /// store's key-addition policy. The caller has established that the key
+    /// needs no replay: it never appeared on chain, its history is being
+    /// backfilled in this same transaction, or the operator declared it fresh.
+    /// A wallet with incomplete-history coverage records the key as covered,
+    /// since that decision is exactly what coverage stands for.
+    fn insert_tracked_pubkey_keep_history(
+        &mut self,
+        path_idx: u64,
+        pubkey: [u8; 33],
+        meta: &TrackedPubkeyMeta,
+    ) -> Result<(), WalletStoreError>;
+    /// Start a wallet that `init` just created at the given block: clear any
+    /// leftover history, put the scan cursor there, and remember that the
+    /// wallet is fresh so its first keys are tracked from this block instead
+    /// of replaying the chain. Returns `false` (and changes nothing) for a
+    /// store that does not rebuild history on key additions, whose cursor
+    /// policy is its own.
+    fn begin_fresh_wallet(
+        &mut self,
+        height: u32,
+        header_id: &[u8; 32],
+    ) -> Result<bool, WalletStoreError>;
+    /// The block `begin_fresh_wallet` recorded, while the scan cursor is still
+    /// exactly there. `None` for any other wallet.
+    fn fresh_anchor(&self) -> Result<Option<(u32, [u8; 32])>, WalletStoreError>;
+    fn clear_fresh_anchor(&mut self) -> Result<(), WalletStoreError>;
+    /// Apply one block for keys new to a populated wallet (or to a store being
+    /// seeded from an address index): no cursor movement and no contiguity
+    /// requirement. See [`crate::wallet::apply::apply_block_to_wallet_backfill`].
+    fn backfill_block(
+        &mut self,
+        height: u32,
+        tracked_p2pk_trees: &BTreeSet<Vec<u8>>,
+        cached_pubkeys: &BTreeMap<u64, [u8; 33]>,
+        block: &crate::wallet::scan::RescanBlock,
+    ) -> Result<(), WalletStoreError>;
+    /// Promote mining rewards that have matured by `height`.
+    fn promote_matured(&mut self, height: u32) -> Result<(), WalletStoreError>;
+    /// Record that the wallet's chain view includes `header_id` at `height`,
+    /// so a later reorg can name it as a retained ancestor. Standalone only.
+    fn record_applied_header(
+        &mut self,
+        height: u32,
+        header_id: &[u8; 32],
+    ) -> Result<(), WalletStoreError>;
+    /// Discard the wallet's history and restart it just after the declared
+    /// block: the scan cursor goes to `(anchor_height, anchor_header_id)`, the
+    /// scan is valid again, and an incomplete-history record notes that
+    /// nothing at or below the anchor was reconstructed. The caller owns the
+    /// claim that the wallet had no activity there.
+    fn declare_history_start(
+        &mut self,
+        anchor_height: u32,
+        anchor_header_id: &[u8; 32],
+    ) -> Result<(), WalletStoreError>;
     fn rebuild_visible_addresses(&mut self) -> Result<(), WalletStoreError>;
     fn set_derivation_head(&mut self, head: u64) -> Result<(), WalletStoreError>;
     fn prepare_rescan(
@@ -238,6 +299,15 @@ pub trait WalletStore: Send + Sync {
     }
 
     fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError>;
+
+    /// Whether adding a tracked key discards history and rescans from genesis
+    /// (the seed-hosted standalone policy; see
+    /// [`RedbWalletStore::rebuild_history_on_key_additions`]). Callers that can
+    /// avoid the replay (an address-index lookup, a fresh key) only have
+    /// anything to gain when this is true.
+    fn rebuilds_history_on_key_additions(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone)]
@@ -335,6 +405,10 @@ impl WalletStore for RedbWalletStore {
             rebuild_history_on_key_additions: self.rebuild_history_on_key_additions,
         }))
     }
+
+    fn rebuilds_history_on_key_additions(&self) -> bool {
+        self.rebuild_history_on_key_additions
+    }
 }
 
 impl WalletStore for Database {
@@ -411,6 +485,27 @@ impl WalletRead for RedbWalletRead {
     fn inclusion_height_known(&self, box_id: [u8; 32]) -> Result<bool, WalletStoreError> {
         super::utxo_scan::inclusion_height_known(&self.txn, box_id)
     }
+    fn fresh_anchor(&self) -> Result<Option<(u32, [u8; 32])>, WalletStoreError> {
+        if !self.standalone {
+            return Ok(None);
+        }
+        let anchor = match self
+            .txn
+            .open_table(crate::wallet::tables::WALLET_FRESH_ANCHOR)
+        {
+            Ok(table) => table.get(())?.map(|row| row.value()),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let Some((height, header_id)) = anchor else {
+            return Ok(None);
+        };
+        let at_anchor = self
+            .scan_cursor()?
+            .is_some_and(|cursor| cursor.height == height && cursor.header_id == Some(header_id));
+        Ok(at_anchor.then_some((height, header_id)))
+    }
+
     fn scan_cursor(&self) -> Result<Option<WalletScanCursor>, WalletStoreError> {
         self.reader().scan_cursor().map_err(Into::into)
     }
@@ -937,6 +1032,47 @@ fn ensure_unique_applied_header(
     Ok(())
 }
 
+/// The outputs of every transaction in `block`, in the borrowed form the apply
+/// functions take.
+fn bind_block_outputs(
+    block: &crate::wallet::scan::RescanBlock,
+) -> Vec<Vec<crate::wallet::apply::BlockOutput<'_>>> {
+    block
+        .txs
+        .iter()
+        .map(|tx| {
+            tx.outputs
+                .iter()
+                .map(|output| crate::wallet::apply::BlockOutput {
+                    box_id: output.box_id,
+                    output_index: output.output_index,
+                    ergo_tree_bytes: &output.ergo_tree_bytes,
+                    value: output.value,
+                    assets: output.assets.clone(),
+                    miner_reward_pubkey: output.miner_reward_pubkey,
+                    box_bytes: &output.box_bytes,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn block_tx_views<'a>(
+    block: &'a crate::wallet::scan::RescanBlock,
+    bound: &'a [Vec<crate::wallet::apply::BlockOutput<'a>>],
+) -> Vec<crate::wallet::apply::BlockTx<'a>> {
+    block
+        .txs
+        .iter()
+        .zip(bound.iter())
+        .map(|(tx, outputs)| crate::wallet::apply::BlockTx {
+            tx_id: tx.tx_id,
+            inputs: &tx.inputs,
+            outputs,
+        })
+        .collect()
+}
+
 struct RollbackGuard {
     invalidate: bool,
 }
@@ -1259,6 +1395,127 @@ impl WalletWrite for RedbWalletWrite<'_> {
             self.set_rescan_state(&RescanState::Idle)?;
         }
         Ok(())
+    }
+
+    fn insert_tracked_pubkey_keep_history(
+        &mut self,
+        path_idx: u64,
+        pubkey: [u8; 33],
+        meta: &TrackedPubkeyMeta,
+    ) -> Result<(), WalletStoreError> {
+        let meta_bytes = bincode::serialize(meta).map_err(|error| {
+            WalletStoreError::Decode(format!("tracked pubkey metadata encode: {error}"))
+        })?;
+        self.txn()
+            .open_table(crate::wallet::tables::WALLET_TRACKED_PUBKEYS)?
+            .insert(
+                crate::wallet::tables::tracked_pubkey_key(path_idx, &pubkey),
+                meta_bytes,
+            )?;
+        super::utxo_scan::cover_pubkey(self.txn(), &pubkey)
+    }
+
+    fn begin_fresh_wallet(
+        &mut self,
+        height: u32,
+        header_id: &[u8; 32],
+    ) -> Result<bool, WalletStoreError> {
+        if !self.standalone || !self.rebuild_history_on_key_additions || height == 0 {
+            return Ok(false);
+        }
+        // Anything already stored belongs to no wallet this seed controls.
+        self.prepare_rescan(0, true)?;
+        set_scan_cursor(self.txn(), height, Some(header_id))?;
+        put_applied_header(self.txn(), height, header_id)?;
+        self.set_scan_invalidated(false)?;
+        self.set_rescan_state(&RescanState::Idle)?;
+        self.txn()
+            .open_table(crate::wallet::tables::WALLET_FRESH_ANCHOR)?
+            .insert((), (height, *header_id))?;
+        Ok(true)
+    }
+
+    fn fresh_anchor(&self) -> Result<Option<(u32, [u8; 32])>, WalletStoreError> {
+        if !self.standalone {
+            return Ok(None);
+        }
+        let anchor = self
+            .txn()
+            .open_table(crate::wallet::tables::WALLET_FRESH_ANCHOR)?
+            .get(())?
+            .map(|row| row.value());
+        let Some((height, header_id)) = anchor else {
+            return Ok(None);
+        };
+        let at_anchor = read_wallet_cursor(self.txn())?
+            .is_some_and(|cursor| cursor.height == height && cursor.header_id == Some(header_id));
+        Ok(at_anchor.then_some((height, header_id)))
+    }
+
+    fn clear_fresh_anchor(&mut self) -> Result<(), WalletStoreError> {
+        if !self.standalone {
+            return Ok(());
+        }
+        self.txn()
+            .open_table(crate::wallet::tables::WALLET_FRESH_ANCHOR)?
+            .remove(())?;
+        Ok(())
+    }
+
+    fn backfill_block(
+        &mut self,
+        height: u32,
+        tracked_p2pk_trees: &BTreeSet<Vec<u8>>,
+        cached_pubkeys: &BTreeMap<u64, [u8; 33]>,
+        block: &crate::wallet::scan::RescanBlock,
+    ) -> Result<(), WalletStoreError> {
+        let bound = bind_block_outputs(block);
+        let txs = block_tx_views(block, &bound);
+        apply_block_to_wallet_backfill(
+            self.txn(),
+            tracked_p2pk_trees,
+            cached_pubkeys,
+            height,
+            &block.block_id,
+            &txs,
+        )?;
+        Ok(())
+    }
+
+    fn promote_matured(&mut self, height: u32) -> Result<(), WalletStoreError> {
+        promote_matured_boxes_rescan(self.txn(), height)?;
+        Ok(())
+    }
+
+    fn record_applied_header(
+        &mut self,
+        height: u32,
+        header_id: &[u8; 32],
+    ) -> Result<(), WalletStoreError> {
+        if self.standalone {
+            ensure_unique_applied_header(self.txn(), height, header_id)?;
+            put_applied_header(self.txn(), height, header_id)?;
+        }
+        Ok(())
+    }
+
+    fn declare_history_start(
+        &mut self,
+        anchor_height: u32,
+        anchor_header_id: &[u8; 32],
+    ) -> Result<(), WalletStoreError> {
+        self.prepare_rescan(0, true)?;
+        set_scan_cursor(
+            self.txn(),
+            anchor_height,
+            (anchor_height > 0).then_some(anchor_header_id),
+        )?;
+        if anchor_height > 0 {
+            self.record_applied_header(anchor_height, anchor_header_id)?;
+        }
+        super::utxo_scan::declare_start(self.txn(), anchor_height, anchor_header_id)?;
+        self.set_scan_invalidated(false)?;
+        self.set_rescan_state(&RescanState::Idle)
     }
 
     fn rebuild_visible_addresses(&mut self) -> Result<(), WalletStoreError> {
@@ -1914,6 +2171,272 @@ mod tests {
         let read = store.read().unwrap();
         assert_seeded_history(read.as_ref());
         assert_eq!(read.tracked_pubkeys_with_paths().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn keep_history_key_insert_preserves_history_under_the_rebuild_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap();
+        seed_history(&store);
+        let store = store.rebuild_history_on_key_additions();
+        assert!(store.rebuilds_history_on_key_additions());
+        let mut write = store.begin_write().unwrap();
+        write
+            .insert_tracked_pubkey_keep_history(1, [2; 33], &tracked_meta(2))
+            .unwrap();
+        write.rebuild_visible_addresses().unwrap();
+        write.commit().unwrap();
+        let read = store.read().unwrap();
+        assert_seeded_history(read.as_ref());
+        assert_eq!(read.tracked_pubkeys_with_paths().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_fresh_wallet_is_anchored_once_and_only_while_the_cursor_is_there() {
+        let anchor_id = [0x77; 32];
+        // A store that keeps history on key additions has no use for it.
+        let dir = tempfile::tempdir().unwrap();
+        let plain = RedbWalletStore::open_standalone(dir.path().join("plain.redb")).unwrap();
+        let mut write = plain.begin_write().unwrap();
+        assert!(!write.begin_fresh_wallet(9, &anchor_id).unwrap());
+        write.commit().unwrap();
+        assert!(plain.read().unwrap().scan_cursor().unwrap().is_none());
+
+        let store = RedbWalletStore::open_standalone(dir.path().join("wallet.redb"))
+            .unwrap()
+            .rebuild_history_on_key_additions();
+        seed_history(&store);
+        let mut write = store.begin_write().unwrap();
+        assert!(write.begin_fresh_wallet(9, &anchor_id).unwrap());
+        assert_eq!(write.fresh_anchor().unwrap(), Some((9, anchor_id)));
+        write.commit().unwrap();
+        let read = store.read().unwrap();
+        assert_eq!(read.fresh_anchor().unwrap(), Some((9, anchor_id)));
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 9);
+        assert_eq!(
+            read.scan_cursor().unwrap().unwrap().header_id,
+            Some(anchor_id)
+        );
+        assert_eq!(
+            read.applied_header_at_or_below(9).unwrap(),
+            Some((9, anchor_id))
+        );
+        assert!(!read.scan_invalidated().unwrap());
+        // Whatever was stored before belongs to no wallet this seed controls.
+        assert!(read.all_boxes().unwrap().is_empty());
+        assert!(read.all_transactions().unwrap().is_empty());
+        drop(read);
+
+        // The anchor means "the cursor is still where the wallet was born".
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_cursor(10, Some(&[0x78; 32])).unwrap();
+        assert_eq!(write.fresh_anchor().unwrap(), None);
+        write.commit().unwrap();
+        assert_eq!(store.read().unwrap().fresh_anchor().unwrap(), None);
+
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_cursor(9, Some(&anchor_id)).unwrap();
+        assert_eq!(write.fresh_anchor().unwrap(), Some((9, anchor_id)));
+        write.clear_fresh_anchor().unwrap();
+        assert_eq!(write.fresh_anchor().unwrap(), None);
+    }
+
+    #[test]
+    fn a_declared_start_clears_history_and_records_what_was_not_reconstructed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::open_standalone(dir.path().join("wallet.redb"))
+            .unwrap()
+            .rebuild_history_on_key_additions();
+        seed_history(&store);
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_invalidated(true).unwrap();
+        write.commit().unwrap();
+
+        let mut write = store.begin_write().unwrap();
+        write.declare_history_start(6, &[0x66; 32]).unwrap();
+        write.commit().unwrap();
+        let read = store.read().unwrap();
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 6);
+        assert_eq!(
+            read.scan_cursor().unwrap().unwrap().header_id,
+            Some([0x66; 32])
+        );
+        assert_eq!(read.chain_index_header(6).unwrap(), Some([0x66; 32]));
+        assert!(read.all_boxes().unwrap().is_empty());
+        assert!(read.all_transactions().unwrap().is_empty());
+        assert!(!read.scan_invalidated().unwrap());
+        assert_eq!(read.rescan_state().unwrap(), RescanState::Idle);
+        let coverage = read.discovery_coverage().unwrap().unwrap();
+        assert_eq!(coverage.anchor_height, 6);
+        assert_eq!(coverage.anchor_header_id, hex::encode([0x66; 32]));
+        assert!(!coverage.history_complete);
+        assert_eq!(coverage.covered_pubkeys, vec![hex::encode([1; 33])]);
+        drop(read);
+
+        // A key added later without a replay (the caller has established it
+        // needs none) is counted as covered, so the record never turns the
+        // scan invalid on its account.
+        let mut write = store.begin_write().unwrap();
+        write
+            .insert_tracked_pubkey_keep_history(1, [2; 33], &tracked_meta(2))
+            .unwrap();
+        write.commit().unwrap();
+        let read = store.read().unwrap();
+        assert!(!read.scan_invalidated().unwrap());
+        assert_eq!(
+            read.discovery_coverage()
+                .unwrap()
+                .unwrap()
+                .covered_pubkeys
+                .len(),
+            2
+        );
+        drop(read);
+        let mut write = store.begin_write().unwrap();
+        write.prepare_rescan(0, true).unwrap();
+        write.commit().unwrap();
+        assert!(
+            store
+                .read()
+                .unwrap()
+                .discovery_coverage()
+                .unwrap()
+                .is_none(),
+            "a full rebuild replaces the declared start with real history"
+        );
+    }
+
+    #[test]
+    fn backfilled_blocks_merge_into_a_recorded_transaction_in_chain_order() {
+        use crate::wallet::scan::{RescanBlock, RescanTx};
+        use crate::wallet::types::OwnedBlockOutput;
+        fn output(id: u8, index: u16, tree: u8) -> OwnedBlockOutput {
+            OwnedBlockOutput {
+                box_id: [id; 32],
+                output_index: index,
+                ergo_tree_bytes: vec![tree],
+                value: u64::from(id),
+                assets: vec![],
+                miner_reward_pubkey: None,
+                box_bytes: vec![],
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap();
+        // Box 0x10 pays key A (tree 1) at height 1; at height 2 it is spent in
+        // a transaction that pays key A, key B (tree 2) and a stranger.
+        let first = RescanBlock {
+            block_id: [0xA1; 32],
+            txs: vec![RescanTx {
+                tx_id: [0xF1; 32],
+                inputs: vec![],
+                outputs: vec![output(0x10, 0, 1)],
+            }],
+        };
+        let spend = RescanBlock {
+            block_id: [0xA2; 32],
+            txs: vec![RescanTx {
+                tx_id: [0xF2; 32],
+                inputs: vec![[0x10; 32]],
+                outputs: vec![output(0x20, 0, 9), output(0x21, 1, 2), output(0x22, 2, 1)],
+            }],
+        };
+        let tree_a = BTreeSet::from([vec![1]]);
+        let keys_a = BTreeMap::from([(0u64, [1u8; 33])]);
+        let tree_b = BTreeSet::from([vec![2]]);
+        let keys_b = BTreeMap::from([(1u64, [2u8; 33])]);
+        let both_trees = BTreeSet::from([vec![1], vec![2]]);
+        let both_keys = BTreeMap::from([(0u64, [1u8; 33]), (1u64, [2u8; 33])]);
+
+        // What one scan with both keys writes.
+        let reference =
+            RedbWalletStore::open_standalone(dir.path().join("reference.redb")).unwrap();
+        let mut write = reference.begin_write().unwrap();
+        write.set_scan_cursor(0, None).unwrap();
+        write
+            .apply_rescan_block(1, &both_trees, &both_keys, &first, None)
+            .unwrap();
+        write
+            .apply_rescan_block(2, &both_trees, &both_keys, &spend, None)
+            .unwrap();
+        write.commit().unwrap();
+
+        // Key A scanned first, key B added afterwards from the same blocks.
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_cursor(0, None).unwrap();
+        write
+            .apply_rescan_block(1, &tree_a, &keys_a, &first, None)
+            .unwrap();
+        write
+            .apply_rescan_block(2, &tree_a, &keys_a, &spend, None)
+            .unwrap();
+        write.commit().unwrap();
+        let mut write = store.begin_write().unwrap();
+        write.backfill_block(1, &tree_b, &keys_b, &first).unwrap();
+        write.backfill_block(2, &tree_b, &keys_b, &spend).unwrap();
+        write.commit().unwrap();
+
+        let got = store.read().unwrap();
+        let want = reference.read().unwrap();
+        let debug = |read: &dyn WalletRead| {
+            let mut boxes = read.all_boxes().unwrap();
+            boxes.sort_by_key(|wallet_box| wallet_box.box_id);
+            let mut txs = read.all_transactions().unwrap();
+            txs.sort_by_key(|tx| (tx.block_height, tx.tx_id));
+            (format!("{boxes:?}"), format!("{txs:?}"))
+        };
+        assert_eq!(debug(got.as_ref()), debug(want.as_ref()));
+        // The transaction record names both keys' outputs, in output order.
+        let record = got.transaction_by_id(&[0xF2; 32]).unwrap().unwrap();
+        assert_eq!(record.wallet_outputs, vec![[0x21; 32], [0x22; 32]]);
+        assert_eq!(record.wallet_inputs, vec![[0x10; 32]]);
+        assert_eq!(
+            got.scan_cursor().unwrap().unwrap().height,
+            2,
+            "a backfill never moves the cursor"
+        );
+    }
+
+    #[test]
+    fn matured_rewards_are_promoted_once_the_backfill_reaches_their_height() {
+        use crate::wallet::scan::{RescanBlock, RescanTx};
+        use crate::wallet::types::OwnedBlockOutput;
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap();
+        let block = RescanBlock {
+            block_id: [0xB1; 32],
+            txs: vec![RescanTx {
+                tx_id: [0xF3; 32],
+                inputs: vec![],
+                outputs: vec![OwnedBlockOutput {
+                    box_id: [0x30; 32],
+                    output_index: 0,
+                    ergo_tree_bytes: vec![7],
+                    value: 5,
+                    assets: vec![],
+                    miner_reward_pubkey: Some([3; 33]),
+                    box_bytes: vec![],
+                }],
+            }],
+        };
+        let keys = BTreeMap::from([(0u64, [3u8; 33])]);
+        let mut write = store.begin_write().unwrap();
+        write
+            .backfill_block(10, &BTreeSet::new(), &keys, &block)
+            .unwrap();
+        write.promote_matured(729).unwrap();
+        write.commit().unwrap();
+        assert!(matches!(
+            store.read().unwrap().all_boxes().unwrap()[0].status,
+            BoxStatus::Immature { matures_at: 730 }
+        ));
+        let mut write = store.begin_write().unwrap();
+        write.promote_matured(730).unwrap();
+        write.commit().unwrap();
+        assert!(matches!(
+            store.read().unwrap().all_boxes().unwrap()[0].status,
+            BoxStatus::Confirmed
+        ));
     }
 
     #[test]

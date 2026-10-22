@@ -71,7 +71,16 @@ the node only needs its hash, which `init` prints.
 2. Start the daemon (`ergo-walletd --config ~/ergo-walletd/walletd.toml`),
    open its page, authorize with the contents of `wallet-api-key`, and create
    or restore the wallet. The API equivalents are `POST /api/v1/wallet/init`
-   and `/api/v1/wallet/restore`.
+   and `/api/v1/wallet/restore`. A new wallet starts at the node's current
+   tip, since a fresh mnemonic has no history. A restored wallet needs its
+   history: when the node runs its extra index (`[indexer] enabled = true`) the
+   daemon finds the wallet's used addresses and reads only the blocks that
+   touched them, in seconds; otherwise it scans every block from the start,
+   which takes hours on mainnet and leaves balances unavailable until it
+   finishes. To get that fast path the wallet's node key must be able to read `/api/v1/indexer/status` (the daemon checks the index is complete before trusting it); without access it scans blocks. Keys added later (`deriveKey`, `deriveNextKey`) are checked against
+   the same index and need no rescan when it is available. Without an index,
+   pass `"fresh": true` (`?fresh=true` on `deriveNextKey`) only when you know
+   the new address has never been used.
 
 3. To mine to this wallet, print its reward address and add the printed line
    to `ergo-node.toml`:

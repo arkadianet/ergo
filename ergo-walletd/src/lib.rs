@@ -419,7 +419,13 @@ where
             }
             let pass = match &worker_host {
                 Some(host) => host.sync_once_with_recovery(&syncer, &mut terminal_tracking),
-                None => syncer.sync_once().map(Some),
+                // No host (descriptor mode): nothing tracked means nothing to
+                // match, so the daemon idles instead of following the chain.
+                None => match syncer.has_tracking() {
+                    Ok(true) => syncer.sync_once().map(Some),
+                    Ok(false) => Ok(None),
+                    Err(error) => Err(error),
+                },
             };
             match pass {
                 Ok(Some(report)) => {
@@ -733,6 +739,26 @@ mod review_tests {
         }
     }
 
+    /// A watch-only daemon with one tracked key: a daemon with nothing tracked
+    /// idles, so a test that needs passes to run must give it something.
+    fn tracked_daemon(dir: &tempfile::TempDir, chain: Arc<TestChain>) -> TestDaemon {
+        let daemon = daemon(dir, chain);
+        let mut write = daemon.service.store().begin_write().unwrap();
+        write
+            .insert_tracked_pubkey(
+                0,
+                [2; 33],
+                &ergo_wallet_service::TrackedPubkeyMeta {
+                    derivation_path: Vec::new(),
+                    derivation_path_label: String::new(),
+                    added_at_height: 0,
+                },
+            )
+            .unwrap();
+        write.commit().unwrap();
+        daemon
+    }
+
     async fn run_without_binding<F>(daemon: TestDaemon, shutdown: F) -> Result<(), DaemonError>
     where
         F: std::future::Future<Output = Result<(), DaemonError>>,
@@ -754,7 +780,7 @@ mod review_tests {
     async fn run_until_cancels_blocked_pass_within_timeout() {
         let dir = tempfile::tempdir().unwrap();
         let chain = TestChain::new(true);
-        let daemon = daemon(&dir, chain.clone());
+        let daemon = tracked_daemon(&dir, chain.clone());
         let service = daemon.service.clone();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(run_until(daemon.into(), async {
@@ -797,7 +823,7 @@ mod review_tests {
     async fn shutdown_cancels_blocked_pass_within_timeout() {
         let dir = tempfile::tempdir().unwrap();
         let chain = TestChain::new(true);
-        let daemon = daemon(&dir, chain.clone());
+        let daemon = tracked_daemon(&dir, chain.clone());
         let service = daemon.service.clone();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(run_without_binding(daemon, async {
@@ -846,7 +872,7 @@ mod review_tests {
             release_on_cancel: false,
             panic_on_blocks: AtomicBool::new(false),
         });
-        let mut daemon = daemon(&dir, chain.clone());
+        let mut daemon = tracked_daemon(&dir, chain.clone());
         daemon.config.shutdown_timeout = Duration::from_millis(25);
         let syncer = daemon.syncer.clone();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -878,7 +904,7 @@ mod review_tests {
     fn cancelled_request_does_not_commit_returned_block() {
         let dir = tempfile::tempdir().unwrap();
         let chain = TestChain::new(true);
-        let daemon = daemon(&dir, chain.clone());
+        let daemon = tracked_daemon(&dir, chain.clone());
         let syncer = daemon.syncer.clone();
         let worker = std::thread::spawn(move || syncer.sync_once());
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -905,7 +931,7 @@ mod review_tests {
     #[tokio::test]
     async fn unfinished_pass_continues_without_waiting_for_sync_interval() {
         let dir = tempfile::tempdir().unwrap();
-        let daemon = daemon(&dir, TestChain::new(false));
+        let daemon = tracked_daemon(&dir, TestChain::new(false));
         let service = daemon.service.clone();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(run_without_binding(daemon, async {
@@ -930,6 +956,31 @@ mod review_tests {
         })
         .await
         .unwrap();
+        shutdown_tx.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_daemon_with_nothing_tracked_never_asks_the_node_for_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = TestChain::new(false);
+        let daemon = daemon(&dir, chain.clone());
+        let service = daemon.service.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_without_binding(daemon, async {
+            shutdown_rx.await.unwrap();
+            Ok(())
+        }));
+        // The first pass runs at once; a second would wait out the interval.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!chain.entered.load(Ordering::SeqCst));
+        assert!(service
+            .store()
+            .read()
+            .unwrap()
+            .scan_cursor()
+            .unwrap()
+            .is_none());
         shutdown_tx.send(()).unwrap();
         task.await.unwrap().unwrap();
     }

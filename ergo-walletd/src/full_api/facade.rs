@@ -50,8 +50,18 @@ impl WalletApi {
             .call(move |engine| engine.check(mnemonic, mnemonic_pass))
             .await
     }
-    pub async fn rescan(&self, from_height: u32) -> Result<(), WalletAdminError> {
-        self.host.rescan(from_height).await
+    /// A rescan that may restart an invalidated scan at `from_height` when the
+    /// caller declares there was no wallet activity before it.
+    pub async fn rescan_declaring(
+        &self,
+        from_height: u32,
+        no_activity_before: bool,
+    ) -> Result<(), WalletAdminError> {
+        if no_activity_before {
+            self.host.declare_history_start(from_height).await
+        } else {
+            self.host.rescan(from_height).await
+        }
     }
     pub async fn update_change_address(&self, address: String) -> Result<(), WalletAdminError> {
         self.host
@@ -198,8 +208,9 @@ impl WalletApi {
     }
     pub async fn derive_next_key(
         &self,
+        fresh: bool,
     ) -> Result<admin_advanced::DeriveNextKeyResponse, WalletAdminError> {
-        self.host.call(move |engine| engine.derive_next_key()).await
+        self.host.derive_next_key_declaring(fresh).await
     }
     pub async fn get_private_key(
         &self,

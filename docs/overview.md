@@ -253,8 +253,9 @@ Every field is documented by type in
 and the crate page ([`codemap/ergo-walletd.md`](./codemap/ergo-walletd.md))
 covers the descriptor format, the no-secret boundary, the read route
 inventory, socket ownership/permissions, the sync/reorg failure policy, the two
-sync budgets (`sync_batch` = blocks applied per pass, `blocks_page` = blocks
-requested per call), what the daemon verifies — every block id is recomputed
+sync budgets (`sync_batch` = blocks applied per pass, `blocks_page` = the ceiling
+on the adaptive blocks requested per call), where a new, restored or extended
+wallet starts reading the chain, what the daemon verifies — every block id is recomputed
 from the raw header the node serves with it, every header's proof of work is
 checked, and every block's transactions are bound to its header's
 transactions root — and, stated plainly, the one known deviation: the

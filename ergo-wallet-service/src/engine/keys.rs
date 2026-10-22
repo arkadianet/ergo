@@ -11,7 +11,10 @@ use ergo_wallet_protocol::scala::admin_advanced::{
 use ergo_wallet_protocol::WalletAdminError;
 use parking_lot::RwLock;
 
+use crate::address_index::{AddressIndexError, BackfillTarget};
+use crate::chain::ChainCursor;
 use crate::engine::{WalletChainAccess, WalletEngine, WalletEngineConfig};
+use crate::runtime::WalletService;
 use crate::state::WalletState;
 use crate::wallet::types::TrackedPubkeyMeta;
 
@@ -88,10 +91,10 @@ pub(crate) fn render_derivation_path(components: &[u32]) -> String {
 ///
 /// The write is atomic (single redb write transaction) — including the head
 /// advance when `new_derivation_head` is `Some`. This matters for
-/// `derive_next_key_impl`: folding the head advance into this same commit
+/// `derive_next_key_with_index`: folding the head advance into this same commit
 /// means a crash can never leave a tracked pubkey persisted without its
 /// corresponding head advance. The next-key path also reconciles the head
-/// with manually tracked paths in the same account. `derive_key_impl` passes
+/// with manually tracked paths in the same account. `derive_key_with_index` passes
 /// `None` because it may derive an unrelated path.
 ///
 /// Visibility is rebuilt in Scala's path storage order, hiding the master
@@ -122,14 +125,177 @@ pub(crate) fn persist_tracked_pubkey(
         .map_err(|e| WalletAdminError::Internal(e.to_string()))
 }
 
-/// `POST /wallet/deriveKey` writer-task implementation.
-pub(crate) fn derive_key_impl(
+/// Persist a new tracked pubkey (and visibility, and optionally the derivation
+/// head) without discarding the wallet's history. The same single transaction
+/// as [`persist_tracked_pubkey`], for a key that needs no replay.
+fn persist_tracked_pubkey_keeping_history(
+    store: &dyn crate::wallet::WalletStore,
+    path_idx: u64,
+    pubkey: &[u8; 33],
+    meta: &crate::wallet::types::TrackedPubkeyMeta,
+    new_derivation_head: Option<u64>,
+) -> Result<(), WalletAdminError> {
+    let mut write = store
+        .begin_write()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    write
+        .insert_tracked_pubkey_keep_history(path_idx, *pubkey, meta)
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    write
+        .rebuild_visible_addresses()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    if let Some(head) = new_derivation_head {
+        write
+            .set_derivation_head(head)
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    }
+    write
+        .commit()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))
+}
+
+pub(super) fn index_error(error: AddressIndexError) -> WalletAdminError {
+    match error {
+        AddressIndexError::Chain(error) => WalletAdminError::NodeUnavailable(error.to_string()),
+        other => WalletAdminError::Internal(other.to_string()),
+    }
+}
+
+/// Add a derived key to the wallet. A store that rebuilds history on key
+/// additions would discard the whole scan and rescan from genesis, which for a
+/// wallet with real history means hours with every balance unavailable. That
+/// is avoided whenever the key is known to need no replay:
+///
+/// - the node's address index (caught up, and at least as far as the wallet)
+///   has never seen the key used: nothing to replay;
+/// - the index has history for it: backfilled from exactly the blocks it
+///   names, in the same transaction that adds the key, whatever the caller
+///   said;
+/// - with no usable index, the caller said the key is fresh (`fresh`):
+///   tracked from here on.
+///
+/// Anything else keeps the safe default of [`persist_tracked_pubkey`].
+/// Freshness is never assumed, and never outranks an index that can answer.
+fn track_derived_key(
+    store: &dyn crate::wallet::WalletStore,
+    indexer: Option<(&WalletService, ergo_ser::address::NetworkPrefix)>,
+    fresh: bool,
+    path_idx: u64,
+    pubkey: &[u8; 33],
+    meta: &crate::wallet::types::TrackedPubkeyMeta,
+    new_derivation_head: Option<u64>,
+) -> Result<(), WalletAdminError> {
+    if !store.rebuilds_history_on_key_additions() {
+        return persist_tracked_pubkey(store, path_idx, pubkey, meta, new_derivation_head);
+    }
+    let read = store
+        .read()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    let settled = !read
+        .scan_invalidated()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        && matches!(
+            read.rescan_state()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
+            crate::wallet::RescanState::Idle
+        );
+    let cursor = read
+        .scan_cursor()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    drop(read);
+    let cursor_height = cursor.as_ref().map_or(0, |cursor| cursor.height);
+    // "Used" is true however far the index has got. "Never seen" is only
+    // believed from an index that has reached the wallet's own position: a
+    // block the wallet has already passed but the index has not would hide a
+    // payment. An index that is behind cannot vouch for that, so it is no index.
+    let usage = match indexer {
+        Some((service, network)) => match service.indexed_key_usage(network, &[*pubkey]) {
+            Ok(Some(usage)) if usage.used.len() == 1 => match usage.used[0] {
+                true => Some(true),
+                false if usage.indexed_height >= cursor_height => Some(false),
+                false => None,
+            },
+            Ok(_) | Err(AddressIndexError::Unavailable(_)) => None,
+            Err(error) => return Err(index_error(error)),
+        },
+        None => None,
+    };
+    let keep = |store: &dyn crate::wallet::WalletStore| {
+        persist_tracked_pubkey_keeping_history(store, path_idx, pubkey, meta, new_derivation_head)
+    };
+    // A usable index outranks the caller's word: `fresh` only stands in for an
+    // index that cannot answer.
+    match usage {
+        Some(false) => return keep(store),
+        Some(true) => {}
+        None if fresh => return keep(store),
+        None => return persist_tracked_pubkey(store, path_idx, pubkey, meta, new_derivation_head),
+    }
+    // The key has history. Backfilling it needs a valid, settled wallet to add
+    // it to; a wallet already rebuilding picks the key up from that rebuild.
+    let (service, network) = indexer.expect("a usable index implies an indexer");
+    let cursor = match cursor {
+        Some(cursor) if settled => match (cursor.height, cursor.header_id) {
+            (0, None) => Some(ChainCursor::genesis()),
+            (height, Some(header_id)) if height > 0 => Some(ChainCursor { height, header_id }),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(cursor) = cursor else {
+        return persist_tracked_pubkey(store, path_idx, pubkey, meta, new_derivation_head);
+    };
+    let mut write = store
+        .begin_write()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    write
+        .insert_tracked_pubkey_keep_history(path_idx, *pubkey, meta)
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    write
+        .rebuild_visible_addresses()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    if let Some(head) = new_derivation_head {
+        write
+            .set_derivation_head(head)
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    }
+    match service.backfill_from_index(
+        write.as_mut(),
+        network,
+        &[(path_idx, *pubkey)],
+        &BackfillTarget::UpTo(cursor),
+        &|| false,
+    ) {
+        Ok(report) => {
+            tracing::info!(
+                blocks = report.blocks_applied,
+                "backfilled a derived key from the node's address index"
+            );
+            write
+                .commit()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))
+        }
+        Err(AddressIndexError::Unavailable(reason)) => {
+            // Nothing was committed: dropping the transaction discards the key
+            // and the partial backfill together.
+            drop(write);
+            tracing::warn!(%reason, "address index cannot backfill the key; rescanning instead");
+            persist_tracked_pubkey(store, path_idx, pubkey, meta, new_derivation_head)
+        }
+        Err(error) => Err(index_error(error)),
+    }
+}
+
+/// `POST /wallet/deriveKey` writer-task implementation, with the node's address
+/// index when the host has one.
+pub(crate) fn derive_key_with_index(
     request: &ergo_wallet_protocol::scala::admin_advanced::DeriveKeyRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<crate::state::WalletState>,
     store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
     network: ergo_ser::address::NetworkPrefix,
+    index: Option<&WalletService>,
 ) -> Result<ergo_wallet_protocol::scala::admin_advanced::DeriveKeyResponse, WalletAdminError> {
     use ergo_wallet::derivation::DerivationPath;
     use ergo_wallet_protocol::scala::admin_advanced::DeriveKeyResponse;
@@ -184,7 +350,15 @@ pub(crate) fn derive_key_impl(
     };
 
     // Persist atomically (WALLET_TRACKED_PUBKEYS + WALLET_VISIBLE_ADDRESSES).
-    persist_tracked_pubkey(store, next_idx, &pubkey, &meta, None)?;
+    track_derived_key(
+        store,
+        index.map(|service| (service, network)),
+        request.fresh,
+        next_idx,
+        &pubkey,
+        &meta,
+        None,
+    )?;
     drop(storage_guard);
 
     // Update in-memory WalletState.
@@ -208,18 +382,24 @@ pub(crate) fn derive_key_impl(
 
 /// `GET /wallet/deriveNextKey` writer-task implementation.
 ///
-/// Shares its persist step with [`derive_key_impl`] via
+/// Shares its persist step with [`derive_key_with_index`] via
 /// [`persist_tracked_pubkey`] (tracked pubkey + `WALLET_VISIBLE_ADDRESSES`
 /// rebuild), passing `Some(new_head)` so the `WALLET_DERIVATION_HEAD` advance
 /// commits in the SAME transaction — a crash can never persist the tracked
 /// pubkey without also advancing the head. Manually tracked paths in the same
 /// native EIP-3 account are included when choosing the next index.
-pub(crate) fn derive_next_key_impl(
+///
+/// `fresh` is the caller's declaration that the key was never used on chain,
+/// and `index` the node's address index, when the host has one; see
+/// [`track_derived_key`].
+pub(crate) fn derive_next_key_with_index(
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<crate::state::WalletState>,
     store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
     network: ergo_ser::address::NetworkPrefix,
+    fresh: bool,
+    index: Option<&WalletService>,
 ) -> Result<ergo_wallet_protocol::scala::admin_advanced::DeriveNextKeyResponse, WalletAdminError> {
     use ergo_wallet::derivation::{DerivationPath, HARDENED_OFFSET};
     use ergo_wallet_protocol::scala::admin_advanced::DeriveNextKeyResponse;
@@ -278,8 +458,16 @@ pub(crate) fn derive_next_key_impl(
     };
 
     // Persist WALLET_TRACKED_PUBKEYS + WALLET_VISIBLE_ADDRESSES, shared with
-    // derive_key_impl so the two paths can never drift on this logic.
-    persist_tracked_pubkey(store, next_idx, &pubkey, &meta, Some(u64::from(new_head)))?;
+    // derive_key_with_index so the two paths can never drift on this logic.
+    track_derived_key(
+        store,
+        index.map(|service| (service, network)),
+        fresh,
+        next_idx,
+        &pubkey,
+        &meta,
+        Some(u64::from(new_head)),
+    )?;
     drop(storage_guard);
 
     // Update in-memory WalletState.
@@ -374,23 +562,37 @@ impl WalletEngine {
         &mut self,
         request: DeriveKeyRequest,
     ) -> Result<DeriveKeyResponse, WalletAdminError> {
-        super::keys::derive_key_impl(
+        super::keys::derive_key_with_index(
             &request,
             &self.storage,
             &self.state,
             self.store.as_ref(),
             self.chain.as_ref(),
             self.config.network,
+            self.service.as_deref(),
         )
     }
 
     pub fn derive_next_key(&mut self) -> Result<DeriveNextKeyResponse, WalletAdminError> {
-        super::keys::derive_next_key_impl(
+        self.derive_next_key_declaring(false)
+    }
+
+    /// `deriveNextKey`, optionally declaring the new key fresh (never used on
+    /// chain). A fresh key is tracked from the current tip with no rescan;
+    /// without the declaration the wallet consults the node's address index,
+    /// and otherwise rescans, rather than assume.
+    pub fn derive_next_key_declaring(
+        &mut self,
+        fresh: bool,
+    ) -> Result<DeriveNextKeyResponse, WalletAdminError> {
+        super::keys::derive_next_key_with_index(
             &self.storage,
             &self.state,
             self.store.as_ref(),
             self.chain.as_ref(),
             self.config.network,
+            fresh,
+            self.service.as_deref(),
         )
     }
 
@@ -615,18 +817,35 @@ impl WalletBootService {
         let mut write = store
             .begin_write()
             .map_err(|e| WalletError::SecretFile(format!("wallet store begin_write: {e}")))?;
-        write
-            .insert_tracked_pubkey(0, master_pk, &master_meta)
-            .map_err(|e| WalletError::SecretFile(format!("insert master tracked: {e}")))?;
+        // A wallet `init` just created has no history to replay: its first
+        // keys are tracked from the block it was born at.
+        let fresh = write
+            .fresh_anchor()
+            .map_err(|e| WalletError::SecretFile(format!("fresh wallet anchor: {e}")))?
+            .is_some();
+        if fresh {
+            write.insert_tracked_pubkey_keep_history(0, master_pk, &master_meta)
+        } else {
+            write.insert_tracked_pubkey(0, master_pk, &master_meta)
+        }
+        .map_err(|e| WalletError::SecretFile(format!("insert master tracked: {e}")))?;
 
         #[cfg(test)]
         if FAULT_INJECT.with(std::cell::Cell::get) {
             panic!("fault injection: unlock_and_sync panic between tracked + visible writes");
         }
 
-        write
-            .insert_tracked_pubkey(1, child_pk, &child_meta)
-            .map_err(|e| WalletError::SecretFile(format!("insert child tracked: {e}")))?;
+        if fresh {
+            write.insert_tracked_pubkey_keep_history(1, child_pk, &child_meta)
+        } else {
+            write.insert_tracked_pubkey(1, child_pk, &child_meta)
+        }
+        .map_err(|e| WalletError::SecretFile(format!("insert child tracked: {e}")))?;
+        if fresh {
+            write
+                .clear_fresh_anchor()
+                .map_err(|e| WalletError::SecretFile(format!("clear fresh anchor: {e}")))?;
+        }
         write
             .rebuild_visible_addresses()
             .map_err(|e| WalletError::SecretFile(format!("rebuild visible addresses: {e}")))?;
@@ -1012,7 +1231,9 @@ mod key_management_tests {
         );
 
         let state = RwLock::new(state);
-        let next = derive_next_key_impl(&storage, &state, &db, &EmptyChain, network).unwrap();
+        let next =
+            derive_next_key_with_index(&storage, &state, &db, &EmptyChain, network, false, None)
+                .unwrap();
         let seed = {
             let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -1103,8 +1324,9 @@ mod key_management_tests {
         let (storage, state) = unlock(&db, &dir.path().join("secret"));
         let request = ergo_wallet_protocol::scala::admin_advanced::DeriveKeyRequest {
             derivation_path: "m/1".into(),
+            fresh: false,
         };
-        derive_key_impl(&request, &storage, &state, &db, &EmptyChain, network).unwrap();
+        derive_key_with_index(&request, &storage, &state, &db, &EmptyChain, network, None).unwrap();
         assert_eq!(state.read().visible_addresses(), scala);
         drop(db);
         let db = redb::Database::open(&path).unwrap();
@@ -1180,10 +1402,14 @@ mod key_management_tests {
         let state = RwLock::new(state);
         let request = ergo_wallet_protocol::scala::admin_advanced::DeriveKeyRequest {
             derivation_path: "m/44'/429'/0'/0/1".into(),
+            fresh: false,
         };
         let manual =
-            derive_key_impl(&request, &storage, &state, &db, &EmptyChain, network).unwrap();
-        let next = derive_next_key_impl(&storage, &state, &db, &EmptyChain, network).unwrap();
+            derive_key_with_index(&request, &storage, &state, &db, &EmptyChain, network, None)
+                .unwrap();
+        let next =
+            derive_next_key_with_index(&storage, &state, &db, &EmptyChain, network, false, None)
+                .unwrap();
         assert_eq!(next.derivation_path, expected);
         assert_ne!(manual.address, next.address);
         assert_eq!(state.read().visible_addresses().len(), 3);
@@ -1201,7 +1427,16 @@ mod key_management_tests {
         .unwrap();
         assert_eq!(after.visible_addresses(), addresses);
         let after = RwLock::new(after);
-        let next = derive_next_key_impl(&storage, &after, &reopened, &EmptyChain, network).unwrap();
+        let next = derive_next_key_with_index(
+            &storage,
+            &after,
+            &reopened,
+            &EmptyChain,
+            network,
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(next.derivation_path, "m/44'/429'/0'/0/3");
     }
 

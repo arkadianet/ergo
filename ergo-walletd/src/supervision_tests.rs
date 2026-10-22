@@ -18,6 +18,8 @@ use crate::engine_chain::LifecycleChainAccess;
 use crate::sync::SyncConfig;
 use ergo_wallet_service::{RedbWalletStore, WalletService};
 
+const PHRASE: &str =
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const LOCAL_KEY: &str = "supervision-local-key";
 
 struct RecoverableChain {
@@ -154,7 +156,11 @@ async fn seed_terminal_sync_waits_for_a_key_reset_and_recovers_without_restart()
     let chain = RecoverableChain::new(true);
     let daemon = seed_daemon(dir.path(), chain.clone());
     let host = daemon.host.as_ref().unwrap().clone();
-    host.init("test".into(), String::new(), 12).await.unwrap();
+    // A restore replays history, which is what the failing node breaks; a
+    // wallet `init` started at the tip has nothing to fetch.
+    host.restore(PHRASE.into(), String::new(), "test".into(), false)
+        .await
+        .unwrap();
     host.unlock("test".into()).await.unwrap();
     let store = daemon.service.store().clone();
     let config = daemon.config;

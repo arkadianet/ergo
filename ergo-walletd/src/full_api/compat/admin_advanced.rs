@@ -18,11 +18,20 @@ pub(crate) async fn derive_key(
     Ok(Json(resp))
 }
 
+/// Optional query of `deriveNextKey`. `fresh=true` declares the new key never
+/// used on chain; it is tracked from the current tip with no rescan.
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct DeriveNextKeyQuery {
+    fresh: bool,
+}
+
 pub(crate) async fn derive_next_key(
     State(admin): State<Arc<WalletApi>>,
+    axum::extract::Query(query): axum::extract::Query<DeriveNextKeyQuery>,
 ) -> Result<Json<DeriveNextKeyResponse>, (StatusCode, Json<serde_json::Value>)> {
     use super::lifecycle::map_err;
-    let resp = admin.derive_next_key().await.map_err(map_err)?;
+    let resp = admin.derive_next_key(query.fresh).await.map_err(map_err)?;
     Ok(Json(resp))
 }
 

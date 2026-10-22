@@ -873,7 +873,7 @@ confirmed-only.
 | `mode` | string | `"watch_only"` | `"watch_only"` requires a public `descriptor_file`. `"seed"` rejects `descriptor_file`. Both require `local_api_key_file`. CLI: `--mode <watch-only\|seed>`. |
 | `network` | string | `"mainnet"` | Required network identity: `"mainnet"` or `"testnet"`. Any other value (including `devnet`) is a load error. It selects the base58 address prefix used for descriptor validation and for every address the local API returns, so it **must** match the network the configured `node_url` serves — the daemon cannot infer that from the node. CLI: `--network`. |
 | `data_dir` | string (path) | none (required) | Directory holding `wallet.redb`. Seed mode also stores encrypted secret files under `wallet/`. Use a fresh, separate directory when creating a seed wallet; there is no automatic migration from an embedded or descriptor wallet. Created on first start. |
-| `node_url` | string (URL) | none (required) | Base URL of the node API. Watch-only mode reads `/api/v1/chain/{tip,snapshot,blocks-since,boxes/:id}`. Seed mode also uses coherent spending context, tip-bound block replay, transaction admission/submission and `/api/v1/mining/private-transactions` queue operations. Must be `http`/`https` with a host and no credentials, query, or fragment. Plain `http` is accepted only for a loopback host (`localhost`, `127.0.0.0/8`, `::1`), because the node credential travels in a header; a remote node needs `https`. CLI: `--node-url`. |
+| `node_url` | string (URL) | none (required) | Base URL of the node API. Watch-only mode reads `/api/v1/chain/{tip,snapshot,blocks-since,boxes/:id}`. When the node runs its extra index, restore and key backfill also read `/blockchain/{indexedHeight,transaction/byAddress}` and `/api/v1/indexer/status`, which the wallet's node key must be allowed to read (unreadable health means the index is not used); a node without it is simply scanned. Seed mode also uses coherent spending context, tip-bound block replay, transaction admission/submission and `/api/v1/mining/private-transactions` queue operations. Must be `http`/`https` with a host and no credentials, query, or fragment. Plain `http` is accepted only for a loopback host (`localhost`, `127.0.0.0/8`, `::1`), because the node credential travels in a header; a remote node needs `https`. CLI: `--node-url`. |
 | `node_ca_file` | string (path) | none | PEM bundle of the certificate authorities trusted for an `https` `node_url`. When set, the system roots are not trusted, so only a node certificate chaining to these CAs is accepted. Requires an `https` `node_url`; validated at load. |
 | `api_key_file` | string (path) | none (required) | File containing the node's `api_key` request-header value. Scoped credentials need `wallet`; seed private mining jobs additionally need `operator`. An `admin` credential or the legacy master key also authorizes these requests. Must be a regular file that is **not** group- or other-readable (`chmod 600`); anything else aborts startup. Unix only; see [Windows](#socket-permissions). The value is held in a `Debug`-redacted type, sent only as a header, and never logged. Size-capped at 4 KiB, and the content must be a single header-safe line. CLI: `--api-key-file`. |
 | `descriptor_file` | string (path) | none | Required in `watch_only` mode and rejected in `seed` mode. Public descriptor file (see [Descriptor file](#descriptor-file)); size-capped at 16 MiB and validated at load. CLI: `--descriptor-file`. |
@@ -881,7 +881,7 @@ confirmed-only.
 | `sync_interval` | u64 or string | `15` | Delay after completed sync passes or retryable errors; incomplete passes continue immediately. Accepts plain seconds (`15`) or a duration string (`"500ms"`, `"30s"`, `"2m"`, `"1h"`). `0` is rejected. CLI: `--sync-interval`. |
 | `shutdown_timeout_secs` | u64 | `5` | Maximum seconds to wait for a cancelled sync worker during shutdown. Must be greater than zero. Cancellation prevents subsequent requests and block application; an in-flight blocking HTTP request can finish after the deadline. |
 | `sync_batch` | u32 | `256` | **Apply budget**: the maximum number of blocks *applied* (committed to the wallet database) by one sync pass. Must be `1..=1024`. It is not a request size — a pass may reach the node tip through many HTTP calls, and it is not what bounds a single response. Larger values trade memory and pass latency for fewer passes. CLI: `--sync-batch`. |
-| `blocks_page` | u32 | `1` | **Request budget**: the maximum number of blocks asked for in a single `blocks-since` call, independent of `sync_batch`. Must be `1..=1024`. The wire form hex-encodes every transaction and output box, so a page of `N` blocks costs roughly four times their serialized bytes and must fit the daemon's hard 16 MiB response cap. The default `1` is the largest page whose *worst legal* body provably fits that cap (see [The two sync budgets](#the-two-sync-budgets)); raising it is an operator decision made against their own node's `maxBlockSize`. A block too large even for a one-block page is a terminal error naming the cap and the page — the daemon never retries with a smaller page. CLI: `--blocks-page`. |
+| `blocks_page` | u32 | `128` | **Request budget**: the *ceiling* on the number of blocks asked for in a single `blocks-since` call, independent of `sync_batch`. Must be `1..=1024`. The page the daemon actually asks for adapts below it (see [The two sync budgets](#the-two-sync-budgets)): it starts at 16, grows while the blocks served are small, shrinks as their estimated size approaches the daemon's hard 16 MiB response cap, and is halved and retried when a page still goes over it. `1` turns adapting off and restores the fixed one-block page. A block too large even for a one-block page is a terminal error naming the cap and the page. CLI: `--blocks-page`. |
 | `unix_socket` | string (path) | none | Path of the owner-only Unix socket serving the local API. Both modes require the local credential on every request. See [Socket permissions](#socket-permissions). CLI: `--unix-socket`. |
 | `tcp_fallback` | string (socket addr) | none | Optional loopback TCP listener for the local API. A non-loopback bind is rejected at load. Both modes require the same local credential used on the Unix socket. Alias: `tcp_addr`. CLI: `--tcp-fallback`. |
 
@@ -898,35 +898,40 @@ the same knob:
   that many blocks in a single `blocks-since` page. It is a *request* budget,
   and it is what keeps a response body bounded.
 
-A pass with `sync_batch = 256` and `blocks_page = 1` therefore issues up to 256
-requests to apply 256 blocks. The default `1` is chosen against the adapter's
-hard 16 MiB response cap: the chain protocol carries each transaction and output
-box as a hex string, so a page costs roughly four times the serialized bytes of
-the blocks in it,
-and consensus bounds one block's `BlockTransactions` section by the voted
-`maxBlockSize` parameter. Sizing it against the largest value this document
-shows an operator voting for (`maxBlockSize = 2097152`, 2 MiB) makes the default
-safe for a node whose `maxBlockSize` is 2 MiB or less (check the node's
-configured parameter before relying on this): one maxed-out block is
-8 MiB of hex, so a page of `1` fits with about half the cap spare, while a
-page of `2` would be 16 MiB *before* the JSON envelope (ids, indices, braces) is
-added. Today's mainnet parameter is smaller than that, so the default is
-deliberately conservative rather than minimal. Sizing the request from the apply
-budget instead (the earlier behaviour, `min(sync_batch, remaining)`) would ask
-for up to 1024 blocks and hit the cap on any real chain.
+A pass with `sync_batch = 256` therefore issues one request per page and as many
+pages as it takes to apply 256 blocks. The chain protocol carries each
+transaction and output box as a hex string, so a page costs roughly four times
+the serialized bytes of the blocks in it, and the daemon refuses any body over
+16 MiB. Consensus bounds one block's `BlockTransactions` section by the voted
+`maxBlockSize` parameter: at the largest value this document shows an operator
+voting for (`maxBlockSize = 2097152`, 2 MiB) one maxed-out block is 8 MiB of
+hex, so two of them would already be 16 MiB *before* the JSON envelope. A page
+of `1` is therefore the only page whose worst legal body provably fits, but
+real blocks are far smaller than that, and a full scan at one block per request
+is about 1.9 million round trips on mainnet.
 
-`blocks_page` stays configurable (`1..=1024`) because a node with a much smaller
-`maxBlockSize` — or one serving an archive height where a page is known to be
-small — can safely serve a wider page. Raising it is an operator decision made
-against that node's own parameter, and the byte cap, not the block count, is
-what actually bounds a body.
+So the page adapts instead of being fixed. `blocks_page` is its ceiling. The
+daemon starts at 16 blocks, sizes each following page from the largest block it
+just received so that the estimated body is about a quarter of the cap (never
+more than double the previous page, never below one block), and when a response
+still goes over the cap it halves the page and asks again. It cannot see a run
+of large blocks coming, so growing toward one can be refused once or twice
+before it has seen a large block; it then asks for the large blocks a few at a
+time. Sizing the request from the apply budget instead (the earlier behaviour,
+`min(sync_batch, remaining)`) would ask for up to 1024 blocks regardless.
 
-A block that cannot fit even a one-block page is **not** retried smaller — the
-daemon never shrinks a page — so the adapter reports it once, as a terminal
-error naming both the cap and the page size, and the durable rescan state becomes
-`failed`. `tests/it/node_api.rs` pins both halves of this against the real node
-API with ~1.5 MiB blocks, and `tests/it/sync.rs` pins the arithmetic above
-against the documented 2 MiB `maxBlockSize`.
+A block that cannot fit even a one-block page cannot be fetched at all, so the
+adapter reports it as a terminal error naming both the cap and the page size,
+and the durable rescan state becomes `failed`. `tests/it/node_api.rs` pins the
+adaptation against the real node API with ~1.5 MiB blocks, and
+`tests/it/sync.rs` pins the sizing against a simulated chain with a response
+cap.
+
+A daemon that has nothing to match blocks against does not follow the chain at
+all: with no tracked key and no registered scan (for example `ergo-walletd` in
+seed mode before `init` or `restore`, or a descriptor file with no keys) sync
+passes are skipped, and no cursor is created, so the first key starts from the
+right place.
 
 ## `ergo-walletd.toml` `[api]`
 
@@ -1117,7 +1122,7 @@ the node cannot provide it. `/status` retains cursor, node-tip, lag and sync dia
 The static wallet UI is public so a browser can enter its local credential.
 All API reads and writes remain authenticated.
 
-Commands and sync share a writer; actual key additions atomically reset history.
+Commands and sync share a writer. A key addition atomically resets history and replays the chain unless the key needs no replay: a new wallet's first keys (`init` starts the wallet at the node tip), a key the node's address index has never seen or can backfill from the blocks it names, or a key the caller declares never used with `"fresh": true` (`deriveKey` body, `?fresh=true` on `deriveNextKey`). Freshness is never assumed, and `fresh` only applies when the node has no usable index (caught up, no pending repair or skipped boxes, and at least as far as the wallet); an index that has the key's history wins.
 Spending refreshes complete coherent node/pool context and fails before the
 engine when required data cannot be validated. Rescans fence mutations and
 suspend sync while their cancellable supervised replay runs. Restore marks

@@ -193,7 +193,9 @@ fn preparation_error(error: ChainClientError) -> WalletAdminError {
         | ChainClientError::HistoryPruned { .. } => {
             WalletAdminError::NodeUnavailable("node signing context unavailable".into())
         }
-        ChainClientError::Protocol(_) | ChainClientError::Failure(_) => {
+        ChainClientError::Protocol(_)
+        | ChainClientError::PageTooLarge { .. }
+        | ChainClientError::Failure(_) => {
             WalletAdminError::Internal("invalid node spending context".into())
         }
     }

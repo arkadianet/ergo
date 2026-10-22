@@ -148,6 +148,17 @@ new tip. A full historical rescan (`fromHeight=0`) on an archive node replaces
 this coverage with normal history; partial historical rescans are rejected for
 discovered wallets.
 
+The daemon can also restart an invalidated scan at a height the caller names,
+without discovery: `POST /api/v1/wallet/rescan` (or `/wallet/rescan`) with
+`{"fromHeight": H, "noActivityBefore": true}` states that the wallet had no
+activity before `H`. The stored history is cleared, block following restarts at
+`H`, and wallet status reports the same incomplete-history record (`discovery`
+with `historyComplete: false`) naming block `H - 1`, so balances are never
+presented as covering history the daemon did not read. It applies only to an
+invalidated scan, only with `fromHeight` above 0, and not to a wallet with
+registered scans; without the flag an invalidated scan keeps refusing a partial
+rescan.
+
 These commands change wallet/operator storage only. They do not change
 transaction validation, block validity, fork choice, state commitments, or
 network consensus rules.
