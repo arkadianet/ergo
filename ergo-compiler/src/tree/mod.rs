@@ -240,6 +240,17 @@ pub(crate) fn graph_build(root: Expr, header_version: u8) -> Result<Expr, Compil
     // cannot disturb CSE's placement or ids; idempotence guarantees it only
     // acts on the newly-inlined-constant shapes.
     let root = crate::fold::fold(root).map_err(CompileError::Emit)?;
+
+    // Third `removeIsProven` (D-C3), after CSE. A `val` block puts a
+    // `BlockValue` between the root coercion's `BoolToSigmaProp` and the
+    // `SigmaPropIsProven` a reconstructed `SigmaAnd`/`SigmaOr` carries, so the
+    // post-`lower` pass above cannot see the pair; CSE then inlines the
+    // single-use `val`s (or keeps the block with the coercion as its result),
+    // leaving `0xD1(0xCF(sigma))` adjacent. Scala's graph has no blocks, so its
+    // `sigmaProp(p.isValid) → p` always fires: `{ val owner =
+    // SELF.R4[SigmaProp].get; owner && HEIGHT > 1 }` is a bare `SigmaAnd`
+    // there, while a residual 0xCF is refused by both evaluators.
+    let root = crate::isproven::eliminate_isproven(root);
     Ok(root)
 }
 
