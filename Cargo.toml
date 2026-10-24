@@ -131,7 +131,7 @@ scoped-tls-hkt    = "0.1.5"
 rayon = "1.11"
 
 # HTTP
-axum            = "0.7"
+axum            = "0.8"
 hyper           = { version = "1", features = ["http1", "server"] }
 tower           = "0.5"
 hyper-util      = { version = "0.1", features = ["http1", "server", "tokio"] }
