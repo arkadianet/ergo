@@ -238,10 +238,22 @@ pub fn compile_contract_with_order(
             }))
         }
     };
+    // `buildGraph` builds the `env ++ placeholdersEnv` env at the root before
+    // the body, so every param's placeholder is a root node: a param read in two
+    // sibling thunks (`HEIGHT > 0 && a > 1 && a < 9`) is one shared `ValDef`,
+    // not two inline copies (see `crate::cse`'s module docs).
+    let env_nodes: Vec<WireExpr> = (0..params.len() as u32)
+        .map(|index| {
+            WireExpr::Op(IrNode {
+                opcode: 0x73, // ConstantPlaceholder (SigmaCompiler.scala:88-92)
+                payload: Payload::ConstPlaceholder { index },
+            })
+        })
+        .collect();
     // A template's `expressionTree` is headerless (`treeVersion = None`), so
     // the shared pipeline runs with header version 0: the pre-v3 data gate
     // stays on, exactly as before the compile route took versioned headers.
-    let root = graph_build(root, 0)?;
+    let root = graph_build(root, &env_nodes, 0)?;
 
     // assemble (SigmaTemplateCompiler.scala:34-52). constTypes/constValues/
     // parameters all walk `parsed.signature.params` DIRECTLY, so they are

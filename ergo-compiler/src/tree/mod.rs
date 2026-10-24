@@ -58,12 +58,21 @@ pub(crate) use walk::*;
 /// only difference between the two callers is whether the emitted root carried
 /// `ConstantPlaceholder` nodes for named params.
 ///
+/// `env_nodes` are the env values `buildGraph` builds at the root before the
+/// body (`GraphBuilding.scala:416-422`): [`compile`] passes its lifted env
+/// constants, the contract-template assembler one `ConstantPlaceholder` per
+/// parameter. Only CSE reads them (see `crate::cse`'s module docs).
+///
 /// `header_version` is the ErgoTree header version the result will be
 /// serialized under; it only decides whether the v0-header data gate below
 /// runs (it does iff `header_version < 3`). [`compile`] passes its
 /// `tree_version` (the header it writes); the contract-template assembler,
 /// whose `expressionTree` carries no header, passes 0.
-pub(crate) fn graph_build(root: Expr, header_version: u8) -> Result<Expr, CompileError> {
+pub(crate) fn graph_build(
+    root: Expr,
+    env_nodes: &[Expr],
+    header_version: u8,
+) -> Result<Expr, CompileError> {
     // GraphBuilding verdict-parity gates (ergo-compiler/docs/compiler-design-ledger.md D-C5): reject the emitted
     // shapes Scala's full compiler rejects — lambda/application rules first.
     if let Some(e) = graph_building_lambda_reject(&root) {
@@ -223,8 +232,9 @@ pub(crate) fn graph_build(root: Expr, header_version: u8) -> Result<Expr, Compil
     // every fold/lowering/tupling (so it sees the final lowered shape) and
     // BEFORE constant segregation / `write_ergo_tree`. Its input is
     // `prune_dead_vals`-cleaned (above) so dead-code refs do not inflate the
-    // usage count.
-    let root = crate::cse::cse(root);
+    // usage count. The env nodes are interned at the root first, as
+    // `buildGraph` builds them before the body.
+    let root = crate::cse::cse(root, env_nodes);
 
     // Re-fold after CSE (mirrors the post-`lower` re-fold above). Scala folds
     // continuously in `rewriteDef` AS the graph is built, so a constant
@@ -396,7 +406,7 @@ fn compile_inner(
     // The emit-time tree, kept for the source map's alignment against the
     // final tree (see `crate::source_map`).
     let emit_root = origins.as_ref().map(|_| root.clone());
-    let root = graph_build(root, tree_version)?;
+    let root = graph_build(root, &env_nodes(env, tree_version), tree_version)?;
     let pre_segregation_root = origins.as_ref().map(|_| root.clone());
 
     // P2SH proposition bytes — Scala's `Pay2SHAddress.apply(script: ErgoTree)`
@@ -464,6 +474,20 @@ fn compile_inner(
         },
         source_map,
     ))
+}
+
+/// The env values `buildGraph` builds at the root before the body
+/// (`GraphBuilding.scala:416-422`), each lifted and emitted exactly as the
+/// binder's substitution of a referenced name is. A value that fails to lift or
+/// emit is skipped: the source cannot reference it without the same failure
+/// rejecting the compile first, and an unreferenced node never reaches the tree.
+fn env_nodes(env: &ScriptEnv, tree_version: u8) -> Vec<Expr> {
+    env.iter()
+        .filter_map(|(_, value)| {
+            let lifted = crate::env::lift(value).ok()?;
+            emit_with_version(&lifted, tree_version).ok()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1023,12 +1047,12 @@ mod tests {
             payload: Payload::One(Box::new(emitted)),
         });
         for header_version in [0u8, 1, 2] {
-            let err = graph_build(root.clone(), header_version)
+            let err = graph_build(root.clone(), &[], header_version)
                 .expect_err("UBI data must reject at the pre-segregation pre-v3 gate");
             assert!(matches!(&err, CompileError::Serializer { .. }), "{err:?}");
             assert_eq!(err.class(), "SerializerException");
         }
-        graph_build(root, 3).expect("the gate is off under a v3 header");
+        graph_build(root, &[], 3).expect("the gate is off under a v3 header");
     }
 
     // ----- error paths -----

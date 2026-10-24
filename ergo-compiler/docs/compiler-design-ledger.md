@@ -1255,3 +1255,29 @@ was missing the `ConstPayload::ProveDlog` arm — a real
 every `ConstPayload` variant (except `SigmaProp`, which `map_const` itself
 refuses to emit — pinned by its own dedicated test — so it is not a gap
 to guard).
+
+### D-C9 — env values are root-scope graph nodes, CLOSED
+
+`GraphBuilding.buildGraph` (`GraphBuilding.scala:416-422`) builds every env
+value at the root of the program lambda before the body. For a contract
+template the env is `env ++ placeholdersEnv`, one `ConstantPlaceholder` per
+parameter; for a plain compile it is the lifted env constants. A body node
+identical to one of them hash-conses to that root node, including from a
+thunk. So a value read in two sibling thunks (`&&`/`||` right arms, `if`
+branches) is one root symbol used twice, which hoists to a root `ValDef`
+unless P4 suppresses it (primitive `Const`).
+
+We used to intern these values at their use sites. Each sibling thunk then
+built its own copy, and every copy inlined. That gave valid but different
+bytes, and different addresses, for a template parameter read this way
+(`sigmaProp(HEIGHT > 0 && a > 1 && a < 9)`, at any parameter count). It did
+the same for a non-primitive env constant (a Scala `LiftedConst`:
+`Coll[Byte]`, `Coll[Long]`, `GroupElement`, `BigInt`, …) under `compile` with
+a non-empty env.
+`crate::cse::cse` now interns the env nodes at the root before the body:
+`graph_build` takes them, `compile` lifts them from its `ScriptEnv` and
+`compile_contract` builds one placeholder per parameter. Oracle-pinned
+(sigma-state 6.0.6, 2026-10-25): the `reuse_*` vectors in
+`contract_seed.json` and the six env-root-scope `cce` vectors in
+`compile_seed.json` (four hoisting cases, plus a root-level control and a
+primitive control).
