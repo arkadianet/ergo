@@ -1,5 +1,5 @@
 {
-  "_captured": "2026-09-30; cce env-root-scope vectors 2026-10-25",
+  "_captured": "2026-09-30; cce env-root-scope vectors 2026-10-25; cce unused-env vectors 2026-10-25",
   "_format": "verb: cc|cce|ccs; oracle reply fields verbatim (never hand-edited); settings pinned per-record",
   "_source": "TyperOracle.scala cc/cce/ccs verbs, scala-cli sigma-state 6.0.6, ORACLE_TREE_VERSION per-record (one oracle spawn per version) ORACLE_NETWORK=testnet; golden_seed.txt typecheck-ACCEPT sources: 187 vectors (37 compile-ACCEPT, 150 compile-REJECT recorded verbatim); corpus: 79 sources fed under cc, 18 compile-ACCEPT kept, 61 compile-REJECT excluded (counted here per the Task-10 brief); compile_probes.txt (Task-11 wave-1 GraphBuilding gate): 112 vectors (62 compile-ACCEPT, 50 compile-REJECT recorded verbatim); M4 Task-1 (gap F2, recon-gap.md Finding 2): `sigmaProp(col1.slice[Long](0, 1).size == 1)` moved from `ccs` to `cce` — the `ccs` capture bound `col1` to a per-element ConcreteCollection SValue (TyperOracle.scala:176), an oracle-harness artifact our EnvValue cannot represent and the real compile API never produces; `cce`'s `col1` is a single LongArrayConstant (TyperOracle.scala:141), API-reachable and now a genuine same-shape probe",
   "vectors": [
@@ -3771,6 +3771,28 @@
       "reject_class": null,
       "source": "sigmaProp(HEIGHT > 0 && SELF.R4[Byte].get == bb1 && SELF.R5[Byte].get == bb1)",
       "tree_hex": "1b1e03040002010201d1eded91a3730093e4c6a70402730193e4c6a705027302",
+      "tree_version": 3,
+      "verb": "cce"
+    },
+    {
+      "network": "testnet",
+      "oracle": "ACCEPT",
+      "p2s_address": "2QdaQeS5B8sZRHeWhXKdBJSwXwwXCFEbu5QPVSQ73Gg9jFBiAPNXNTeQE3A",
+      "p2sh_address": "pZdSd8GGYTkb2N56nwNNVabGyT2zy139Vu9Csdi",
+      "reject_class": null,
+      "source": "sigmaProp(HEIGHT > 0 && OUTPUTS(0).propositionBytes == fromBase16(\"0102\") && SELF.propositionBytes != fromBase16(\"0102\"))",
+      "tree_hex": "1b24030e02010204000400d801d6017300d1eded91a3730193c2b2a5730200720194c2a77201",
+      "tree_version": 3,
+      "verb": "cce"
+    },
+    {
+      "network": "testnet",
+      "oracle": "ACCEPT",
+      "p2s_address": "5C2dTkbfFk8AbUzc4qMtpDDktNQr2W2GyEJWjB83kC2r8M1yqV6iYQcw",
+      "p2sh_address": "qoRSmCVdDdsrfSqUn5dUwkAsF6k2VjrupxTd9Px",
+      "reject_class": null,
+      "source": "sigmaProp(HEIGHT > 0 && OUTPUTS(0).propositionBytes == fromBase16(\"0506\") && SELF.propositionBytes != fromBase16(\"0506\"))",
+      "tree_hex": "1b2204040004000e0205060e020506d1eded91a3730093c2b2a5730100730294c2a77303",
       "tree_version": 3,
       "verb": "cce"
     }

@@ -141,8 +141,8 @@ the native `/api/v1/script/*` surface)
   compiled bytes, and contract templates (`scripts/jvm_typer_oracle/`).
 - **Compile byte parity is the gate.** `compile_seed_semantic_parity`
   (`tests/it/compile_semantic_parity.rs:881`) sweeps
-  `test-vectors/ergoscript/compile/compile_seed.json` — 323 vectors
-  (123 accept / 200 reject) — requiring oracle byte equality for accepts, the
+  `test-vectors/ergoscript/compile/compile_seed.json` — 325 vectors
+  (125 accept / 200 reject) — requiring oracle byte equality for accepts, the
   same reduction for both sides, and empty mismatch sets
   (`DC7_P2SH_MISMATCH_SET: &[]` `:354`, `P2S_DC1_MISMATCH_SET: &[]` `:407`,
   `SEMANTIC_SKIP: &[]` `:116`). A bare `SigmaPropConstant` root must be

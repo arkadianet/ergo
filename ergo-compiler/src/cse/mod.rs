@@ -106,8 +106,10 @@
 //! thunk — hash-conses to it. A parameter read in two sibling `&&` right arms
 //! (`HEIGHT > 0 && a > 1 && a < 9`) is ONE root symbol used twice, hence a root
 //! `ValDef`, not two thunk-local copies. `cse` seeds these nodes into the root
-//! scope before interning the body; an unused one is unreachable from the root
-//! and emits nothing.
+//! scope before interning the body; one that no body node equals is unreachable
+//! from the root and emits nothing. A body constant equal to an env value
+//! shares its node even when the script never names that entry
+//! (`fromBase16("0102")` twice under an env holding `a = 0102`).
 //!
 //! # Lambdas are NOT thunks
 //!

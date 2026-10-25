@@ -1265,7 +1265,9 @@ parameter; for a plain compile it is the lifted env constants. A body node
 identical to one of them hash-conses to that root node, including from a
 thunk. So a value read in two sibling thunks (`&&`/`||` right arms, `if`
 branches) is one root symbol used twice, which hoists to a root `ValDef`
-unless P4 suppresses it (primitive `Const`).
+unless P4 suppresses it (primitive `Const`). The script need not name the
+entry: an inline constant equal to an unused env value hash-conses to it too
+(`compile_seed.json`, the two `fromBase16("0102")`/`("0506")` `cce` vectors).
 
 We used to intern these values at their use sites. Each sibling thunk then
 built its own copy, and every copy inlined. That gave valid but different
