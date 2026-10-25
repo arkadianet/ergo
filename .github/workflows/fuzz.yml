@@ -55,7 +55,7 @@ jobs:
 
       # Keep the difftest binary cached across nightly runs so only dependency
       # changes trigger a rebuild (the generator code rarely changes).
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: fuzz-nightly
 
@@ -81,7 +81,7 @@ jobs:
       - uses: ./.github/actions/rust
         id: rust
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: fuzz-corpus-mutation
 
@@ -135,7 +135,7 @@ jobs:
       - uses: ./.github/actions/rust
         id: rust
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: replay-driver
 
@@ -184,7 +184,7 @@ jobs:
       # The native build below uses target/native-fuzz (ignored, outside the
       # difftest crate). rust-cache joins this target onto the workspace path,
       # so it must be relative; an absolute $RUNNER_TEMP path is never saved.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: cargo-fuzz-${{ matrix.target }}
           workspaces: ergo-difftest/fuzz -> ../../target/native-fuzz
@@ -309,7 +309,7 @@ jobs:
       - uses: ./.github/actions/rust
         id: rust
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: consensus-guard
 
