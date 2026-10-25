@@ -16,6 +16,11 @@ infrastructure.
 
 ## [Unreleased]
 
+### Security
+
+- **k256 0.14** (elliptic-curve 0.14, crypto-bigint 0.7.8) clears RUSTSEC-2026-0387, timing variability in crypto-bigint operations meant to be constant-time. k256 0.13's scalar add, sub and neg used those operations on secret scalars when the wallet signs. The temporary ignore added in #686 is removed. k256 is now built without its ECDSA, Schnorr and pkcs8 features, which the node never used. 33-byte point decoding, `Reduce`, scalar arithmetic and point arithmetic were compared between k256 0.13.4 and 0.14.0 with no differences: 1,282,048 decode inputs (every lead byte), 20,005 `Reduce` inputs and 3,000 random arithmetic pairs.
+- **tokio 1.54.1** (RUSTSEC-2026-0386) and **ctutils 0.4.5** (RUSTSEC-2026-0385) (#686).
+
 ### Changed
 
 - **Wallet daemon sync (#665):** `ergo-walletd` no longer reads the whole chain to learn what it should already know.

@@ -21,7 +21,6 @@
 use ergo_ser::sigma_value::SigmaBoolean;
 use ergo_sigma::SOUNDNESS_BYTES;
 use k256::elliptic_curve::group::GroupEncoding;
-use k256::elliptic_curve::ops::MulByGenerator;
 use k256::{ProjectivePoint, Scalar};
 
 use crate::error::WalletError;
@@ -87,7 +86,7 @@ pub(super) fn build_tree(
                     } else {
                         sim_schnorr_commit(&pk, &rsp.challenge, &{
                             use k256::elliptic_curve::ops::Reduce;
-                            <Scalar as Reduce<k256::U256>>::reduce_bytes(&z_bytes.into())
+                            <Scalar as Reduce<k256::FieldBytes>>::reduce(&z_bytes.into())
                         })?
                         .to_vec()
                     };
@@ -108,7 +107,7 @@ pub(super) fn build_tree(
                     } else {
                         sim_schnorr_commit(&pk, &ssp.challenge, &{
                             use k256::elliptic_curve::ops::Reduce;
-                            <Scalar as Reduce<k256::U256>>::reduce_bytes(&z_bytes.into())
+                            <Scalar as Reduce<k256::FieldBytes>>::reduce(&z_bytes.into())
                         })?
                         .to_vec()
                     };
@@ -179,7 +178,7 @@ pub(super) fn build_tree(
                     cb
                 } else {
                     use k256::elliptic_curve::ops::Reduce;
-                    let z_scalar = <Scalar as Reduce<k256::U256>>::reduce_bytes(&z_bytes.into());
+                    let z_scalar = <Scalar as Reduce<k256::FieldBytes>>::reduce(&z_bytes.into());
                     let (a_s, b_s) =
                         sim_dht_commit(&g_b, &h_b, &u_b, &v_b, &rsp.challenge, &z_scalar)?;
                     let mut cb = Vec::with_capacity(66);
@@ -207,7 +206,7 @@ pub(super) fn build_tree(
                     cb
                 } else {
                     use k256::elliptic_curve::ops::Reduce;
-                    let z_scalar = <Scalar as Reduce<k256::U256>>::reduce_bytes(&z_bytes.into());
+                    let z_scalar = <Scalar as Reduce<k256::FieldBytes>>::reduce(&z_bytes.into());
                     let (a_s, b_s) =
                         sim_dht_commit(&g_b, &h_b, &u_b, &v_b, &ssp.challenge, &z_scalar)?;
                     let mut cb = Vec::with_capacity(66);
@@ -664,7 +663,7 @@ fn build_simulated_or_sibling_from_hints(
                     r_pt.to_vec()
                 } else {
                     use k256::elliptic_curve::ops::Reduce;
-                    let z_scalar = <Scalar as Reduce<k256::U256>>::reduce_bytes(&z_bytes.into());
+                    let z_scalar = <Scalar as Reduce<k256::FieldBytes>>::reduce(&z_bytes.into());
                     sim_schnorr_commit(&pk, &ssp.challenge, &z_scalar)?.to_vec()
                 };
             Ok(ProverTree::Schnorr {
@@ -696,7 +695,7 @@ fn build_simulated_or_sibling_from_hints(
                 cb
             } else {
                 use k256::elliptic_curve::ops::Reduce;
-                let z_scalar = <Scalar as Reduce<k256::U256>>::reduce_bytes(&z_bytes.into());
+                let z_scalar = <Scalar as Reduce<k256::FieldBytes>>::reduce(&z_bytes.into());
                 let (a_s, b_s) = sim_dht_commit(&g_b, &h_b, &u_b, &v_b, &ssp.challenge, &z_scalar)?;
                 let mut cb = Vec::with_capacity(66);
                 cb.extend_from_slice(&a_s);

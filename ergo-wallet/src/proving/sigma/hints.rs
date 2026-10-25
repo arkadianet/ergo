@@ -169,8 +169,8 @@ pub(super) fn find_own_commitment_dht(
 /// Decode 32 bytes as a secp256k1 scalar (big-endian).
 pub(super) fn scalar_from_bytes_tree(bytes: &[u8; 32]) -> Option<Scalar> {
     use k256::elliptic_curve::ops::Reduce;
-    use k256::U256;
-    let s = <Scalar as Reduce<U256>>::reduce_bytes(&(*bytes).into());
+
+    let s = <Scalar as Reduce<k256::FieldBytes>>::reduce(&(*bytes).into());
     if s == Scalar::ZERO {
         None
     } else {

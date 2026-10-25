@@ -236,7 +236,7 @@ pub(in crate::evaluator) fn exponentiate(lv: Value, rv: Value) -> Result<Value, 
                 .copy_from_slice(&mod_bytes[mod_bytes.len().saturating_sub(32)..]);
 
             let wide = k256::U256::from_be_slice(&scalar_bytes);
-            let scalar = Scalar::reduce(wide);
+            let scalar = Scalar::reduce(&wide);
 
             let result = point * scalar;
             let result_bytes = result.to_bytes();

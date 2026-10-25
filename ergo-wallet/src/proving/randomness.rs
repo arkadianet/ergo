@@ -16,7 +16,7 @@ impl ProvingRng for OsRngBackend {
         loop {
             let mut bytes = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut bytes);
-            let s = <Scalar as Reduce<k256::U256>>::reduce_bytes(&bytes.into());
+            let s = <Scalar as Reduce<k256::FieldBytes>>::reduce(&bytes.into());
             if s != Scalar::ZERO {
                 return s;
             }
@@ -65,7 +65,7 @@ impl ProvingRng for Sha256DerivedRng {
         loop {
             let bytes = self.next_bytes(32);
             let arr: [u8; 32] = bytes.try_into().unwrap();
-            let s = <Scalar as Reduce<k256::U256>>::reduce_bytes(&arr.into());
+            let s = <Scalar as Reduce<k256::FieldBytes>>::reduce(&arr.into());
             if s != Scalar::ZERO {
                 return s;
             }

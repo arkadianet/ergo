@@ -9,7 +9,7 @@
 use crate::derivation::{DerivationPath, HARDENED_OFFSET};
 use crate::error::WalletError;
 use hmac::{Hmac, KeyInit, Mac};
-use k256::elliptic_curve::sec1::ToEncodedPoint;
+use k256::elliptic_curve::sec1::ToSec1Point;
 use k256::{ProjectivePoint, Scalar, SecretKey};
 use sha2::Sha512;
 
@@ -125,7 +125,7 @@ impl ExtendedSecretKey {
         } else {
             // Non-hardened: include the compressed public key.
             let pubkey = self.secret.public_key();
-            let encoded = pubkey.to_encoded_point(/* compressed: */ true);
+            let encoded = pubkey.to_sec1_point(/* compressed: */ true);
             mac.update(encoded.as_bytes());
         }
         mac.update(&index.to_be_bytes());
@@ -146,7 +146,9 @@ impl ExtendedSecretKey {
         if child_scalar == Scalar::ZERO {
             return self.derive_child(Self::next_index_same_class(index)?);
         }
-        let child_secret = SecretKey::new(child_scalar.into());
+        // Non-zero by the check above; `from_scalar` refuses only zero.
+        let child_secret = Option::<SecretKey>::from(SecretKey::from_scalar(child_scalar))
+            .ok_or(WalletError::InvalidDerivedScalar)?;
 
         let mut child_chain_code = [0u8; 32];
         child_chain_code.copy_from_slice(ir);
@@ -208,7 +210,7 @@ impl ExtendedPublicKey {
     /// node's `[mining] miner_public_key_hex` config field expects).
     pub fn compressed_bytes(&self) -> [u8; 33] {
         let affine = self.pubkey.to_affine();
-        let encoded = affine.to_encoded_point(/* compressed: */ true);
+        let encoded = affine.to_sec1_point(/* compressed: */ true);
         let bytes = encoded.as_bytes();
         debug_assert_eq!(
             bytes.len(),
@@ -376,7 +378,7 @@ impl ExtendedSecretKeyLegacy {
             // of secret_bytes length — left-pad only for curve math here).
             let post = self.to_post_1627_for_pubkey()?;
             let pubkey = post.secret.public_key();
-            let encoded = pubkey.to_encoded_point(true);
+            let encoded = pubkey.to_sec1_point(true);
             mac.update(encoded.as_bytes());
         }
         mac.update(&index.to_be_bytes());

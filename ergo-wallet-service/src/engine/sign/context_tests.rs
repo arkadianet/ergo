@@ -30,7 +30,7 @@ use ergo_wallet_protocol::scala::{
     multi_sig::{GenerateCommitmentsRequest, HintExtractionRequest},
     sending::ExternalSecretDto,
 };
-use k256::{elliptic_curve::sec1::ToEncodedPoint, ProjectivePoint, Scalar};
+use k256::{elliptic_curve::sec1::ToSec1Point, ProjectivePoint, Scalar};
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone)]
@@ -113,7 +113,7 @@ fn fixture() -> serde_json::Value {
 fn point(n: u64) -> [u8; 33] {
     (ProjectivePoint::GENERATOR * Scalar::from(n))
         .to_affine()
-        .to_encoded_point(true)
+        .to_sec1_point(true)
         .as_bytes()
         .try_into()
         .unwrap()

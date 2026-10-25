@@ -249,7 +249,7 @@ pub(super) fn exp(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
     let take = exp_bytes.len().min(32);
     scalar_bytes[32 - take..].copy_from_slice(&exp_bytes[exp_bytes.len() - take..]);
     let wide = k256::U256::from_be_slice(&scalar_bytes);
-    let scalar = Scalar::reduce(wide);
+    let scalar = Scalar::reduce(&wide);
     let result = point * scalar;
     let result_bytes = result.to_bytes();
     let mut out = [0u8; 33];

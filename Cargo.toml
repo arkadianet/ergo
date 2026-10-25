@@ -79,7 +79,9 @@ aes-gcm  = "0.11"
 # Memory-hard keystore key derivation (version-2 wallet files).
 argon2   = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }
 blake2   = "0.10"
-k256     = "0.13"
+# Curve arithmetic only: no k256 ECDSA/Schnorr/pkcs8 API is used, and their
+# defaults would pull in sha2 0.11, signature 3 and ecdsa 0.17.
+k256     = { version = "0.14", default-features = false, features = ["arithmetic", "precomputed-tables", "std"] }
 md5      = "0.7"
 pbkdf2   = "0.13"
 sha2     = "0.11"

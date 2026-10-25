@@ -254,7 +254,7 @@ pub(crate) fn decode_external_secret(
     use ergo_wallet::proving::external::ProverExternalSecret;
     use ergo_wallet_protocol::scala::sending::ExternalSecretDto;
     use k256::elliptic_curve::ops::Reduce;
-    use k256::{FieldBytes, Scalar, U256};
+    use k256::{FieldBytes, Scalar};
 
     fn decode_scalar(hex_str: &str) -> Result<Scalar, WalletAdminError> {
         let bytes: [u8; 32] = hex::decode(hex_str)
@@ -268,7 +268,7 @@ pub(crate) fn decode_external_secret(
                     hex_str.len()
                 ))
             })?;
-        let s = <Scalar as Reduce<U256>>::reduce_bytes(&FieldBytes::from(bytes));
+        let s = <Scalar as Reduce<k256::FieldBytes>>::reduce(&FieldBytes::from(bytes));
         if s == Scalar::ZERO {
             return Err(WalletAdminError::Internal(
                 "external secret: scalar is zero".into(),
@@ -292,7 +292,6 @@ pub(crate) fn decode_external_secret(
             // scalar through a borrow so we don't hold a bare copy past
             // the wrap below.
             use k256::elliptic_curve::group::GroupEncoding;
-            use k256::elliptic_curve::ops::MulByGenerator;
             use k256::ProjectivePoint;
             let pk_point = ProjectivePoint::mul_by_generator(&scalar);
             let pk_bytes: [u8; 33] = pk_point.to_affine().to_bytes().into();
