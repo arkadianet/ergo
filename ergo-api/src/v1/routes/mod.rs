@@ -428,7 +428,10 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             "/api/v1/chain/headers/at-height/{height}",
             get(chain::headers_at_height),
         )
-        .route("/api/v1/chain/headers/{header_id}", get(chain::header_by_id))
+        .route(
+            "/api/v1/chain/headers/{header_id}",
+            get(chain::header_by_id),
+        )
         // ----- chain/modifiers + proofs -----
         .route(
             "/api/v1/chain/modifiers/{modifier_id}",
@@ -462,7 +465,10 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             "/api/v1/mempool/by-ergo-tree/{ergo_tree}",
             get(mempool::by_ergo_tree),
         )
-        .route("/api/v1/mempool/by-box-id/{box_id}", get(mempool::by_box_id))
+        .route(
+            "/api/v1/mempool/by-box-id/{box_id}",
+            get(mempool::by_box_id),
+        )
         .route(
             "/api/v1/mempool/by-token-id/{token_id}",
             get(mempool::by_token_id),

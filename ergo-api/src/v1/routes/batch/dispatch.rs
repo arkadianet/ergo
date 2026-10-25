@@ -414,7 +414,10 @@ mod tests {
     #[test]
     fn template_matches_rejects_empty_wildcard_segment() {
         // A trailing slash must not satisfy a wildcard.
-        assert!(!template_matches("/api/v1/boxes/{box_id}", "/api/v1/boxes/"));
+        assert!(!template_matches(
+            "/api/v1/boxes/{box_id}",
+            "/api/v1/boxes/"
+        ));
     }
 
     #[test]

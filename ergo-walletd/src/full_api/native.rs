@@ -602,7 +602,10 @@ pub(super) fn router(admin: Arc<WalletApi>) -> axum::Router {
             "/api/v1/wallet/mining-jobs/{job_id}/cancel",
             post(jobs::cancel),
         )
-        .route("/api/v1/wallet/transactions/{tx_id}", get(transaction_by_id))
+        .route(
+            "/api/v1/wallet/transactions/{tx_id}",
+            get(transaction_by_id),
+        )
         // --- lifecycle (POST) ---
         .route(
             "/api/v1/wallet/init",

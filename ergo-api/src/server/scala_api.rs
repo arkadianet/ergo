@@ -370,7 +370,10 @@ pub(super) fn compat_read_router(
         .route("/blocks/chainSlice", get(chain_slice_handler))
         .route("/blocks/lastHeaders/{count}", get(last_headers_handler))
         .route("/blocks/headerIds", post(block_by_ids_handler))
-        .route("/blocks/modifier/{modifier_id}", get(modifier_by_id_handler))
+        .route(
+            "/blocks/modifier/{modifier_id}",
+            get(modifier_by_id_handler),
+        )
         .route("/blocks/{header_id}", get(block_by_id_handler))
         .route("/blocks/{header_id}/header", get(header_by_id_handler))
         .route(
