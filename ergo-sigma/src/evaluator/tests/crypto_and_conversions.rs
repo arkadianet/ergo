@@ -421,6 +421,36 @@ fn opcode_decode_point_rejects_off_curve() {
     );
 }
 
+/// #683: `05‖x` with `x` on the curve. k256's SEC1 parser reads lead 0x05
+/// as the even-y point; Scala's `GroupElementSerializer` throws
+/// ("Invalid point encoding 0x5"). Checked for an even-y x (the generator's)
+/// and an odd-y x, and through `ProveDlog`, so no key is built from it.
+#[test]
+fn opcode_decode_point_rejects_lead_0x05() {
+    let even_y_x = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    let odd_y_x = "f28773c2d975288bc7d1d205c3748651b075fbc6610e58cddeeddf8f19405aa8";
+    for (canonical_lead, x) in [(0x02u8, even_y_x), (0x03u8, odd_y_x)] {
+        let x = hex::decode(x).unwrap();
+        let mut canonical = vec![canonical_lead];
+        canonical.extend_from_slice(&x);
+        let ok = op(0xEE, Payload::One(Box::new(const_bytes(canonical))));
+        assert!(matches!(run_eval(&ok), Value::GroupElement(_)));
+
+        let mut compact = vec![0x05];
+        compact.extend_from_slice(&x);
+        let decode = op(0xEE, Payload::One(Box::new(const_bytes(compact))));
+        assert!(
+            matches!(run_eval_err(&decode), EvalError::TypeError { .. }),
+            "DecodePoint(05‖x) must error"
+        );
+        let prove_dlog = op(0xCD, Payload::One(Box::new(decode)));
+        assert!(
+            matches!(run_eval_err(&prove_dlog), EvalError::TypeError { .. }),
+            "ProveDlog(DecodePoint(05‖x)) must error"
+        );
+    }
+}
+
 #[test]
 fn opcode_decode_point_zero_lead_canonicalizes_to_identity() {
     // Leading 0x00 -> infinity; the canonical encoding is 33 zero bytes and any

@@ -57,6 +57,12 @@ pub(super) fn challenge_to_scalar(ch: &[u8; SOUNDNESS_BYTES]) -> Scalar {
 
 /// Decode a compressed SEC1 point.
 pub(super) fn pt(bytes: &[u8; 33]) -> Result<ProjectivePoint, WalletError> {
+    // The wire reader's lead rule: k256 alone would read `05‖x` (#683).
+    if !ergo_primitives::group_element::is_decodable_lead(bytes[0]) {
+        return Err(WalletError::MissingSecret(
+            "invalid compressed point encoding".into(),
+        ));
+    }
     if bytes[0] == 0x00 {
         return Ok(ProjectivePoint::IDENTITY);
     }

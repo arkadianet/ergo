@@ -32,11 +32,11 @@
 //! Callers reproducing either Scala surface MUST run [`strip_leading_zero_hex`]
 //! on this function's output first.
 //!
-//! Mirrors the on-curve decision in
-//! `ergo-sigma/src/evaluator/opcodes/sigma.rs::decode_group_element` (same
-//! `k256::EncodedPoint::from_bytes` → `AffinePoint::from_encoded_point`
-//! sequence) WITHOUT duplicating its error type — that helper is eval-time
-//! (`EvalError`); this one is compile-time (`GroupElementError`).
+//! [`decode_point`] is the one 33-byte decoder: the evaluator
+//! (`ergo-sigma/src/evaluator/opcodes/sigma.rs::decode_group_element`), the
+//! Schnorr and DH-tuple verifiers, the wallet prover and
+//! [`decompress_to_affine_hex`] all call it, each with its own error type
+//! (`EvalError` at eval time, `GroupElementError` at compile time).
 //!
 //! # Identity policy
 //!
@@ -49,8 +49,34 @@
 //! Off-curve compressed points are rejected during reference decoding as well.
 //! See the D-T5 ledger note in `ergo-compiler/src/lib.rs`.
 
+use ergo_primitives::group_element::is_decodable_lead;
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
-use k256::{AffinePoint, EncodedPoint};
+use k256::{AffinePoint, EncodedPoint, ProjectivePoint};
+
+/// Decode a 33-byte group element encoding to a curve point, accepting
+/// exactly what Scala's `GroupElementSerializer.parse` accepts.
+///
+/// - A `0x00` lead is the identity, whatever the other 32 bytes hold.
+/// - A `0x02`/`0x03` lead is a compressed point; an x with no curve point
+///   gives `None`.
+/// - Any other lead gives `None`
+///   ([`is_decodable_lead`]). `k256`'s SEC1 parser on its own also accepts
+///   the `0x05` compact tag and reads `05‖x` as the even-y point, which Scala
+///   refuses.
+///
+/// Every evaluator, verifier and prover decoder goes through here, so they
+/// all apply the wire reader's lead rule.
+pub fn decode_point(bytes: &[u8; 33]) -> Option<ProjectivePoint> {
+    if !is_decodable_lead(bytes[0]) {
+        return None;
+    }
+    if bytes[0] == 0x00 {
+        return Some(ProjectivePoint::IDENTITY);
+    }
+    let encoded = EncodedPoint::from_bytes(bytes).ok()?;
+    Option::<AffinePoint>::from(AffinePoint::from_encoded_point(&encoded))
+        .map(ProjectivePoint::from)
+}
 
 /// Compile-time GroupElement literal validation failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -59,6 +85,10 @@ pub enum GroupElementError {
     /// coordinates for this helper to return; see the module doc.
     #[error("GroupElement literal is the identity point (0x00 prefix)")]
     Identity,
+    /// A lead byte other than `0x00`, `0x02` or `0x03`, which Scala's
+    /// `GroupElementSerializer` cannot decode ([`is_decodable_lead`]).
+    #[error("GroupElement literal has an invalid SEC1 prefix")]
+    InvalidPrefix,
     /// A well-formed SEC1 prefix (`0x02`/`0x03`) whose x-coordinate has no
     /// valid y on the secp256k1 curve.
     #[error("GroupElement literal is not on the secp256k1 curve")]
@@ -72,18 +102,17 @@ pub enum GroupElementError {
 /// section. Callers reproducing either Scala print surface must run
 /// [`strip_leading_zero_hex`] on each coordinate first.
 ///
-/// Errors on the identity sentinel (`bytes[0] == 0x00`) or an off-curve point.
+/// Errors on the identity sentinel (`bytes[0] == 0x00`), a lead byte Scala
+/// cannot decode, or an off-curve point.
 pub fn decompress_to_affine_hex(bytes: &[u8; 33]) -> Result<(String, String), GroupElementError> {
     if bytes[0] == 0x00 {
         return Err(GroupElementError::Identity);
     }
-    let encoded = EncodedPoint::from_bytes(bytes).map_err(|_| GroupElementError::NotOnCurve)?;
-    let affine_opt = AffinePoint::from_encoded_point(&encoded);
-    if !bool::from(affine_opt.is_some()) {
-        return Err(GroupElementError::NotOnCurve);
+    if !is_decodable_lead(bytes[0]) {
+        return Err(GroupElementError::InvalidPrefix);
     }
-    let affine = affine_opt.unwrap();
-    let uncompressed = affine.to_encoded_point(false);
+    let point = decode_point(bytes).ok_or(GroupElementError::NotOnCurve)?;
+    let uncompressed = point.to_affine().to_encoded_point(false);
     let x = uncompressed
         .x()
         .expect("uncompressed encoding always carries x");
@@ -259,6 +288,39 @@ mod tests {
         let err = decompress_to_affine_hex(&off_curve_bytes()).unwrap_err();
         assert_eq!(err, GroupElementError::NotOnCurve);
         assert!(!is_on_curve(&off_curve_bytes()));
+    }
+
+    /// `05‖x` with `x` on the curve: `k256` alone reads it as the even-y
+    /// point, Scala's `GroupElementSerializer` refuses the lead (#683).
+    #[test]
+    fn decode_point_refuses_lead_0x05_for_on_curve_x() {
+        for valid in [generator_bytes(), leading_zero_y_bytes()] {
+            assert!(decode_point(&valid).is_some());
+            let mut compact = valid;
+            compact[0] = 0x05;
+            assert!(decode_point(&compact).is_none());
+            assert_eq!(
+                decompress_to_affine_hex(&compact).unwrap_err(),
+                GroupElementError::InvalidPrefix
+            );
+        }
+    }
+
+    #[test]
+    fn decode_point_accepts_only_identity_and_compressed_leads() {
+        let x = &generator_bytes()[1..];
+        for lead in 0u8..=0xff {
+            let mut bytes = [0u8; 33];
+            bytes[0] = lead;
+            bytes[1..].copy_from_slice(x);
+            let decoded = decode_point(&bytes);
+            match lead {
+                0x00 => assert_eq!(decoded, Some(ProjectivePoint::IDENTITY)),
+                0x02 | 0x03 => assert!(decoded.is_some(), "lead {lead:#04x}"),
+                _ => assert!(decoded.is_none(), "lead {lead:#04x}"),
+            }
+        }
+        assert!(decode_point(&off_curve_bytes()).is_none());
     }
 
     #[test]

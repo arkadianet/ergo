@@ -1,8 +1,10 @@
+// A 0x00 lead is the identity, 0x02/0x03 a compressed point; any other lead,
+// 0x05 included, is refused as by Scala's `GroupElementSerializer` (#683).
+use ergo_crypto::group_element::decode_point;
 use k256::elliptic_curve::group::GroupEncoding;
 use k256::elliptic_curve::ops::MulByGenerator;
-use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::elliptic_curve::PrimeField;
-use k256::{AffinePoint, EncodedPoint, ProjectivePoint, Scalar};
+use k256::{ProjectivePoint, Scalar};
 use num_bigint::BigUint;
 use thiserror::Error;
 
@@ -160,22 +162,6 @@ pub fn build_prove_dlog_ergo_tree(pk_bytes: &[u8; 33]) -> Vec<u8> {
     bytes
 }
 
-fn decode_point(bytes: &[u8; 33]) -> Option<ProjectivePoint> {
-    // SEC1: 0x00 prefix = identity (point at infinity).
-    // k256's AffinePoint can't represent infinity, but ProjectivePoint can.
-    // BouncyCastle's ECPoint.decodePoint handles this the same way.
-    if bytes[0] == 0x00 {
-        return Some(ProjectivePoint::IDENTITY);
-    }
-    let encoded = EncodedPoint::from_bytes(bytes).ok()?;
-    let affine = AffinePoint::from_encoded_point(&encoded);
-    if affine.is_some().into() {
-        Some(ProjectivePoint::from(affine.unwrap()))
-    } else {
-        None
-    }
-}
-
 fn point_to_bytes(point: &ProjectivePoint) -> Vec<u8> {
     let affine = point.to_affine();
     let encoded: [u8; 33] = affine.to_bytes().into();
@@ -242,6 +228,43 @@ mod tests {
         assert_eq!(&tree[4..37], &pk);
         assert_eq!(tree[37], 0x73); // ConstantPlaceholder opcode
         assert_eq!(tree[38], 0x00); // index 0
+    }
+
+    /// A proof for secret 1 whose Fiat-Shamir leaf hashes `pk_bytes` as given.
+    fn prove_with_secret_one(pk_bytes: &[u8; 33], message: &[u8]) -> Vec<u8> {
+        let r = Scalar::from(7u64);
+        let commitment = point_to_bytes(&ProjectivePoint::mul_by_generator(&r));
+        let mut hash_input = fiat_shamir_leaf_bytes(pk_bytes, &commitment);
+        hash_input.extend_from_slice(message);
+        let challenge = blake2b256(&hash_input)[..SOUNDNESS_BYTES].to_vec();
+        let z = r + challenge_to_scalar(&challenge);
+        let mut proof = challenge;
+        proof.extend_from_slice(&z.to_bytes());
+        proof
+    }
+
+    /// #683: `05‖G.x` is not a public key. Before the fix it decoded as `G`
+    /// and this proof (secret 1, leaf hashing the `05…` bytes) verified;
+    /// Scala cannot build the key at all.
+    #[test]
+    fn lead_0x05_public_key_is_refused() {
+        let mut generator = [0u8; 33];
+        generator[0] = 0x02;
+        generator[1..].copy_from_slice(
+            &hex::decode("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap(),
+        );
+        let message = b"683";
+        let proof = prove_with_secret_one(&generator, message);
+        verify_schnorr(&generator, &proof, message).expect("control: canonical key verifies");
+
+        let mut compact = generator;
+        compact[0] = 0x05;
+        let proof = prove_with_secret_one(&compact, message);
+        assert!(matches!(
+            verify_schnorr(&compact, &proof, message),
+            Err(SchnorrError::InvalidPublicKey)
+        ));
     }
 }
 

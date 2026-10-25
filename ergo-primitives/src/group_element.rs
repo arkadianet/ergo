@@ -21,6 +21,20 @@ impl GroupElement {
     }
 }
 
+/// `true` iff `lead` is a SEC1 lead byte that Scala's
+/// `GroupElementSerializer.parse` can decode from 33 bytes: `0x00` (the
+/// identity) or `0x02`/`0x03` (a compressed point).
+///
+/// Any other lead fails there: BouncyCastle's `ECCurve.decodePoint` throws on
+/// `0x01`, `0x05` and `0x08..`, and `0x04`/`0x06`/`0x07` need 65 bytes. Every
+/// decoder of a 33-byte group element applies this rule, the wire reader
+/// ([`read_group_element`]) and the curve decoders that read evaluator values
+/// alike. `k256`'s SEC1 parser also accepts the `0x05` "compact" tag, so a
+/// decoder that skips this check reads `05‖x` as the even-y point.
+pub const fn is_decodable_lead(lead: u8) -> bool {
+    matches!(lead, 0x00 | 0x02 | 0x03)
+}
+
 /// The canonical encoding of the group identity: 33 zero bytes.
 ///
 /// Scala `GroupElementSerializer` (`GroupElementSerializer.scala:18`,
@@ -75,13 +89,11 @@ pub fn read_group_element(
     r: &mut crate::reader::VlqReader,
 ) -> Result<GroupElement, crate::reader::ReadError> {
     let bytes = r.get_array::<GROUP_ELEMENT_LENGTH>()?;
-    match bytes[0] {
-        0x00 | 0x02 | 0x03 => {}
-        other => {
-            return Err(crate::reader::ReadError::InvalidData(format!(
-                "invalid SEC1 point prefix {other:#04x} — GroupElementSerializer only decodes identity (0x00) or compressed (0x02/0x03)"
-            )));
-        }
+    if !is_decodable_lead(bytes[0]) {
+        return Err(crate::reader::ReadError::InvalidData(format!(
+            "invalid SEC1 point prefix {:#04x} — GroupElementSerializer only decodes identity (0x00) or compressed (0x02/0x03)",
+            bytes[0]
+        )));
     }
     // Normalize exactly as `GroupElementSerializer.parse` does: a `0x00` lead
     // IS the identity point, whatever follows, and the identity's encoding is

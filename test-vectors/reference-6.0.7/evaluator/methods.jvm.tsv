@@ -24,6 +24,12 @@ b2-ge-decode-offcurve	false	null
 b2-ge-decode-32bytes	false	null
 b2-ge-decode-prefix04	false	null
 b2-ge-decode-gen	true	12158
+b2-ge-decode-prefix05-even-y	false	null
+b2-ge-decode-prefix05-odd-y	false	null
+b2-ge-decode-prefix03-odd-y	true	12166
+b2-ge-decode-prefix05-getencoded	false	null
+b2-ge-prove-dlog-decode-prefix05	false	null
+b2-ge-prove-dlog-decode-prefix02	true	12529
 b2-ge-exp-zero	true	12235
 b2-ge-exp-neg1	true	12224
 b2-ge-exp-order	false	null

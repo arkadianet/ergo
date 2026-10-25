@@ -211,6 +211,10 @@ fn scalar_from_bytes(bytes: &[u8; 32]) -> Option<Scalar> {
 /// Decode a compressed SEC1 point (33 bytes) as a `ProjectivePoint`.
 #[allow(dead_code)]
 fn decode_point(bytes: &[u8; 33]) -> Option<ProjectivePoint> {
+    // The wire reader's lead rule: k256 alone would read `05‖x` (#683).
+    if !ergo_primitives::group_element::is_decodable_lead(bytes[0]) {
+        return None;
+    }
     if bytes[0] == 0x00 {
         return Some(ProjectivePoint::IDENTITY);
     }
