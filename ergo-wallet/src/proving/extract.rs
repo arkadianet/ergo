@@ -305,7 +305,7 @@ mod tests {
                 height: 1,
                 timestamp: 0,
                 n_bits: 0,
-                votes: [0; 3],
+                votes: [0; 3].into(),
                 miner_pubkey: [2; 33],
             },
             previous_state_digest: ADDigest::from_bytes([0; 33]),

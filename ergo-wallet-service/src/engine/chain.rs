@@ -70,10 +70,14 @@ pub fn map_chain_error(error: ChainAccessError) -> WalletAdminError {
 /// every read is answered from the same committed tip, so a signature and
 /// its verification can never mix two tips.
 pub trait SigningView: Send + Sync {
-    /// An embedding may supply the full context of an intended candidate.
-    /// Returning `Some` enables context-sensitive signing. Committed headers
-    /// alone do not make a synthetic successor pre-header a real candidate;
-    /// standard embedded and remote views therefore retain this default.
+    /// The full context of the block the transaction is signed for. `Some`
+    /// enables contract signing: each input is reduced against it, and the
+    /// wallet signs whatever it holds the keys for.
+    ///
+    /// The standard embedded and remote views return the node's mempool
+    /// prediction ([`MempoolCandidate`]), so a transaction self-verified here
+    /// is admitted by a node that validates the same way. The default `None`
+    /// keeps the synthetic gate: only context-independent scripts sign.
     fn intended_candidate_context(&self) -> Option<SigningContext<'_>> {
         None
     }
@@ -99,6 +103,72 @@ pub trait SigningView: Send + Sync {
     fn lookup_utxo(&self, box_id: &[u8; 32]) -> Result<Option<ErgoBox>, ChainAccessError>;
 }
 
+/// The block after a view's tip as the node's mempool admits against it
+/// ([`ergo_validation::TransactionContext::mempool_upcoming`], Scala's
+/// `simplifiedUpcoming()`), owned by a view so it can lend it out as its
+/// [`SigningView::intended_candidate_context`].
+#[derive(Clone)]
+pub struct MempoolCandidate {
+    state: BlockchainStateContext,
+    header_ids: Vec<[u8; 32]>,
+}
+
+impl MempoolCandidate {
+    /// Build from a view's newest-first `headers` and `header_ids`, its
+    /// committed state root and the active parameters' block version.
+    ///
+    /// `None` before the first block, when there is no tip header, and when
+    /// the tip header does not commit to `previous_state_digest`. Scala takes
+    /// `CONTEXT.LastBlockUtxoRootHash` from the tip header
+    /// (`UpcomingStateContext.previousStateDigest`) and the prover requires the
+    /// two to agree, so a view whose root disagrees keeps the synthetic gate.
+    pub fn new(
+        headers: &[Header],
+        header_ids: &[[u8; 32]],
+        previous_state_digest: ergo_primitives::digest::ADDigest,
+        block_version: u8,
+    ) -> Option<Self> {
+        let (tip, tip_id) = headers.first().zip(header_ids.first())?;
+        if tip.state_root != previous_state_digest {
+            return None;
+        }
+        let context =
+            ergo_validation::TransactionContext::mempool_upcoming(tip, tip_id, block_version);
+        let window = headers
+            .len()
+            .min(header_ids.len())
+            .min(ergo_validation::UPCOMING_LAST_HEADERS);
+        Some(Self {
+            state: BlockchainStateContext {
+                sigma_last_headers: headers[..window].to_vec(),
+                sigma_pre_header: ergo_ser::pre_header::CandidatePreHeader {
+                    version: context.pre_header_version,
+                    parent_id: context.pre_header_parent_id,
+                    height: context.height,
+                    timestamp: context.pre_header_timestamp,
+                    n_bits: tip.n_bits,
+                    votes: context.pre_header_votes,
+                    miner_pubkey: context.miner_pubkey,
+                },
+                previous_state_digest,
+            },
+            header_ids: header_ids[..window].to_vec(),
+        })
+    }
+
+    /// The signing context, with the view's adopted validation settings.
+    pub fn signing_context<'a>(
+        &'a self,
+        validation_settings: &'a ergo_sigma::evaluator::SigmaValidationSettings,
+    ) -> SigningContext<'a> {
+        SigningContext {
+            state_context: &self.state,
+            header_ids: &self.header_ids,
+            validation_settings,
+        }
+    }
+}
+
 /// Tie an explicitly selected candidate to the same committed view that answers
 /// UTXO lookups. Its miner/time/votes/difficulty may be candidate-specific, but
 /// its parent, headers, root and adopted validation settings must be this view's.
@@ -113,8 +183,13 @@ pub(crate) fn intended_signing_context(
     let signing = view.signing_params();
     let protocol = view.protocol_params();
     let active = view.active_params();
-    if context.header_ids != view.header_ids()
-        || state.sigma_last_headers.as_slice() != view.headers()
+    // The candidate's headers are the view's newest ones: all of them, or the
+    // mempool prediction's nine (`MempoolCandidate`).
+    let window = context.header_ids.len();
+    if window > view.header_ids().len()
+        || window > view.headers().len()
+        || context.header_ids != &view.header_ids()[..window]
+        || state.sigma_last_headers.as_slice() != &view.headers()[..window]
         || state.previous_state_digest != view.state_context().previous_state_digest
         || context.validation_settings != &protocol.validation_settings
         || signing.max_block_cost != protocol.max_block_cost
@@ -134,7 +209,7 @@ pub(crate) fn intended_signing_context(
         || u64::try_from(active.data_input_cost).ok() != Some(protocol.data_input_cost)
         || u64::try_from(active.output_cost).ok() != Some(protocol.output_cost)
         || u64::try_from(active.token_access_cost).ok() != Some(protocol.token_access_cost)
-        || context.header_ids.len() < tip.height.min(10) as usize
+        || window < (tip.height as usize).min(ergo_validation::UPCOMING_LAST_HEADERS)
         || context.header_ids.first() != Some(&tip.header_id)
         || state.sigma_last_headers.first().map(|header| header.height) != Some(tip.height)
         || state.sigma_pre_header.parent_id != tip.header_id

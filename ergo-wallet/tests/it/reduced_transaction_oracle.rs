@@ -80,7 +80,7 @@ fn state() -> BlockchainStateContext {
             height: 400000,
             timestamp: 3,
             n_bits: 0,
-            votes: [0; 3],
+            votes: [0; 3].into(),
             miner_pubkey: point(1),
         },
     }

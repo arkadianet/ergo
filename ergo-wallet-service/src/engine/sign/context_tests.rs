@@ -193,7 +193,7 @@ fn case(row: &serde_json::Value) -> (ReducedTransaction, ControlledView) {
             height: 400_000,
             timestamp: 2,
             n_bits: 0,
-            votes: [0; 3],
+            votes: [0; 3].into(),
             miner_pubkey: point(1),
         },
         previous_state_digest: ADDigest::from_bytes([0; 33]),

@@ -83,14 +83,18 @@ pub(crate) fn sign_transaction_native_impl(
 /// Map a prover/sign error to a typed native error so the sign path's advertised
 /// 422s are reachable. A missing prover secret — the locked-sign-without-covering-
 /// external-secrets case the whole "no Locked precheck on sign" design hinges on —
-/// becomes `missing_secret` (NOT `internal`/500, NEVER `wallet_locked`); an
-/// input whose script the prover's gate rejects becomes `unsupported_script`. The
-/// unsupported-script message is the one the prover emits (`prover.rs`).
+/// becomes `missing_secret` (NOT `internal`/500, NEVER `wallet_locked`); so does
+/// a contract that reduces to `false` or to keys the wallet lacks. An input
+/// whose script the synthetic gate rejects, or whose script fails to reduce
+/// against the candidate context, becomes `unsupported_script`. Both messages
+/// are the ones the prover emits (`prover.rs`).
 pub(crate) fn map_sign_error(e: ergo_wallet::error::WalletError) -> WalletAdminError {
     use ergo_wallet::error::WalletError as W;
     match e {
         W::MissingSecret(_) => WalletAdminError::MissingSecret,
-        W::TxBuild(m) if m.contains("unsupported script family") => {
+        W::TxBuild(m)
+            if m.contains("unsupported script family") || m.contains("script reduction failed") =>
+        {
             WalletAdminError::UnsupportedScript
         }
         other => WalletAdminError::Internal(format!("sign: {other}")),
@@ -612,6 +616,13 @@ mod tests {
         assert!(matches!(
             map_sign_error(W::TxBuild(
                 "input 0 has an unsupported script family; only P2PK/DHT".into()
+            )),
+            WalletAdminError::UnsupportedScript
+        ));
+        // A contract that fails to reduce against the candidate context.
+        assert!(matches!(
+            map_sign_error(W::TxBuild(
+                "input 1 script reduction failed: evaluation error".into()
             )),
             WalletAdminError::UnsupportedScript
         ));

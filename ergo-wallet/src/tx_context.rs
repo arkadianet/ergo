@@ -77,7 +77,7 @@ pub struct ReductionContextOwned {
     pub pre_header_version: u8,
     pub pre_header_parent_id: [u8; 32],
     pub pre_header_n_bits: u64,
-    pub pre_header_votes: [u8; 3],
+    pub pre_header_votes: ergo_ser::pre_header::PreHeaderVotes,
     pub extension: IndexMap<
         u8,
         (
@@ -117,7 +117,7 @@ impl ReductionContextOwned {
             pre_header_version: self.pre_header_version,
             pre_header_parent_id: self.pre_header_parent_id,
             pre_header_n_bits: self.pre_header_n_bits,
-            pre_header_votes: self.pre_header_votes.into(),
+            pre_header_votes: self.pre_header_votes,
             extension: self.extension.clone(),
             input_extensions: &self.input_extensions,
             last_headers: &self.last_headers,
@@ -627,7 +627,7 @@ mod tests {
                 height: 400_000,
                 timestamp: 2,
                 n_bits: 0,
-                votes: [0; 3],
+                votes: [0; 3].into(),
                 miner_pubkey: ergo_sigma::evaluator::SECP256K1_GENERATOR,
             },
             previous_state_digest: ADDigest::from_bytes([9; 33]),

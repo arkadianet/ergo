@@ -45,6 +45,9 @@ struct OwnedContext {
     headers: Vec<Header>,
     header_ids: Vec<[u8; 32]>,
     state: BlockchainStateContext,
+    /// The block after the tip as the node's mempool admits against it,
+    /// derived here from the same headers and parameters.
+    candidate: Option<ergo_wallet_service::engine::MempoolCandidate>,
     active: ActiveProtocolParameters,
     signing: BlockchainParameters,
     protocol: ProtocolParams,
@@ -332,6 +335,12 @@ struct RemoteSigningView {
     chain: Arc<HttpChainClient>,
 }
 impl SigningView for RemoteSigningView {
+    fn intended_candidate_context(&self) -> Option<ergo_wallet::tx_context::SigningContext<'_>> {
+        self.context
+            .candidate
+            .as_ref()
+            .map(|candidate| candidate.signing_context(&self.context.protocol.validation_settings))
+    }
     fn tip(&self) -> CommittedTip {
         self.context.tip.clone()
     }
@@ -753,9 +762,17 @@ fn decode_context(
             "private queue reservation snapshot is inconsistent",
         ));
     }
+    // The node validates mempool admission against this same prediction.
+    let candidate = ergo_wallet_service::engine::MempoolCandidate::new(
+        &headers,
+        &header_ids,
+        ADDigest::from_bytes(digest),
+        active.block_version,
+    );
     Ok(OwnedContext {
         tip,
         header_ids,
+        candidate,
         state: BlockchainStateContext {
             sigma_last_headers: headers.clone(),
             sigma_pre_header: ergo_validation::pre_header::CandidatePreHeader {
@@ -764,7 +781,7 @@ fn decode_context(
                 height: pre.height,
                 timestamp: pre.timestamp,
                 n_bits: pre.n_bits,
-                votes: pre.votes,
+                votes: pre.votes.into(),
                 miner_pubkey: miner,
             },
             previous_state_digest: ADDigest::from_bytes(digest),
@@ -908,5 +925,35 @@ mod tests {
             assert_eq!(context.header_ids, baseline.header_ids);
             assert_eq!(context.active, baseline.active);
         }
+    }
+
+    /// #684: walletd derives the node's mempool prediction from the headers
+    /// and parameters it receives, so contracts are signed against the
+    /// context the node admits with, while the wire's synthetic successor
+    /// (the tip's miner, zero votes) is kept as received.
+    #[test]
+    fn decoded_context_carries_the_mempool_candidate() {
+        let context = decode_context(context_fixture(), Network::Mainnet).unwrap();
+        let candidate = context.candidate.as_ref().expect("a tip gives a candidate");
+        let signing = candidate.signing_context(&context.protocol.validation_settings);
+        let expected = ergo_validation::TransactionContext::mempool_upcoming(
+            &context.headers[0],
+            &context.header_ids[0],
+            context.active.block_version,
+        );
+        let pre = &signing.state_context.sigma_pre_header;
+        assert_eq!(pre.height, expected.height);
+        assert_eq!(pre.parent_id, expected.pre_header_parent_id);
+        assert_eq!(pre.timestamp, expected.pre_header_timestamp);
+        assert_eq!(u64::from(pre.n_bits), expected.pre_header_n_bits);
+        assert_eq!(pre.version, expected.pre_header_version);
+        assert_eq!(pre.votes, ergo_ser::pre_header::PreHeaderVotes::Empty);
+        assert_eq!(pre.miner_pubkey, expected.miner_pubkey);
+        assert_eq!(signing.header_ids, context.header_ids.as_slice());
+        assert_eq!(
+            signing.state_context.previous_state_digest,
+            context.state.previous_state_digest
+        );
+        assert_eq!(context.state.sigma_pre_header.votes, [0; 3].into());
     }
 }

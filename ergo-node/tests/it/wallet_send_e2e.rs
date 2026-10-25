@@ -133,7 +133,7 @@ fn synthetic_state_context(pk: &[u8; 33]) -> BlockchainStateContext {
         height: tip_height + 1,
         timestamp: tip_header.timestamp + 120_000,
         n_bits: tip_header.n_bits,
-        votes: [0, 0, 0],
+        votes: [0, 0, 0].into(),
         miner_pubkey: *pk,
     };
 

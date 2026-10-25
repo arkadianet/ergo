@@ -1161,7 +1161,7 @@ mod tests {
                     height: header.height,
                     timestamp: header.timestamp,
                     n_bits: header.n_bits,
-                    votes: header.votes,
+                    votes: header.votes.into(),
                     miner_pubkey: pk,
                 },
                 activated_script_version: 2,

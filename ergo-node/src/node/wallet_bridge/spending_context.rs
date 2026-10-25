@@ -143,7 +143,10 @@ pub(super) fn capture(
             height: pre.height,
             timestamp: pre.timestamp,
             n_bits: pre.n_bits,
-            votes: pre.votes,
+            // The wire's synthetic successor always carries three vote bytes.
+            votes: pre.votes.bytes().ok_or_else(|| {
+                ChainClientError::Protocol("synthetic pre-header has no votes".into())
+            })?,
             miner_pubkey: hex::encode(pre.miner_pubkey),
         },
         pre_header_source: wire::SpendingPreHeaderSource::SyntheticCommittedTip,
