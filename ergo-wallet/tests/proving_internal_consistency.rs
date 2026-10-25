@@ -21,9 +21,9 @@ use ergo_wallet::proving::schnorr::prove_schnorr;
 use ergo_wallet::proving::secrets::SecretRegistry;
 use ergo_wallet::proving::sigma::prove_sigma;
 use k256::elliptic_curve::group::GroupEncoding;
-use k256::elliptic_curve::ops::{MulByGenerator, Reduce};
+use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::PrimeField;
-use k256::{FieldBytes, ProjectivePoint, Scalar, U256};
+use k256::{FieldBytes, ProjectivePoint, Scalar};
 
 /// BIP32 Vector 1 master secret (32 bytes, big-endian).
 const SECRET_HEX: &str = "e8f32e723decf4051aefac8e2c93c9c5b214313817cdb01a1494b917c8436b35";
@@ -60,7 +60,7 @@ fn test_scalar(seed: u8) -> Scalar {
     bytes[1] = 0x42;
     bytes[2] = 0xAB;
     bytes[31] = seed.wrapping_mul(7).wrapping_add(3);
-    <Scalar as Reduce<U256>>::reduce_bytes(&bytes.into())
+    <Scalar as Reduce<k256::FieldBytes>>::reduce(&bytes.into())
 }
 
 // ----- helpers -----
@@ -69,7 +69,7 @@ fn test_scalar(seed: u8) -> Scalar {
 ///   g = secp256k1 generator, h = h_scalar*G (fixed), u = x*g, v = x*h.
 fn dht_proposition(x: &Scalar) -> (SigmaBoolean, Scalar) {
     let g_pt = ProjectivePoint::GENERATOR;
-    let h_scalar = <Scalar as Reduce<U256>>::reduce_bytes(&[0xABu8; 32].into());
+    let h_scalar = <Scalar as Reduce<k256::FieldBytes>>::reduce(&[0xABu8; 32].into());
     let h_pt = ProjectivePoint::mul_by_generator(&h_scalar);
     let u_pt = g_pt * x;
     let v_pt = h_pt * x;
@@ -225,7 +225,7 @@ fn schnorr_proof_rejects_wrong_pubkey() {
     .expect("prove_schnorr should succeed");
 
     // Different scalar → different pubkey → different proposition
-    let other_secret = <Scalar as Reduce<U256>>::reduce_bytes(&[0x42u8; 32].into());
+    let other_secret = <Scalar as Reduce<k256::FieldBytes>>::reduce(&[0x42u8; 32].into());
     let other_pk = pubkey_from_scalar(&other_secret);
     let other_prop = dlog_proposition(&other_pk);
 
@@ -352,14 +352,14 @@ fn dht_uses_own_commitment_from_bag() {
         SigmaBoolean::ProveDHTuple { g, h, .. } => (*g.as_bytes(), *h.as_bytes()),
         _ => panic!("expected ProveDHTuple"),
     };
-    use k256::elliptic_curve::sec1::FromEncodedPoint;
+    use k256::elliptic_curve::sec1::FromSec1Point;
     let g_pt_prop = {
-        let ep = k256::EncodedPoint::from_bytes(g_bytes_prop).unwrap();
-        k256::AffinePoint::from_encoded_point(&ep).unwrap()
+        let ep = k256::Sec1Point::from_bytes(g_bytes_prop).unwrap();
+        k256::AffinePoint::from_sec1_point(&ep).unwrap()
     };
     let h_pt_prop = {
-        let ep = k256::EncodedPoint::from_bytes(h_bytes_prop).unwrap();
-        k256::AffinePoint::from_encoded_point(&ep).unwrap()
+        let ep = k256::Sec1Point::from_bytes(h_bytes_prop).unwrap();
+        k256::AffinePoint::from_sec1_point(&ep).unwrap()
     };
     let a_bytes: [u8; 33] = (ProjectivePoint::from(g_pt_prop) * r_scalar)
         .to_affine()

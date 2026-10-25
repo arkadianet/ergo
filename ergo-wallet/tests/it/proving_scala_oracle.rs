@@ -18,7 +18,6 @@ use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::{read_value, SigmaBoolean, SigmaValue};
 use ergo_sigma::verify::verify_sigma_proof;
 use k256::elliptic_curve::group::GroupEncoding;
-use k256::elliptic_curve::ops::MulByGenerator;
 use k256::elliptic_curve::PrimeField;
 use k256::{FieldBytes, ProjectivePoint, Scalar};
 use num_bigint::BigUint;

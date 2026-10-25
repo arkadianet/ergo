@@ -61,7 +61,7 @@ impl UnlockedMaster {
             }
         };
         let wide = k256::U256::from_be_slice(bytes.as_slice());
-        Ok(<k256::Scalar as Reduce<k256::U256>>::reduce(wide))
+        Ok(<k256::Scalar as Reduce<k256::U256>>::reduce(&wide))
     }
 
     /// Derive the scalar at `path` and require that it controls `pubkey`.
@@ -72,11 +72,11 @@ impl UnlockedMaster {
         path: &crate::derivation::DerivationPath,
         pubkey: &[u8; 33],
     ) -> Result<k256::Scalar, WalletError> {
-        use k256::elliptic_curve::sec1::ToEncodedPoint;
+        use k256::elliptic_curve::sec1::ToSec1Point;
         let scalar = self.derive_scalar_at_path(path)?;
         let derived = (k256::ProjectivePoint::GENERATOR * scalar)
             .to_affine()
-            .to_encoded_point(true);
+            .to_sec1_point(true);
         if derived.as_bytes() != pubkey.as_slice() {
             return Err(WalletError::TrackedKeyMismatch(path.to_string()));
         }

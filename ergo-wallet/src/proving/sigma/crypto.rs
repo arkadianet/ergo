@@ -4,10 +4,9 @@
 
 use ergo_sigma::SOUNDNESS_BYTES;
 use k256::elliptic_curve::group::GroupEncoding;
-use k256::elliptic_curve::ops::MulByGenerator;
-use k256::elliptic_curve::sec1::FromEncodedPoint;
+use k256::elliptic_curve::sec1::FromSec1Point;
 use k256::elliptic_curve::PrimeField;
-use k256::{AffinePoint, EncodedPoint, FieldBytes, ProjectivePoint, Scalar};
+use k256::{AffinePoint, FieldBytes, ProjectivePoint, Scalar, Sec1Point};
 
 use crate::error::WalletError;
 
@@ -66,9 +65,9 @@ pub(super) fn pt(bytes: &[u8; 33]) -> Result<ProjectivePoint, WalletError> {
     if bytes[0] == 0x00 {
         return Ok(ProjectivePoint::IDENTITY);
     }
-    let ep = EncodedPoint::from_bytes(bytes)
+    let ep = Sec1Point::from_bytes(bytes)
         .map_err(|_| WalletError::MissingSecret("invalid compressed point encoding".into()))?;
-    let affine = AffinePoint::from_encoded_point(&ep);
+    let affine = AffinePoint::from_sec1_point(&ep);
     if affine.is_some().into() {
         Ok(ProjectivePoint::from(affine.unwrap()))
     } else {

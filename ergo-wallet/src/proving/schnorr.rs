@@ -15,10 +15,10 @@ use ergo_ser::sigma_value::SigmaBoolean;
 use ergo_sigma::schnorr::build_prove_dlog_ergo_tree;
 use ergo_sigma::SOUNDNESS_BYTES;
 use k256::elliptic_curve::group::GroupEncoding;
-use k256::elliptic_curve::ops::{MulByGenerator, Reduce};
-use k256::elliptic_curve::sec1::FromEncodedPoint;
+use k256::elliptic_curve::ops::Reduce;
+use k256::elliptic_curve::sec1::FromSec1Point;
 use k256::elliptic_curve::PrimeField;
-use k256::{AffinePoint, EncodedPoint, FieldBytes, ProjectivePoint, Scalar, U256};
+use k256::{AffinePoint, FieldBytes, ProjectivePoint, Scalar, Sec1Point};
 
 use crate::error::WalletError;
 use crate::proving::hints::{
@@ -200,7 +200,7 @@ fn find_simulated_secret_proof<'a>(
 
 /// Decode 32 bytes as a secp256k1 scalar (big-endian, reduced mod q).
 fn scalar_from_bytes(bytes: &[u8; 32]) -> Option<Scalar> {
-    let s = <Scalar as Reduce<U256>>::reduce_bytes(&(*bytes).into());
+    let s = <Scalar as Reduce<k256::FieldBytes>>::reduce(&(*bytes).into());
     if s == Scalar::ZERO {
         None
     } else {
@@ -218,8 +218,8 @@ fn decode_point(bytes: &[u8; 33]) -> Option<ProjectivePoint> {
     if bytes[0] == 0x00 {
         return Some(ProjectivePoint::IDENTITY);
     }
-    let ep = EncodedPoint::from_bytes(bytes).ok()?;
-    let affine = AffinePoint::from_encoded_point(&ep);
+    let ep = Sec1Point::from_bytes(bytes).ok()?;
+    let affine = AffinePoint::from_sec1_point(&ep);
     if affine.is_some().into() {
         Some(ProjectivePoint::from(affine.unwrap()))
     } else {

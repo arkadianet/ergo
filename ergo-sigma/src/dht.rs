@@ -192,7 +192,9 @@ fn bytes_to_scalar(bytes: &[u8]) -> Option<Scalar> {
     // match that deliberately for consensus, including noncanonical responses.
     // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/SigSerializer.scala#L197-L207
     // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/crypto/DiffieHellmanTupleProtocol.scala#L119-L140
-    Some(<Scalar as k256::elliptic_curve::ops::Reduce<k256::U256>>::reduce_bytes(&field_bytes))
+    Some(<Scalar as k256::elliptic_curve::ops::Reduce<
+        k256::FieldBytes,
+    >>::reduce(&field_bytes))
 }
 
 fn challenge_to_scalar(challenge: &[u8]) -> Scalar {

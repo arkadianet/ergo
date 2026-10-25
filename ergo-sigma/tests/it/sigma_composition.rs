@@ -25,7 +25,6 @@ use ergo_sigma::schnorr::build_prove_dlog_ergo_tree;
 use ergo_sigma::verify::{verify_sigma_proof, SigmaBoolean};
 use ergo_sigma::{GROUP_SIZE, SOUNDNESS_BYTES};
 use k256::elliptic_curve::group::GroupEncoding;
-use k256::elliptic_curve::ops::MulByGenerator;
 use k256::elliptic_curve::PrimeField;
 use k256::{ProjectivePoint, Scalar};
 use num_bigint::BigUint;

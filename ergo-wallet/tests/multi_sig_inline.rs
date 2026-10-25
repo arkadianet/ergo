@@ -227,7 +227,7 @@ fn prover_consumes_own_commitment_from_bag_deterministic() {
 fn recompute_schnorr_commitment_from_proof(proof: &[u8], pk: &[u8; 33]) -> [u8; 33] {
     use k256::elliptic_curve::group::GroupEncoding;
     use k256::elliptic_curve::ops::Reduce;
-    use k256::elliptic_curve::sec1::FromEncodedPoint;
+    use k256::elliptic_curve::sec1::FromSec1Point;
     use k256::{ProjectivePoint, Scalar};
 
     let challenge_bytes: [u8; 24] = proof[..24].try_into().unwrap();
@@ -235,11 +235,11 @@ fn recompute_schnorr_commitment_from_proof(proof: &[u8], pk: &[u8; 33]) -> [u8; 
 
     let mut padded = [0u8; 32];
     padded[8..].copy_from_slice(&challenge_bytes);
-    let e = <Scalar as Reduce<k256::U256>>::reduce_bytes(&padded.into());
-    let z = <Scalar as Reduce<k256::U256>>::reduce_bytes(&z_bytes.into());
+    let e = <Scalar as Reduce<k256::FieldBytes>>::reduce(&padded.into());
+    let z = <Scalar as Reduce<k256::FieldBytes>>::reduce(&z_bytes.into());
 
-    let encoded = k256::EncodedPoint::from_bytes(pk.as_slice()).unwrap();
-    let pk_point = ProjectivePoint::from(k256::AffinePoint::from_encoded_point(&encoded).unwrap());
+    let encoded = k256::Sec1Point::from_bytes(pk.as_slice()).unwrap();
+    let pk_point = ProjectivePoint::from(k256::AffinePoint::from_sec1_point(&encoded).unwrap());
     let big_r = ProjectivePoint::GENERATOR * z - pk_point * e;
 
     let affine_bytes = k256::AffinePoint::from(big_r).to_bytes();
@@ -678,7 +678,6 @@ fn threshold_own_commitment_without_secret_rejects() {
     use ergo_wallet::proving::node_position::NodePosition;
     use ergo_wallet::proving::secrets::SecretRegistry;
     use ergo_wallet::proving::sigma::prove_sigma;
-    use k256::elliptic_curve::ops::MulByGenerator;
     use k256::{ProjectivePoint, Scalar};
 
     // Two distinct real pubkeys — we will NOT put their secrets in the registry.

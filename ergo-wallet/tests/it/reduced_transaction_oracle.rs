@@ -23,7 +23,7 @@ use ergo_wallet::{
     tx_context::{BlockchainParameters, BlockchainStateContext, SigningContext},
     ReducedTransaction,
 };
-use k256::{elliptic_curve::sec1::ToEncodedPoint, ProjectivePoint, Scalar};
+use k256::{elliptic_curve::sec1::ToSec1Point, ProjectivePoint, Scalar};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
@@ -47,7 +47,7 @@ fn parameters(limit: u64) -> BlockchainParameters {
 fn point(n: u64) -> [u8; 33] {
     (ProjectivePoint::GENERATOR * Scalar::from(n))
         .to_affine()
-        .to_encoded_point(true)
+        .to_sec1_point(true)
         .as_bytes()
         .try_into()
         .unwrap()

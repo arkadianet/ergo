@@ -1,8 +1,7 @@
 use k256::elliptic_curve::group::Group;
-use k256::elliptic_curve::ops::MulByGenerator;
-use k256::elliptic_curve::sec1::FromEncodedPoint;
+use k256::elliptic_curve::sec1::FromSec1Point;
 use k256::elliptic_curve::PrimeField;
-use k256::{AffinePoint, EncodedPoint, ProjectivePoint, Scalar};
+use k256::{AffinePoint, ProjectivePoint, Scalar, Sec1Point};
 use num_bigint::BigUint;
 
 use super::common::{biguint_to_32bytes, blake2b256, gen_indexes, AUTOLYKOS_N_BASE, M_BYTES};
@@ -56,8 +55,8 @@ fn gen_element_v1(
 
 /// Decode a 33-byte compressed SEC1 point into a ProjectivePoint.
 fn decode_point(bytes: &[u8; 33]) -> Option<ProjectivePoint> {
-    let encoded = EncodedPoint::from_bytes(bytes).ok()?;
-    let affine = AffinePoint::from_encoded_point(&encoded);
+    let encoded = Sec1Point::from_bytes(bytes).ok()?;
+    let affine = AffinePoint::from_sec1_point(&encoded);
     if affine.is_some().into() {
         Some(ProjectivePoint::from(affine.unwrap()))
     } else {

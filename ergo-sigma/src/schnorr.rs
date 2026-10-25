@@ -2,7 +2,6 @@
 // 0x05 included, is refused as by Scala's `GroupElementSerializer` (#683).
 use ergo_crypto::group_element::decode_point;
 use k256::elliptic_curve::group::GroupEncoding;
-use k256::elliptic_curve::ops::MulByGenerator;
 use k256::elliptic_curve::PrimeField;
 use k256::{ProjectivePoint, Scalar};
 use num_bigint::BigUint;
@@ -180,7 +179,9 @@ fn bytes_to_scalar(bytes: &[u8]) -> Option<Scalar> {
     // match that deliberately for consensus, including noncanonical responses.
     // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/SigSerializer.scala#L197-L207
     // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/crypto/DLogProtocol.scala#L118-L128
-    Some(<Scalar as k256::elliptic_curve::ops::Reduce<k256::U256>>::reduce_bytes(&field_bytes))
+    Some(<Scalar as k256::elliptic_curve::ops::Reduce<
+        k256::FieldBytes,
+    >>::reduce(&field_bytes))
 }
 
 /// Convert a 24-byte challenge to a scalar by interpreting as unsigned big-endian.

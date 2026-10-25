@@ -39,8 +39,8 @@ use ergo_wallet::tx_context::{BlockchainParameters, BlockchainStateContext};
 use ergo_wallet_service::box_selector::BoxSummary;
 use ergo_wallet_service::tx_builder::UnsignedTxBuilder;
 use k256::elliptic_curve::group::GroupEncoding;
-use k256::elliptic_curve::ops::{MulByGenerator, Reduce};
-use k256::{FieldBytes, ProjectivePoint, Scalar, U256};
+use k256::elliptic_curve::ops::Reduce;
+use k256::{FieldBytes, ProjectivePoint, Scalar};
 
 // ----- helpers -----
 
@@ -51,7 +51,7 @@ fn test_scalar() -> Scalar {
         0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
         0xcd, 0xee, // not all-zero; must be non-zero scalar
     ];
-    <Scalar as Reduce<U256>>::reduce_bytes(&FieldBytes::from(bytes))
+    <Scalar as Reduce<k256::FieldBytes>>::reduce(&FieldBytes::from(bytes))
 }
 
 /// Derive compressed-SEC1 pubkey from scalar.

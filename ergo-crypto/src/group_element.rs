@@ -50,8 +50,8 @@
 //! See the D-T5 ledger note in `ergo-compiler/src/lib.rs`.
 
 use ergo_primitives::group_element::is_decodable_lead;
-use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
-use k256::{AffinePoint, EncodedPoint, ProjectivePoint};
+use k256::elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
+use k256::{AffinePoint, ProjectivePoint, Sec1Point};
 
 /// Decode a 33-byte group element encoding to a curve point, accepting
 /// exactly what Scala's `GroupElementSerializer.parse` accepts.
@@ -73,9 +73,8 @@ pub fn decode_point(bytes: &[u8; 33]) -> Option<ProjectivePoint> {
     if bytes[0] == 0x00 {
         return Some(ProjectivePoint::IDENTITY);
     }
-    let encoded = EncodedPoint::from_bytes(bytes).ok()?;
-    Option::<AffinePoint>::from(AffinePoint::from_encoded_point(&encoded))
-        .map(ProjectivePoint::from)
+    let encoded = Sec1Point::from_bytes(bytes).ok()?;
+    Option::<AffinePoint>::from(AffinePoint::from_sec1_point(&encoded)).map(ProjectivePoint::from)
 }
 
 /// Compile-time GroupElement literal validation failure.
@@ -112,7 +111,7 @@ pub fn decompress_to_affine_hex(bytes: &[u8; 33]) -> Result<(String, String), Gr
         return Err(GroupElementError::InvalidPrefix);
     }
     let point = decode_point(bytes).ok_or(GroupElementError::NotOnCurve)?;
-    let uncompressed = point.to_affine().to_encoded_point(false);
+    let uncompressed = point.to_affine().to_sec1_point(false);
     let x = uncompressed
         .x()
         .expect("uncompressed encoding always carries x");
