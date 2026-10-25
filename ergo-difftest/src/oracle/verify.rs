@@ -269,6 +269,9 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
         })
     };
     let trace = ergo_sigma::cost_trace::take().context("verify trace")?;
+    // A failed `checkExpiredBox`: Scala's `verify` returns
+    // `(false, StorageContractCost)`. The 50 is reported, not charged (#668).
+    let refused_rent = trace.sum_by_prefix("RentRefused:") / 10;
     if let Some((_, snapped)) = trace.snaps.last() {
         output["eval_block_cost"] = json!((snapped - baseline.value()) / 10);
         output["crypto_block_cost"] = json!(trace.sum_by_prefix("Crypto:") / 10);
@@ -292,6 +295,10 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
         output["eval_block_cost"] = json!(0);
         output["crypto_block_cost"] = json!(0);
         output["rent_block_cost"] = json!((cost.total().value() - baseline.value()) / 10);
+    } else if rent && refused_rent > 0 {
+        output["eval_block_cost"] = json!(0);
+        output["crypto_block_cost"] = json!(0);
+        output["rent_block_cost"] = json!(refused_rent);
     }
     match result {
         Ok(ok) => {
@@ -311,6 +318,10 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
             });
             if is_cost || !trace.snaps.is_empty() {
                 output["total_block_cost"] = json!(cost.total_block_cost());
+            } else if refused_rent > 0 {
+                // The JVM's reported total adds the uncharged 50, even past
+                // the limit (`rent-true-box-below-floor-low-limit`: 17 + 50).
+                output["total_block_cost"] = json!(cost.total_block_cost() + refused_rent);
             }
             output["failure_class"] = json!("RustVerifyError");
             output["rejection_detail"] = json!(detail);
@@ -573,6 +584,33 @@ mod tests {
                 case["name"]
             );
         }
+    }
+
+    /// All ten JVM storage-rent branch cases, including a failed
+    /// `checkExpiredBox`: the JVM reports `rent_block_cost` 50 and a total of
+    /// init + 50 for the refused input although nothing is charged (#668).
+    #[test]
+    fn verify_rent_branch_jvm_fixtures_match() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../test-vectors/ergo-sigma/verify/rent-cases.json"
+        ))
+        .unwrap();
+        assert_eq!(cases.len(), 10);
+        let mut refused = 0;
+        for case in &cases {
+            let result = actual(&case["request"]);
+            assert_eq!(
+                comparable(&result.to_string()),
+                comparable(&case["expected"].to_string()),
+                "{}",
+                case["name"]
+            );
+            refused += usize::from(
+                case["expected"]["verdict"] == "RejectScript"
+                    && case["expected"]["rent_block_cost"] == 50,
+            );
+        }
+        assert_eq!(refused, 3);
     }
 
     #[test]
