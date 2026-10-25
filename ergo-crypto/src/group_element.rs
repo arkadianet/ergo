@@ -74,8 +74,7 @@ pub fn decode_point(bytes: &[u8; 33]) -> Option<ProjectivePoint> {
         return Some(ProjectivePoint::IDENTITY);
     }
     let encoded = Sec1Point::from_bytes(bytes).ok()?;
-    Option::<AffinePoint>::from(AffinePoint::from_sec1_point(&encoded))
-        .map(ProjectivePoint::from)
+    Option::<AffinePoint>::from(AffinePoint::from_sec1_point(&encoded)).map(ProjectivePoint::from)
 }
 
 /// Compile-time GroupElement literal validation failure.
