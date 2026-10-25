@@ -336,7 +336,7 @@ impl TransactionContext {
     ///
     /// `block_version` is the active parameters' block version, which sets the
     /// activated script version. The caller passes the newest
-    /// [`MEMPOOL_LAST_HEADERS`] headers as `CONTEXT.headers`.
+    /// [`UPCOMING_LAST_HEADERS`] headers as `CONTEXT.headers`.
     pub fn mempool_upcoming(
         tip: &ergo_ser::header::Header,
         tip_id: &[u8; 32],
@@ -355,11 +355,16 @@ impl TransactionContext {
     }
 }
 
-/// How many of the newest headers, the tip first, Scala's mempool context
-/// exposes as `CONTEXT.headers`. `simplifiedUpcoming()` keeps
-/// `lastHeaders.take(Constants.LastHeadersInContext - 1)`: the predicted
-/// block takes the tenth place.
-pub const MEMPOOL_LAST_HEADERS: usize = 9;
+/// How many of the newest headers, the tip first, Scala exposes as
+/// `CONTEXT.headers` for the block after the tip. Both its mempool context
+/// (`simplifiedUpcoming()`) and its mining candidates (`upcoming(...)`) build an
+/// `UpcomingStateContext` from `lastHeaders.take(Constants.LastHeadersInContext
+/// - 1)`. That is the same nine headers block validation gives the block later
+/// (`lastHeaders.drop(1)` once it is applied).
+///
+/// Oracle: `scripts/reference_evaluator_oracle/UpcomingContextOracle.scala`
+/// (ergo-core 6.0.7), `test-vectors/reference-6.0.7/upcoming-context/`.
+pub const UPCOMING_LAST_HEADERS: usize = 9;
 
 #[cfg(test)]
 mod tests {

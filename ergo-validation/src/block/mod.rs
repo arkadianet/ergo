@@ -162,8 +162,9 @@ pub struct BlockValidationContext<'a> {
     /// only the first 9 to the evaluator — Scala's
     /// `sigmaLastHeaders = lastHeaders.drop(1)` rule — so that
     /// `CONTEXT.headers(9)` fails exactly as it does on the JVM. The
-    /// candidate/mempool surface keeps all 10 (`UpcomingStateContext`
-    /// parity); see `validate::HEADERS_IN_BLOCK_SCRIPT_CONTEXT`.
+    /// candidate/mempool surface also exposes 9
+    /// ([`UPCOMING_LAST_HEADERS`](crate::UPCOMING_LAST_HEADERS)); see
+    /// `validate::HEADERS_IN_BLOCK_SCRIPT_CONTEXT`.
     pub last_headers: &'a [CheckedHeader],
     /// Optional script-validation checkpoint. When `Some((height, id))`:
     ///   - For blocks at or below `height`, per-input ErgoScript evaluation

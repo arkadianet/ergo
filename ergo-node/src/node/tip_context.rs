@@ -77,7 +77,7 @@ pub(super) fn build_tip_context(state: &NodeState) -> Option<OwnedTipContext> {
     tx_context.height = tip_height.saturating_add(1);
     let last_headers: Vec<ergo_ser::header::Header> = ctx_headers
         .iter()
-        .take(ergo_validation::MEMPOOL_LAST_HEADERS)
+        .take(ergo_validation::UPCOMING_LAST_HEADERS)
         .map(|ch| ch.header().clone())
         .collect();
     let best_header_height = state.store.chain_state_meta().best_header_height;

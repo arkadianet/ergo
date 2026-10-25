@@ -32,12 +32,14 @@ use super::{BlockValidationContext, BlockValidationError, CheckedBlock};
 /// `CONTEXT.headers(9)` therefore throws
 /// `ArrayIndexOutOfBoundsException` and Scala rejects the block.
 ///
-/// The candidate / mempool surface is deliberately different:
-/// `UpcomingStateContext` overrides `sigmaLastHeaders` with the *whole* 10
-/// entry sequence because the block being built travels separately in
-/// `predictedHeader`. That asymmetry is why `CandidateValidationContext`
-/// keeps its `[Header; 10]` window and mempool admission keeps 10, while
-/// this module must truncate to 9. Divergence here is consensus-critical in
+/// The candidate / mempool surface reaches the same nine by another route:
+/// `UpcomingStateContext` exposes its whole `lastHeaders` as
+/// `sigmaLastHeaders` (the block being built travels separately in
+/// `predictedHeader`), and since Scala `681a1842d` (in 6.0.7) `upcoming` and
+/// `simplifiedUpcoming` build it from `lastHeaders.take(LastHeadersInContext -
+/// 1)`. Before that commit it held all 10. Candidate construction and mempool
+/// admission therefore pass the newest
+/// [`UPCOMING_LAST_HEADERS`](crate::UPCOMING_LAST_HEADERS) (9). Divergence here is consensus-critical in
 /// both directions (`CONTEXT.headers.size` is script-observable): live
 /// mainnet incident 2026-08-17/18, heights 1,853,462–1,853,480, where this
 /// node accepted 15 poisoned blocks Scala rejected via `headers(9)`

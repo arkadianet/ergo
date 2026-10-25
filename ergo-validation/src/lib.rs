@@ -51,7 +51,7 @@ pub use active_params::{
     scala_launch_testnet, ActiveParamsError, ActiveProtocolParameters,
 };
 pub use context::{
-    LocalPolicy, ProtocolParams, TransactionContext, UtxoView, MEMPOOL_LAST_HEADERS,
+    LocalPolicy, ProtocolParams, TransactionContext, UtxoView, UPCOMING_LAST_HEADERS,
 };
 pub use cost::{CostAccumulator, CostError, JitCost};
 pub use error::ValidationError;
