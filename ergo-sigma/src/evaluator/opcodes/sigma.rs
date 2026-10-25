@@ -31,26 +31,20 @@ use super::super::types::{EvalError, Value};
 // EC point decode used by both Exponentiate (0x9F) and MultiplyGroup
 // (0xA0). Cost-free; cost stays in the calling arms. Preserves the
 // `bytes[0] == 0x00 → IDENTITY` shortcut and exact `TypeError` messages
-// from the original closure.
+// from the original closure. The lead rule is the wire reader's
+// (`is_decodable_lead`): `05‖x` is refused like Scala's
+// `GroupElementSerializer`, not read as the even-y point (#683).
 pub(super) fn decode_group_element(bytes: &[u8; 33]) -> Result<k256::ProjectivePoint, EvalError> {
-    use k256::elliptic_curve::sec1::FromEncodedPoint;
-    use k256::{AffinePoint, EncodedPoint, ProjectivePoint};
-    if bytes[0] == 0x00 {
-        return Ok(ProjectivePoint::IDENTITY);
+    if !ergo_primitives::group_element::is_decodable_lead(bytes[0]) {
+        return Err(EvalError::TypeError {
+            expected: "valid SEC1 point",
+            got: "invalid encoding".into(),
+        });
     }
-    let encoded = EncodedPoint::from_bytes(bytes).map_err(|_| EvalError::TypeError {
-        expected: "valid SEC1 point",
-        got: "invalid encoding".into(),
-    })?;
-    let affine = AffinePoint::from_encoded_point(&encoded);
-    if affine.is_some().into() {
-        Ok(ProjectivePoint::from(affine.unwrap()))
-    } else {
-        Err(EvalError::TypeError {
-            expected: "valid curve point",
-            got: "not on curve".into(),
-        })
-    }
+    ergo_crypto::group_element::decode_point(bytes).ok_or_else(|| EvalError::TypeError {
+        expected: "valid curve point",
+        got: "not on curve".into(),
+    })
 }
 
 // 0xCD ProveDlog(group_element)
@@ -119,7 +113,9 @@ pub(in crate::evaluator) fn eval_prove_dh_tuple(
 ///     trailing bytes are discarded (`CryptoContext.default.infinity`);
 ///   - otherwise ⇒ decode on-curve (k256, == the JVM's BouncyCastle SEC1
 ///     validation), rejecting off-curve points / bad prefixes / non-square X.
-///     A valid `0x02`/`0x03` compressed point is already its own canonical form.
+///     Only `0x02`/`0x03` leads decode; `0x05` is refused although k256's
+///     SEC1 parser alone would accept it. A valid `0x02`/`0x03` compressed
+///     point is already its own canonical form.
 ///
 /// Applied wherever a `GroupElement` VALUE is materialized from wire/register
 /// bytes, so a garbage-identity encoding compares/encodes as the canonical

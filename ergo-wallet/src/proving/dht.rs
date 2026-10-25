@@ -229,6 +229,10 @@ fn find_own_commitment_full(
 
 /// Decode a compressed SEC1 point (33 bytes) as a `ProjectivePoint`.
 fn decode_point(bytes: &[u8; 33]) -> Option<ProjectivePoint> {
+    // The wire reader's lead rule: k256 alone would read `05‖x` (#683).
+    if !ergo_primitives::group_element::is_decodable_lead(bytes[0]) {
+        return None;
+    }
     if bytes[0] == 0x00 {
         return Some(ProjectivePoint::IDENTITY);
     }

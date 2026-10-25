@@ -1,6 +1,8 @@
-use k256::elliptic_curve::sec1::FromEncodedPoint;
+// A 0x00 lead is the identity, 0x02/0x03 a compressed point; any other lead,
+// 0x05 included, is refused as by Scala's `GroupElementSerializer` (#683).
+use ergo_crypto::group_element::decode_point;
 use k256::elliptic_curve::PrimeField;
-use k256::{AffinePoint, EncodedPoint, ProjectivePoint, Scalar};
+use k256::{ProjectivePoint, Scalar};
 use num_bigint::BigUint;
 use thiserror::Error;
 
@@ -171,20 +173,6 @@ pub fn build_prove_dht_ergo_tree(
     bytes.push(0x73); // ConstantPlaceholder opcode
     bytes.push(0x00); // index 0
     bytes
-}
-
-fn decode_point(bytes: &[u8; 33]) -> Option<ProjectivePoint> {
-    // SEC1: 0x00 prefix = identity (point at infinity).
-    if bytes[0] == 0x00 {
-        return Some(ProjectivePoint::IDENTITY);
-    }
-    let encoded = EncodedPoint::from_bytes(bytes).ok()?;
-    let affine = AffinePoint::from_encoded_point(&encoded);
-    if affine.is_some().into() {
-        Some(ProjectivePoint::from(affine.unwrap()))
-    } else {
-        None
-    }
 }
 
 fn point_to_bytes(point: &ProjectivePoint) -> [u8; 33] {

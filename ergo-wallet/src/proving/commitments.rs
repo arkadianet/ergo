@@ -152,6 +152,10 @@ fn compressed_point(p: k256::ProjectivePoint) -> [u8; 33] {
 
 fn decompress_point(bytes: &[u8; 33]) -> Result<k256::ProjectivePoint, WalletError> {
     use k256::elliptic_curve::sec1::FromEncodedPoint;
+    // The wire reader's lead rule: k256 alone would read `05‖x` (#683).
+    if !ergo_primitives::group_element::is_decodable_lead(bytes[0]) {
+        return Err(WalletError::MissingSecret("invalid SEC1 point".to_string()));
+    }
     let encoded = k256::EncodedPoint::from_bytes(bytes.as_slice())
         .map_err(|e| WalletError::MissingSecret(format!("decompress: {e}")))?;
     let opt = k256::AffinePoint::from_encoded_point(&encoded);
