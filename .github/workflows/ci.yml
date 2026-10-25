@@ -287,8 +287,11 @@ jobs:
         # --ignore RUSTSEC-2025-0141: bincode 1.x is unmaintained with no
         # patched version. It is used only for local wallet-state persistence
         # (not consensus), and migrating would break existing wallet DBs.
+        # --ignore RUSTSEC-2026-0387: temporary. crypto-bigint 0.5.5 comes
+        # from k256 0.13 and has no patched 0.5.x release; the fix needs the
+        # k256 0.14 migration. Remove it with that migration.
         # Full rationale lives in deny.toml [advisories]; keep the two in sync.
-        run: cargo audit --deny warnings --ignore RUSTSEC-2025-0141
+        run: cargo audit --deny warnings --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0387
 
   deny:
     name: cargo-deny (licenses + duplicates + advisories)

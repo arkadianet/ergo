@@ -197,7 +197,7 @@ PYTOOLS
 | Tool | Command | Checks | When |
 |---|---|---|---|
 | `cargo-deny` | `cargo deny check` | Licenses, duplicate deps, RustSec advisories, source gating. Config in [`deny.toml`](./deny.toml). | CI (every push/PR); locally before submitting dependency changes. |
-| `cargo-audit` | `cargo audit --deny warnings --ignore RUSTSEC-2025-0141` | RustSec advisory database against `Cargo.lock`. | CI (every push/PR). |
+| `cargo-audit` | `cargo audit --deny warnings --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0387` | RustSec advisory database against `Cargo.lock`. | CI (every push/PR). |
 | `cargo-machete` | `cargo machete` | Unused dependencies (stable Rust). | CI (every push/PR). |
 | `cargo-udeps` | `cargo +nightly udeps --workspace` | Unused dependencies (nightly; stricter — catches feature-gated deps machete misses). | Not in CI. Run before a release-train cut. |
 | `cargo-geiger` | `cargo geiger` | `unsafe`-code surface report. Informational, no pass/fail. | Not in CI. Diff against the previous run before merging any PR that adds `unsafe`. |
