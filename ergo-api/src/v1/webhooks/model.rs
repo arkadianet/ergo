@@ -21,7 +21,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use utoipa::ToSchema;
 
-use hmac::{Mac, SimpleHmac};
+use hmac::{KeyInit, Mac, SimpleHmac};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::Sha256;
@@ -218,7 +218,7 @@ impl Delivery {
 /// replays outside a clock-skew window. Uses `SimpleHmac` (RFC 2104 HMAC over
 /// SHA-256) — the same proven primitive family the node's inbound gate uses.
 pub fn sign_body(secret: &str, timestamp_unix_ms: u64, raw_body: &str) -> String {
-    let mut mac = <SimpleHmac<Sha256> as Mac>::new_from_slice(secret.as_bytes())
+    let mut mac = <SimpleHmac<Sha256> as KeyInit>::new_from_slice(secret.as_bytes())
         .expect("SimpleHmac accepts a key of any length");
     mac.update(timestamp_unix_ms.to_string().as_bytes());
     mac.update(b".");

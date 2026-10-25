@@ -32,7 +32,7 @@ pub(crate) fn canonical(value: &serde_json::Value) -> serde_json::Value {
 
 pub(crate) fn digest(value: &serde_json::Value) -> io::Result<String> {
     let bytes = serde_json::to_vec(&canonical(value)).map_err(io::Error::other)?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 pub(super) fn validate_surface(surface: &str) -> io::Result<()> {

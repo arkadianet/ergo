@@ -125,7 +125,7 @@ impl Oracle {
             .collect();
         let source_metadata = serde_json::json!({
             "original_source": original,
-            "source_sha256": format!("{:x}", Sha256::digest(&source)),
+            "source_sha256": hex::encode(Sha256::digest(&source)),
             "source_snapshot_utf8": source_utf8,
             "command_argv": command_argv,
             "source_contract": "standalone Scala source; relative project/resources are not imported from the caller checkout",
@@ -290,7 +290,7 @@ fn runtime_provenance(stderr: &[u8]) -> io::Result<serde_json::Value> {
         if path.extension().is_some_and(|extension| extension == "jar") {
             let bytes = std::fs::read(path)?;
             let name = path.file_name().map(|name| name.to_string_lossy());
-            jars.push(serde_json::json!({"path": path, "name": name, "bytes": bytes.len(), "sha256": format!("{:x}", Sha256::digest(&bytes))}));
+            jars.push(serde_json::json!({"path": path, "name": name, "bytes": bytes.len(), "sha256": hex::encode(Sha256::digest(&bytes))}));
         }
     }
     if !properties.contains_key("java.runtime.version") || jars.is_empty() {
@@ -1550,7 +1550,7 @@ mod tests {
         let snapshot = provenance["source_snapshot_utf8"].as_str().unwrap();
         assert_eq!(
             provenance["source_sha256"],
-            format!("{:x}", Sha256::digest(snapshot.as_bytes()))
+            hex::encode(Sha256::digest(snapshot.as_bytes()))
         );
         let jars = provenance["actual_runtime"]["resolved_jars"]
             .as_array()
@@ -1603,7 +1603,7 @@ mod tests {
         );
         assert_eq!(
             metadata["resolved_jars"][0]["sha256"],
-            format!("{:x}", Sha256::digest(b"metadata-test-content"))
+            hex::encode(Sha256::digest(b"metadata-test-content"))
         );
     }
 

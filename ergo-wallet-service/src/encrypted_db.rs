@@ -96,7 +96,7 @@ impl DataKey {
     }
 
     fn derive(&self, label: &[u8]) -> Zeroizing<[u8; 32]> {
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.0.as_slice())
+        let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(self.0.as_slice())
             .expect("HMAC accepts any key length");
         mac.update(label);
         Zeroizing::new(mac.finalize().into_bytes().into())
@@ -584,7 +584,7 @@ fn publish(pending: &Path, path: &Path) -> io::Result<()> {
 
 fn slot_mac(mac_key: &[u8; 32], body: &[u8]) -> [u8; 32] {
     let mut mac =
-        <Hmac<Sha256> as Mac>::new_from_slice(mac_key).expect("HMAC accepts any key length");
+        <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(mac_key).expect("HMAC accepts any key length");
     mac.update(b"ergo-walletd wallet.redb header slot\0");
     mac.update(body);
     mac.finalize().into_bytes().into()

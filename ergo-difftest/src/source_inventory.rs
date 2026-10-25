@@ -74,7 +74,7 @@ pub fn compiled_rows(rows: &[serde_json::Value]) -> Vec<serde_json::Value> {
 /// SHA-256 of canonical snapshot rows, as `scripts/difftest-records.py`
 /// digests them.
 pub fn rows_sha256(rows: &[serde_json::Value]) -> Result<String, serde_json::Error> {
-    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(rows)?)))
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(rows)?)))
 }
 
 fn walk(
