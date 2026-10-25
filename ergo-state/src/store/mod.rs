@@ -1886,11 +1886,24 @@ impl StateStore {
             emission::recover_identity(&txn, &self.chain_state.best_full_block_id, 4096, network)?;
         }
         txn.commit()?;
+        // Recovery is best effort: missing, pruned or too-distant history
+        // leaves the tip without a row.
         if cleared {
-            tracing::warn!(
-                ?network,
-                "emission identity was recorded under another network; rebuilt it from the tip",
-            );
+            if self
+                .emission_identity(&self.chain_state.best_full_block_id)?
+                .is_some()
+            {
+                tracing::warn!(
+                    ?network,
+                    "emission identity was recorded under another network; rebuilt it from the tip",
+                );
+            } else {
+                tracing::warn!(
+                    ?network,
+                    "emission identity was recorded under another network; cleared it, but local \
+                     history could not rebuild it at the tip",
+                );
+            }
         }
         Ok(cleared)
     }
