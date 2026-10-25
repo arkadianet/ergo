@@ -583,8 +583,8 @@ fn publish(pending: &Path, path: &Path) -> io::Result<()> {
 }
 
 fn slot_mac(mac_key: &[u8; 32], body: &[u8]) -> [u8; 32] {
-    let mut mac =
-        <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(mac_key).expect("HMAC accepts any key length");
+    let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(mac_key)
+        .expect("HMAC accepts any key length");
     mac.update(b"ergo-walletd wallet.redb header slot\0");
     mac.update(body);
     mac.finalize().into_bytes().into()

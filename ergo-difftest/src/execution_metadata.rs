@@ -24,9 +24,7 @@ pub struct ExecutionMetadata {
 
 fn executable_identity(path: &Path) -> io::Result<Value> {
     let bytes = std::fs::read(path)?;
-    Ok(
-        json!({"path": path, "bytes": bytes.len(), "sha256": hex::encode(Sha256::digest(bytes))}),
-    )
+    Ok(json!({"path": path, "bytes": bytes.len(), "sha256": hex::encode(Sha256::digest(bytes))}))
 }
 
 fn command_identity() -> io::Result<Value> {
