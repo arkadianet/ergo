@@ -79,7 +79,8 @@ mod sweep;
 
 pub use admin::{AttemptJournal, AttemptRecord, UnlockThrottle};
 pub use chain::{
-    map_chain_error, ChainAccessError, SigningView, StoreCursorChain, WalletChainAccess,
+    map_chain_error, ChainAccessError, MempoolCandidate, SigningView, StoreCursorChain,
+    WalletChainAccess,
 };
 pub use config::WalletEngineConfig;
 pub use keys::WalletBootService;

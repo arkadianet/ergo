@@ -112,7 +112,7 @@ fn solved_block(
                 height,
                 timestamp,
                 n_bits: DIFFICULTY_ONE,
-                votes: [0; 3],
+                votes: [0; 3].into(),
                 miner_pubkey: MINER_PK,
             },
             activated_script_version: 2,

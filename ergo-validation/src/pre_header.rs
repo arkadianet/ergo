@@ -96,7 +96,7 @@ mod tests {
             height: 1_786_189,
             timestamp: 1_700_000_000_000,
             n_bits: 16_842_752,
-            votes: [0, 0, 0],
+            votes: [0, 0, 0].into(),
             miner_pubkey: [0x02u8; 33],
         };
         let clone = p.clone();

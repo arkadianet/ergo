@@ -788,7 +788,7 @@ fn synthetic_state_context(height: u32) -> BlockchainStateContext {
             height,
             timestamp: 1_700_000_000_000,
             n_bits: 0x1a01_7660,
-            votes: [0, 0, 0],
+            votes: [0, 0, 0].into(),
             miner_pubkey: [0x02u8; 33],
         },
         previous_state_digest: ADDigest::from_bytes([0u8; 33]),

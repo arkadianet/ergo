@@ -174,7 +174,7 @@ mod tests {
             height: 1_786_189,
             timestamp: 1_700_000_000_000,
             n_bits: 0x1c00ffff,
-            votes: [0u8; 3],
+            votes: [0u8; 3].into(),
             miner_pubkey: placeholder_pk,
         };
         let last_block_utxo_root = build_last_block_utxo_root(ADDigest::from_bytes([0u8; 33]));

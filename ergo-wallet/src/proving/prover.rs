@@ -150,7 +150,9 @@ impl Prover {
                 &owned.as_borrowed(),
                 &mut cost,
             )
-            .map_err(|e| WalletError::TxBuild(e.to_string()))?;
+            .map_err(|e| {
+                WalletError::TxBuild(format!("input {idx} script reduction failed: {e}"))
+            })?;
             reduced_inputs.push(crate::ReducedInput {
                 sigma,
                 cost: cost.total_block_cost(),

@@ -6,7 +6,7 @@ use ergo_validation::pre_header::CandidatePreHeader;
 use ergo_validation::{ActiveProtocolParameters, ProtocolParams, ReemissionRuleInputs};
 use ergo_wallet::tx_context::{BlockchainParameters, BlockchainStateContext};
 use ergo_wallet_service::chain::CommittedTip;
-use ergo_wallet_service::engine::{ChainAccessError, SigningView};
+use ergo_wallet_service::engine::{ChainAccessError, MempoolCandidate, SigningView};
 
 /// A committed-state read failure, rendered exactly as the node has always
 /// reported it (`chain state read failed: ...`).
@@ -20,6 +20,8 @@ pub struct ChainSnapshot {
     headers: Vec<Header>,
     header_ids: Vec<[u8; 32]>,
     state_context: BlockchainStateContext,
+    /// The block after the tip as this node's mempool admits against it.
+    candidate: Option<MempoolCandidate>,
     active_params: ActiveProtocolParameters,
     signing_params: BlockchainParameters,
     protocol_params: ProtocolParams,
@@ -56,10 +58,14 @@ pub(super) fn decode_utxo_box(box_id: &[u8; 32], bytes: &[u8]) -> Result<ErgoBox
 
 impl ChainSnapshot {
     /// Builds the signing view from one committed full-block snapshot.
-    /// The candidate preheader is synthetic: its timestamp is the committed
-    /// tip timestamp plus one, votes are zero, and its miner key is copied
-    /// from the tip header. Scripts that inspect those preheader fields can
-    /// therefore evaluate differently from a real candidate block.
+    ///
+    /// Contracts are signed against [`MempoolCandidate`], the block after the
+    /// tip as the mempool predicts it (Scala's `simplifiedUpcoming()`), so a
+    /// transaction that self-verifies is one this node admits. A script that
+    /// reads pre-header fields can still evaluate differently in the block
+    /// that finally includes it. `state_context` is the older synthetic
+    /// successor (the tip's miner key and zero votes), kept for the wire
+    /// spending context and the synthetic signing gate.
     pub fn from_committed(
         committed: CommittedSnapshot,
         reemission: Option<&ReemissionRuleInputs>,
@@ -101,17 +107,24 @@ impl ChainSnapshot {
                 height: tip.height + 1,
                 timestamp: tip_header.timestamp + 1,
                 n_bits: tip_header.n_bits,
-                votes: [0, 0, 0],
+                votes: [0, 0, 0].into(),
                 miner_pubkey: *tip_header.solution.pk().as_bytes(),
             },
             previous_state_digest: committed.state_root(),
         };
+        let candidate = MempoolCandidate::new(
+            &headers,
+            &header_ids,
+            committed.state_root(),
+            active_params.block_version,
+        );
         Ok(Self {
             committed,
             tip,
             headers,
             header_ids,
             state_context,
+            candidate,
             active_params,
             signing_params,
             protocol_params,
@@ -142,6 +155,12 @@ impl ChainSnapshot {
 }
 
 impl SigningView for ChainSnapshot {
+    fn intended_candidate_context(&self) -> Option<ergo_wallet::tx_context::SigningContext<'_>> {
+        self.candidate
+            .as_ref()
+            .map(|candidate| candidate.signing_context(&self.protocol_params.validation_settings))
+    }
+
     fn tip(&self) -> CommittedTip {
         self.tip.clone()
     }
@@ -790,5 +809,142 @@ mod tests {
             ),
             response.tx_id
         );
+    }
+
+    /// #684: walletd signs a contract input against the context this node's
+    /// mempool admits with. The contract is
+    /// `sigmaProp(CONTEXT.preHeader.minerPk == groupGenerator) && proveDlog(groupGenerator)`:
+    /// true only under the mempool prediction (the generator as miner), false
+    /// under the synthetic successor (the tip's miner, 7*G here).
+    #[tokio::test]
+    async fn native_sign_spends_a_contract_input_the_mempool_admits() {
+        use ergo_ser::ergo_box::{serialize_ergo_box, ErgoBoxCandidate};
+        use ergo_wallet_protocol::native::dto::{ExternalSecret, SignTxRequest, TxRepr};
+        use std::sync::Arc;
+
+        // 00 | SigmaAnd(2): BoolToSigmaProp(EQ(CONTEXT.preHeader.minerPk, groupGenerator)),
+        //                   ProveDlog(groupGenerator)
+        let tree_bytes = hex::decode("00ea02d193db6906db6503fe82cd82").unwrap();
+        let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(&tree_bytes)).unwrap();
+        let contract = ErgoBox {
+            candidate: ErgoBoxCandidate::new(1_000_000_000, tree, 1, vec![], Default::default())
+                .unwrap(),
+            transaction_id: ModifierId::from_bytes([0x51; 32]),
+            index: 0,
+        };
+        let contract_id = contract.box_id().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&directory.path().join("state.redb"))
+            .unwrap()
+            .with_non_durable_commits_for_test();
+        store
+            .initialize_genesis(&[(
+                *contract_id.as_bytes(),
+                serialize_ergo_box(&contract).unwrap(),
+            )])
+            .unwrap();
+        let seven_g: [u8; 33] =
+            hex::decode("025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let mut parent = ModifierId::from_bytes([0; 32]);
+        for height in 1..=12u32 {
+            let mut synthetic = header(height, parent);
+            // The unchecked helper's HEADER_META timestamp, for hydration.
+            synthetic.timestamp = 1_700_000_000 + u64::from(height);
+            synthetic.solution = AutolykosSolution::V2 {
+                pk: ergo_primitives::group_element::GroupElement::from(seven_g),
+                nonce: [0; 8],
+            };
+            // Empty blocks: every header commits to the genesis UTXO root, as
+            // the signing context checks against the tip.
+            let root = store.root_digest();
+            synthetic.state_root = root;
+            let (bytes, id) = serialize_header(&synthetic).unwrap();
+            store.store_header(id.as_bytes(), &bytes).unwrap();
+            store
+                .apply_block_unchecked_for_test(height, id.as_bytes(), &root, &[])
+                .unwrap();
+            parent = id;
+        }
+        let accessor = super::super::ChainStateAccessorImpl::chain_only(
+            ergo_state::reader::ChainStoreReader::new_from_db(store.db_arc()),
+            false,
+            None,
+        );
+        let snapshot = accessor.chain_snapshot().unwrap();
+        assert_eq!(
+            snapshot.state_context().sigma_pre_header.miner_pubkey,
+            seven_g,
+            "the synthetic successor would make the contract false"
+        );
+
+        let unsigned = ergo_ser::transaction::UnsignedTransaction {
+            inputs: vec![ergo_ser::input::UnsignedInput {
+                box_id: contract_id,
+                extension: ergo_ser::input::ContextExtension::empty(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![contract.candidate.clone()],
+        };
+        let mut writer = ergo_primitives::writer::VlqWriter::new();
+        ergo_ser::transaction::write_unsigned_transaction(&mut writer, &unsigned).unwrap();
+        let request = SignTxRequest {
+            unsigned_transaction: TxRepr::from_bytes(&writer.result()),
+            external_secrets: vec![ExternalSecret::Dlog {
+                secret: format!("{:064x}", 1),
+            }],
+        };
+        let engine = pool_test_engine(
+            Arc::new(parking_lot::RwLock::new(
+                ergo_wallet::storage::SecretStorage::open(directory.path().join("wallet")),
+            )),
+            Arc::new(parking_lot::RwLock::new(
+                ergo_wallet_service::state::WalletState::empty(false),
+            )),
+            store.db_arc(),
+            Arc::new(accessor),
+            Arc::new(ergo_wallet_service::engine::NoopMempoolOverlay::new()),
+            Arc::new(NoPoolSubmit),
+        );
+        let signed = engine
+            .native_sign_transaction(request)
+            .expect("a contract input over a held key signs");
+        let bytes = hex::decode(signed.signed_transaction.bytes_hex()).unwrap();
+
+        // The node's mempool admission context is the one walletd signed for.
+        let candidate = snapshot.intended_candidate_context().unwrap();
+        let mut node = crate::node::tests::make_state_with_store(store);
+        node.executor.hydrate_block_context(&node.store).unwrap();
+        let owned = crate::node::tip_context::build_tip_context(&node).unwrap();
+        let pre = &candidate.state_context.sigma_pre_header;
+        assert_eq!(pre.height, owned.tx_context.height);
+        assert_eq!(pre.parent_id, owned.tx_context.pre_header_parent_id);
+        assert_eq!(pre.timestamp, owned.tx_context.pre_header_timestamp);
+        assert_eq!(u64::from(pre.n_bits), owned.tx_context.pre_header_n_bits);
+        assert_eq!(pre.version, owned.tx_context.pre_header_version);
+        assert_eq!(pre.votes, owned.tx_context.pre_header_votes);
+        assert_eq!(pre.miner_pubkey, owned.tx_context.miner_pubkey);
+        assert_eq!(
+            candidate.state_context.sigma_last_headers,
+            owned.last_headers
+        );
+        let mut cost = ergo_primitives::cost::CostAccumulator::new(
+            ergo_primitives::cost::JitCost::from_block_cost(owned.params.max_block_cost).unwrap(),
+        );
+        ergo_validation::tx::validate_transaction(
+            &bytes,
+            node.store.as_utxo().unwrap(),
+            &ergo_validation::LocalPolicy::default_policy(),
+            &mut ergo_validation::TxValidationCtx {
+                ctx: &owned.tx_context,
+                params: &owned.params,
+                cost: &mut cost,
+                last_headers: &owned.last_headers,
+                rules: Default::default(),
+            },
+        )
+        .expect("the mempool admits what walletd signed");
     }
 }

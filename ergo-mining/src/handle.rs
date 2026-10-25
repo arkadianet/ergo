@@ -2008,7 +2008,7 @@ mod tests {
                 height: 1,
                 timestamp: 1_700_000_000_000,
                 n_bits,
-                votes: [0u8; 3],
+                votes: [0u8; 3].into(),
                 miner_pubkey: pk,
             },
             activated_script_version: 2,

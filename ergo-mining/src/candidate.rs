@@ -618,7 +618,7 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
         height: candidate_height,
         timestamp,
         n_bits: new_n_bits,
-        votes: candidate_votes,
+        votes: candidate_votes.into(),
         miner_pubkey: *miner_pk,
     };
 

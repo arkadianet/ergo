@@ -4,8 +4,9 @@
 /// `PreHeader` (`PreHeader.scala`) minus the AutolykosV2 fields, which
 /// only get set after the miner solves the puzzle.
 ///
-/// `votes` is always `[0, 0, 0]` in v1 — automatic voting bit selection
-/// is not yet implemented.
+/// A mining candidate's `votes` are always `[0, 0, 0]` in v1: automatic
+/// voting bit selection is not yet implemented. Scala's mempool prediction
+/// has none ([`PreHeaderVotes::Empty`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidatePreHeader {
     /// Block version. Comes from active protocol parameters
@@ -25,8 +26,9 @@ pub struct CandidatePreHeader {
     /// `n_bits` (non-retarget heights) or the recomputed retarget
     /// at epoch boundaries.
     pub n_bits: u32,
-    /// Voting bits. Always `[0, 0, 0]` in v1.
-    pub votes: [u8; 3],
+    /// Voting bits: `[0, 0, 0]` for a v1 mining candidate, none for the
+    /// mempool prediction.
+    pub votes: PreHeaderVotes,
     /// 33-byte compressed secp256k1 miner pubkey.
     pub miner_pubkey: [u8; 33],
 }
@@ -51,6 +53,14 @@ impl PreHeaderVotes {
         match self {
             Self::Bytes(bytes) => bytes,
             Self::Empty => &[],
+        }
+    }
+
+    /// The three vote bytes of a header or candidate; `None` when empty.
+    pub fn bytes(&self) -> Option<[u8; 3]> {
+        match self {
+            Self::Bytes(bytes) => Some(*bytes),
+            Self::Empty => None,
         }
     }
 }

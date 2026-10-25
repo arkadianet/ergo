@@ -206,7 +206,7 @@ fn serve_at(
                 height,
                 timestamp: 1_000_000 + u64::from(height),
                 n_bits,
-                votes: [0; 3],
+                votes: [0; 3].into(),
                 miner_pubkey: [2; 33],
             },
             activated_script_version: 2,
