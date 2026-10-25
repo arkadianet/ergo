@@ -65,11 +65,11 @@ pub(crate) fn router() -> Router {
         .route("/", get(index))
         .route("/wallet", get(index))
         .route("/wallet/", get(index))
-        .route("/js/:asset", get(javascript))
+        .route("/js/{asset}", get(javascript))
         .route("/tokens.css", get(tokens))
         .route("/components.css", get(components))
         .route("/dashboard.css", get(dashboard))
-        .route("/fonts/:asset", get(font))
+        .route("/fonts/{asset}", get(font))
 }
 
 fn asset(content_type: &'static str, body: impl IntoResponse) -> Response {

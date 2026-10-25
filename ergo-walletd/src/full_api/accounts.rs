@@ -34,51 +34,51 @@ pub(super) fn router(admin: Arc<WalletApi>) -> Router {
             get(accounts_unavailable).post(accounts_unavailable),
         )
         .route(
-            "/api/v1/accounts/:account_id",
+            "/api/v1/accounts/{account_id}",
             get(accounts_unavailable)
                 .patch(accounts_unavailable)
                 .delete(accounts_unavailable),
         )
         .route(
-            "/api/v1/accounts/:account_id/balance",
+            "/api/v1/accounts/{account_id}/balance",
             get(accounts_unavailable),
         )
         .route(
-            "/api/v1/accounts/:account_id/addresses",
+            "/api/v1/accounts/{account_id}/addresses",
             get(accounts_unavailable).post(accounts_unavailable),
         )
         .route("/api/v1/transactions-psbt", post(psbt_unavailable))
-        .route("/api/v1/transactions-psbt/:psbt_id", get(psbt_unavailable))
+        .route("/api/v1/transactions-psbt/{psbt_id}", get(psbt_unavailable))
         .route(
-            "/api/v1/transactions-psbt/:psbt_id/contributions",
+            "/api/v1/transactions-psbt/{psbt_id}/contributions",
             post(psbt_unavailable),
         )
         .route(
-            "/api/v1/transactions-psbt/:psbt_id/finalize",
+            "/api/v1/transactions-psbt/{psbt_id}/finalize",
             post(psbt_unavailable),
         )
         .route("/api/v1/scan/scans", get(scan::list).post(scan::register))
         .route(
-            "/api/v1/scan/scans/:scan_id",
+            "/api/v1/scan/scans/{scan_id}",
             get(scan::get_one).delete(scan::deregister),
         )
-        .route("/api/v1/scan/scans/:scan_id/unspent", get(scan::unspent))
+        .route("/api/v1/scan/scans/{scan_id}/unspent", get(scan::unspent))
         .route(
-            "/api/v1/scan/scans/:scan_id/transactions",
+            "/api/v1/scan/scans/{scan_id}/transactions",
             get(scan::transactions),
         )
-        .route("/api/v1/scan/scans/:scan_id/boxes", post(scan::attach_box))
+        .route("/api/v1/scan/scans/{scan_id}/boxes", post(scan::attach_box))
         .route(
-            "/api/v1/scan/scans/:scan_id/boxes/:box_id",
+            "/api/v1/scan/scans/{scan_id}/boxes/{box_id}",
             delete(scan::detach_box),
         )
         .route(
             "/api/v1/accounts/watch",
             get(watch_list).post(watch_register),
         )
-        .route("/api/v1/accounts/watch/:scan_id", delete(watch_delete))
+        .route("/api/v1/accounts/watch/{scan_id}", delete(watch_delete))
         .route(
-            "/api/v1/accounts/watch/:scan_id/unspent",
+            "/api/v1/accounts/watch/{scan_id}/unspent",
             get(scan::watch_unspent),
         )
         .route(

@@ -26,11 +26,11 @@ const TREE: &str = "0008cd030e0048c32f4c804c809edfdff3f3fb70154e5066d0c4e04a767b
 fn app() -> Router {
     Router::new()
         .route(
-            "/script/addressToTree/:address",
+            "/script/addressToTree/{address}",
             get(ergo_api::utils::script_address_to_tree_handler),
         )
         .route(
-            "/script/addressToBytes/:address",
+            "/script/addressToBytes/{address}",
             get(ergo_api::utils::script_address_to_bytes_handler),
         )
         .with_state(NetworkPrefix::Mainnet)

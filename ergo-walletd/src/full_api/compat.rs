@@ -57,7 +57,7 @@ pub(super) fn router(admin: Arc<WalletApi>) -> axum::Router {
         .route("/wallet/transactions", get(reads::transactions))
         .route("/wallet/transactionById", get(reads::transaction_by_id))
         .route(
-            "/wallet/transactionsByScanId/:scan_id",
+            "/wallet/transactionsByScanId/{scan_id}",
             get(reads::transactions_by_scan_id),
         )
         .route("/wallet/extractHints", post(multi_sig::extract_hints))
@@ -97,8 +97,8 @@ pub(super) fn router(admin: Arc<WalletApi>) -> axum::Router {
         .route("/scan/register", post(scan::register))
         .route("/scan/deregister", post(scan::deregister))
         .route("/scan/listAll", get(scan::list_all))
-        .route("/scan/unspentBoxes/:scan_id", get(scan::unspent_boxes))
-        .route("/scan/spentBoxes/:scan_id", get(scan::spent_boxes))
+        .route("/scan/unspentBoxes/{scan_id}", get(scan::unspent_boxes))
+        .route("/scan/spentBoxes/{scan_id}", get(scan::spent_boxes))
         .route("/scan/stopTracking", post(scan::stop_tracking))
         .route("/scan/addBox", post(scan::add_box))
         .route(

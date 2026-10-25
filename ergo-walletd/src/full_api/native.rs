@@ -91,7 +91,6 @@ pub(crate) struct StrictJson<T>(pub T);
 /// and error envelopes, with bounded bodies and redacted rejection details.
 pub(crate) struct CollectionJson<T>(pub T);
 
-#[async_trait::async_trait]
 impl<T, S> axum::extract::FromRequest<S> for CollectionJson<T>
 where
     T: serde::de::DeserializeOwned,
@@ -120,7 +119,6 @@ where
 /// Collection query parsing keeps V1 `invalid_params` without echoing values.
 pub(crate) struct CollectionQuery<T>(pub T);
 
-#[async_trait::async_trait]
 impl<T, S> axum::extract::FromRequestParts<S> for CollectionQuery<T>
 where
     T: serde::de::DeserializeOwned,
@@ -145,7 +143,6 @@ where
     }
 }
 
-#[async_trait::async_trait]
 impl<T, S> axum::extract::FromRequest<S> for StrictJson<T>
 where
     T: serde::de::DeserializeOwned,
@@ -591,7 +588,7 @@ pub(super) fn router(admin: Arc<WalletApi>) -> axum::Router {
         )
         .route("/api/v1/wallet/boxes", get(boxes))
         .route("/api/v1/wallet/boxes/select", post(select_boxes))
-        .route("/api/v1/wallet/boxes/:box_id", get(box_by_id))
+        .route("/api/v1/wallet/boxes/{box_id}", get(box_by_id))
         .route("/api/v1/wallet/transactions", get(transactions))
         .route("/api/v1/wallet/transactions/build", post(build_transaction))
         .route("/api/v1/wallet/transactions/sign", post(sign_transaction))
@@ -602,10 +599,10 @@ pub(super) fn router(admin: Arc<WalletApi>) -> axum::Router {
             get(jobs::list).post(jobs::create),
         )
         .route(
-            "/api/v1/wallet/mining-jobs/:job_id/cancel",
+            "/api/v1/wallet/mining-jobs/{job_id}/cancel",
             post(jobs::cancel),
         )
-        .route("/api/v1/wallet/transactions/:tx_id", get(transaction_by_id))
+        .route("/api/v1/wallet/transactions/{tx_id}", get(transaction_by_id))
         // --- lifecycle (POST) ---
         .route(
             "/api/v1/wallet/init",

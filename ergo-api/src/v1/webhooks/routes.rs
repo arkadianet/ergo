@@ -494,10 +494,10 @@ pub fn webhooks_router(state: WebhooksState, auth: Arc<V1AuthConfig>) -> Router 
     Router::new()
         .route("/api/v1/webhooks", get(list).post(register))
         .route(
-            "/api/v1/webhooks/:webhook_id",
+            "/api/v1/webhooks/{webhook_id}",
             get(detail).patch(patch_active).delete(delete),
         )
-        .route("/api/v1/webhooks/:webhook_id/deliveries", get(deliveries))
+        .route("/api/v1/webhooks/{webhook_id}/deliveries", get(deliveries))
         .route_layer(axum::middleware::from_fn_with_state(
             auth.state(Tier::Operator),
             require_tier,

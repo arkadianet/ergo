@@ -460,17 +460,17 @@ fn scala_utxo_subtree(utxo_reads_supported: bool) -> Router<Arc<dyn NodeChainQue
     if utxo_reads_supported {
         Router::new()
             .route("/utxo/genesis", get(scala_utxo_genesis_handler))
-            .route("/utxo/byId/:box_id", get(scala_utxo_box_by_id_handler))
+            .route("/utxo/byId/{box_id}", get(scala_utxo_box_by_id_handler))
             .route(
-                "/utxo/byIdBinary/:box_id",
+                "/utxo/byIdBinary/{box_id}",
                 get(scala_utxo_box_bytes_by_id_handler),
             )
             .route(
-                "/utxo/withPool/byId/:box_id",
+                "/utxo/withPool/byId/{box_id}",
                 get(scala_utxo_with_pool_box_by_id_handler),
             )
             .route(
-                "/utxo/withPool/byIdBinary/:box_id",
+                "/utxo/withPool/byIdBinary/{box_id}",
                 get(scala_utxo_with_pool_box_bytes_by_id_handler),
             )
             .route(
@@ -491,19 +491,19 @@ fn scala_utxo_subtree(utxo_reads_supported: bool) -> Router<Arc<dyn NodeChainQue
         Router::new()
             .route("/utxo/genesis", get(utxo_lookup_unsupported_in_digest_mode))
             .route(
-                "/utxo/byId/:box_id",
+                "/utxo/byId/{box_id}",
                 get(utxo_lookup_unsupported_in_digest_mode),
             )
             .route(
-                "/utxo/byIdBinary/:box_id",
+                "/utxo/byIdBinary/{box_id}",
                 get(utxo_lookup_unsupported_in_digest_mode),
             )
             .route(
-                "/utxo/withPool/byId/:box_id",
+                "/utxo/withPool/byId/{box_id}",
                 get(utxo_lookup_unsupported_in_digest_mode),
             )
             .route(
-                "/utxo/withPool/byIdBinary/:box_id",
+                "/utxo/withPool/byIdBinary/{box_id}",
                 get(utxo_lookup_unsupported_in_digest_mode),
             )
             .route(

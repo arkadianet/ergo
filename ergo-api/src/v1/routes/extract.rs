@@ -22,7 +22,6 @@ use crate::v1::error::{v1_error, Reason};
 /// `400 invalid_params` instead of Axum's default plain-text rejection.
 pub(crate) struct V1Query<T>(pub T);
 
-#[async_trait::async_trait]
 impl<T, S> FromRequestParts<S> for V1Query<T>
 where
     T: DeserializeOwned,
@@ -47,7 +46,6 @@ where
 /// default plain-text rejection.
 pub(crate) struct V1Json<T>(pub T);
 
-#[async_trait::async_trait]
 impl<T, S> FromRequest<S> for V1Json<T>
 where
     T: DeserializeOwned,

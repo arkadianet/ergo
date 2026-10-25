@@ -89,13 +89,13 @@ supplemental_route!(
 );
 supplemental_route!(
     ADDRESS_BOXES_ALIAS,
-    "/api/v1/addresses/:address/boxes",
+    "/api/v1/addresses/{address}/boxes",
     "/api/v1/addresses/{address}/boxes",
     ["get"]
 );
 supplemental_route!(
     ADDRESS_UNSPENT_ALIAS,
-    "/api/v1/addresses/:address/unspent",
+    "/api/v1/addresses/{address}/unspent",
     "/api/v1/addresses/{address}/unspent",
     ["get"]
 );

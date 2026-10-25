@@ -631,9 +631,9 @@ pub fn wallet_chain_router(
         .route("/api/v1/chain/tip", get(tip))
         .route("/api/v1/chain/snapshot", get(snapshot))
         .route("/api/v1/chain/spending-context", get(spending_context))
-        .route("/api/v1/chain/boxes/:id", get(box_lookup))
+        .route("/api/v1/chain/boxes/{id}", get(box_lookup))
         .route("/api/v1/chain/blocks-since", get(blocks_since))
-        .route("/api/v1/chain/wallet-blocks/:height", get(block_at))
+        .route("/api/v1/chain/wallet-blocks/{height}", get(block_at))
         .route_layer(axum::middleware::from_fn_with_state(
             governor.state(RouteClass::HeavyRead),
             governor_mw,

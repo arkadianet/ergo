@@ -28,9 +28,9 @@ pub(super) fn router(admin: Arc<WalletApi>) -> Router {
             "/api/v1/mining/private-transactions",
             get(list).post(import),
         )
-        .route("/api/v1/mining/private-transactions/:tx_id", get(status))
+        .route("/api/v1/mining/private-transactions/{tx_id}", get(status))
         .route(
-            "/api/v1/mining/private-transactions/:tx_id/cancel",
+            "/api/v1/mining/private-transactions/{tx_id}/cancel",
             post(cancel),
         )
         .with_state(admin)

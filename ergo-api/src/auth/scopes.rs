@@ -434,7 +434,7 @@ mod tests {
             ),
             (
                 "POST",
-                "/api/v1/wallet/mining-jobs/:job_id/cancel",
+                "/api/v1/wallet/mining-jobs/{job_id}/cancel",
                 Some(CredentialScope::Wallet),
             ),
             ("POST", "/api/v1/wallet/mining-jobs//cancel", None),

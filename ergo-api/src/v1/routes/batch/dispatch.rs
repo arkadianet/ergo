@@ -41,7 +41,7 @@ const UNKNOWN_IP: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
 /// One allow-listed `(method, path template)` pair and the [`RouteClass`] it
 /// bills against — the classification half of the allow-list. `template`
-/// segments prefixed `:` are wildcards (axum's own path-param syntax reused
+/// segments written `{name}` are wildcards (axum's own path-param syntax reused
 /// verbatim so the table reads identically to [`super::v1_router`]'s route
 /// list).
 #[derive(Clone)]
@@ -51,7 +51,12 @@ pub(super) struct AllowedRoute {
     pub(super) class: RouteClass,
 }
 
-/// `template` segments matched against a concrete request `path`: a `:`-led
+/// A `{name}` template segment: axum's path parameter.
+fn is_wildcard(segment: &str) -> bool {
+    segment.starts_with('{') && segment.ends_with('}')
+}
+
+/// `template` segments matched against a concrete request `path`: a `{name}`
 /// template segment matches any non-empty path segment, everything else must
 /// match literally. Pure string logic, no route-table dependency — this is
 /// what lets batch answer `forbidden_target` for an unlisted path WITHOUT
@@ -64,7 +69,7 @@ fn template_matches(template: &str, path: &str) -> bool {
     loop {
         match (t.next(), p.next()) {
             (Some(ts), Some(ps)) => {
-                if ts.starts_with(':') {
+                if is_wildcard(ts) {
                     // A wildcard binds a real segment — never the empty
                     // segment a trailing slash produces.
                     if ps.is_empty() {
@@ -84,7 +89,7 @@ fn template_matches(template: &str, path: &str) -> bool {
 /// templates matching the same path have the same segment count, so the one
 /// with more literals (fewer wildcards) is strictly more specific.
 fn specificity(template: &str) -> usize {
-    template.split('/').filter(|s| !s.starts_with(':')).count()
+    template.split('/').filter(|s| !is_wildcard(s)).count()
 }
 
 /// The [`RouteClass`] of the MOST-SPECIFIC allow-list entry matching
@@ -355,11 +360,11 @@ mod tests {
     #[test]
     fn template_matches_literal_and_wildcard_segments() {
         assert!(template_matches(
-            "/api/v1/boxes/:box_id",
+            "/api/v1/boxes/{box_id}",
             "/api/v1/boxes/abcd"
         ));
         assert!(template_matches(
-            "/api/v1/chain/blocks/:header_id/transactions",
+            "/api/v1/chain/blocks/{header_id}/transactions",
             "/api/v1/chain/blocks/deadbeef/transactions"
         ));
     }
@@ -367,7 +372,7 @@ mod tests {
     #[test]
     fn classify_finds_the_matching_entry() {
         let table = vec![
-            route(Method::GET, "/api/v1/boxes/:box_id", RouteClass::CheapRead),
+            route(Method::GET, "/api/v1/boxes/{box_id}", RouteClass::CheapRead),
             route(
                 Method::POST,
                 "/api/v1/boxes/by-ergo-tree",
@@ -391,7 +396,7 @@ mod tests {
         // literal-beats-wildcard dispatch, so `/boxes/range` is charged as
         // itself, never as `/boxes/:box_id`.
         let table = vec![
-            route(Method::GET, "/api/v1/boxes/:box_id", RouteClass::CheapRead),
+            route(Method::GET, "/api/v1/boxes/{box_id}", RouteClass::CheapRead),
             route(Method::GET, "/api/v1/boxes/range", RouteClass::HeavyRead),
         ];
         assert_eq!(
@@ -409,14 +414,14 @@ mod tests {
     #[test]
     fn template_matches_rejects_empty_wildcard_segment() {
         // A trailing slash must not satisfy a wildcard.
-        assert!(!template_matches("/api/v1/boxes/:box_id", "/api/v1/boxes/"));
+        assert!(!template_matches("/api/v1/boxes/{box_id}", "/api/v1/boxes/"));
     }
 
     #[test]
     fn template_matches_rejects_wrong_segment_count() {
-        assert!(!template_matches("/api/v1/boxes/:box_id", "/api/v1/boxes"));
+        assert!(!template_matches("/api/v1/boxes/{box_id}", "/api/v1/boxes"));
         assert!(!template_matches(
-            "/api/v1/boxes/:box_id",
+            "/api/v1/boxes/{box_id}",
             "/api/v1/boxes/abcd/extra"
         ));
     }
@@ -424,7 +429,7 @@ mod tests {
     #[test]
     fn template_matches_rejects_literal_mismatch() {
         assert!(!template_matches(
-            "/api/v1/boxes/by-address/:address",
+            "/api/v1/boxes/by-address/{address}",
             "/api/v1/boxes/by-token/9f"
         ));
     }
@@ -433,7 +438,7 @@ mod tests {
     fn classify_returns_none_for_wrong_method() {
         let table = vec![route(
             Method::GET,
-            "/api/v1/boxes/:box_id",
+            "/api/v1/boxes/{box_id}",
             RouteClass::CheapRead,
         )];
         assert_eq!(classify(&table, &Method::POST, "/api/v1/boxes/6a2d"), None);
@@ -443,7 +448,7 @@ mod tests {
     fn classify_returns_none_for_unlisted_path() {
         let table = vec![route(
             Method::GET,
-            "/api/v1/boxes/:box_id",
+            "/api/v1/boxes/{box_id}",
             RouteClass::CheapRead,
         )];
         assert_eq!(
