@@ -226,7 +226,15 @@ pub(crate) fn validate_scripts_at_index(
                 // `checkExpiredBox` returned false. Scala's `verify` yields
                 // `Success((false, StorageContractCost))`, and `verifyInput`
                 // fails `txScriptValidation` on it before the cost is added
-                // or limit-checked, so nothing is charged here.
+                // or limit-checked, so nothing is charged here. The trace
+                // still reports the input's own cost, as Scala's per-input
+                // result does (`#0 => Success((false,50))`, #668).
+                #[cfg(feature = "cost-trace")]
+                ergo_sigma::cost_trace::record(
+                    format!("RentRefused:{i}"),
+                    STORAGE_CONTRACT_COST * 10,
+                    cx.cost.total().value(),
+                );
                 return Err(ValidationError::ProofFailed { index: i });
             }
             // `ScriptFallback`: Scala's `Try` threw, and

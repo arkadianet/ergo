@@ -22,7 +22,8 @@ fn fixtures() -> Vec<Value> {
 /// Runs the named `rent-cases.json` case and compares it with the JVM.
 /// A failed `checkExpiredBox` makes the JVM `verify` return
 /// `Success((false,50))`, but `verifyInput` rejects the input before it
-/// adds the 50, so only the verdict is compared for those cases.
+/// adds the 50. For those cases nothing may be charged, and the cost trace
+/// must report the input's 50, which the JVM's total includes (#668).
 fn assert_rent_case_matches_jvm(name: &str) {
     let cases: Vec<Value> = serde_json::from_str(include_str!(
         "../../../test-vectors/ergo-sigma/verify/rent-cases.json"
@@ -33,9 +34,24 @@ fn assert_rent_case_matches_jvm(name: &str) {
         .find(|case| case["name"] == name)
         .unwrap_or_else(|| panic!("missing rent case {name}"));
     let expected = &case["expected"];
+    ergo_sigma::cost_trace::enable();
     let (verdict, total) = verify_case(case);
+    let refused = ergo_sigma::cost_trace::take()
+        .expect("cost trace")
+        .sum_by_prefix("RentRefused:")
+        / 10;
     assert_eq!(verdict, expected["verdict"], "{name}");
-    if !(verdict == "RejectScript" && expected["rent_block_cost"] == 50) {
+    if verdict == "RejectScript" && expected["rent_block_cost"] == 50 {
+        let init = case["request"]["init_cost_block"].as_u64().unwrap();
+        assert_eq!(total, init, "{name}: a refused rent input charges nothing");
+        assert_eq!(refused, 50, "{name}");
+        assert_eq!(
+            total + refused,
+            expected["total_block_cost"].as_u64().unwrap(),
+            "{name}"
+        );
+    } else {
+        assert_eq!(refused, 0, "{name}");
         assert_eq!(
             total,
             expected["total_block_cost"].as_u64().unwrap(),

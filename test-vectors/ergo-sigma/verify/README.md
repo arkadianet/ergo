@@ -45,10 +45,12 @@ validation with rent enabled or disabled. No expected cost comes from Rust.
 `Short` index of 1 or -1 with one output, and a false `checkExpiredBox`
 (below the fee floor, at init 17 / limit 49, and at factor 0). Each runs on the
 P2PK `rent_expired` box and on a 1 ERG `sigmaProp(true)` box. Where
-`checkExpiredBox` is false the JVM reports `rent_block_cost` 50, but
-`ErgoTransaction.verifyInput` rejects before adding it, so
-`ergo-validation/tests/it/cost_storage_rent.rs` compares only the verdict
-there. The difftest `verify` tests do not read this file. All three files were
+`checkExpiredBox` is false the JVM reports `rent_block_cost` 50 and a total
+of init + 50, but `ErgoTransaction.verifyInput` rejects before adding it to
+the block cost. Rust charges nothing there either and reports the 50 through
+the `RentRefused:` cost-trace entry (#668).
+`ergo-validation/tests/it/cost_storage_rent.rs` checks both. The difftest
+`verify` tests compare all ten cases with the JVM records. All three files were
 re-captured against ergo-core and ergo-wallet 6.0.6 published locally from ergo
 `23aabead` (tag v6.0.6) with
 `sbt "avldb/publishLocal" "ergoWallet/publishLocal" "ergoCore/publishLocal"`.
