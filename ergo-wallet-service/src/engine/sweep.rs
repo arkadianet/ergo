@@ -1144,7 +1144,10 @@ mod tests {
         for id in &outcome.box_ids {
             let bytes = hex::decode(id).unwrap();
             let arr: [u8; 32] = bytes.try_into().unwrap();
-            assert!(boxes_check.contains_key(&arr), "selected box must be chain-present");
+            assert!(
+                boxes_check.contains_key(&arr),
+                "selected box must be chain-present"
+            );
         }
         assert_eq!(outcome.remaining, 2);
     }
