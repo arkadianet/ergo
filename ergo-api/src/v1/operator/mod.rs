@@ -282,12 +282,12 @@ pub fn operator_router(
         .route("/api/v1/network/connect", post(network::connect))
         .route("/api/v1/network/disconnect", post(network::disconnect))
         .route(
-            "/api/v1/network/peers/:addr",
+            "/api/v1/network/peers/{addr}",
             axum::routing::delete(network::remove),
         )
         .route("/api/v1/network/blacklist", post(network::blacklist_add))
         .route(
-            "/api/v1/network/blacklist/:addr",
+            "/api/v1/network/blacklist/{addr}",
             axum::routing::delete(network::blacklist_remove),
         )
         // mining controls
@@ -313,7 +313,7 @@ pub fn operator_router(
             get(private_mining::list).post(private_mining::submit),
         )
         .route(
-            "/api/v1/mining/private-transactions/:tx_id/cancel",
+            "/api/v1/mining/private-transactions/{tx_id}/cancel",
             post(private_mining::cancel),
         )
         // voting operator writes/reads
@@ -339,7 +339,7 @@ pub fn operator_router(
     let t2: Router<OperatorState> = Router::new()
         .route("/api/v1/node/credentials", get(node::credentials))
         .route(
-            "/api/v1/node/credentials/:id",
+            "/api/v1/node/credentials/{id}",
             axum::routing::delete(node::revoke_credential),
         )
         // config mutation is the more dangerous half of node/config → T2

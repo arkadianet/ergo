@@ -54,7 +54,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/boxes/:box_id",
+        "/api/v1/boxes/{box_id}",
         CheapRead,
         boxes::box_by_id
     );
@@ -62,7 +62,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/tokens/:token_id",
+        "/api/v1/tokens/{token_id}",
         CheapRead,
         tokens::token_by_id
     );
@@ -78,7 +78,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/mempool/transactions/:tx_id",
+        "/api/v1/mempool/transactions/{tx_id}",
         CheapRead,
         mempool::transaction_by_id
     );
@@ -102,7 +102,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/protocols/:protocol_id",
+        "/api/v1/protocols/{protocol_id}",
         CheapRead,
         decode::protocol_by_id
     );
@@ -184,7 +184,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/chain/blocks/at-height/:height",
+        "/api/v1/chain/blocks/at-height/{height}",
         HeavyRead,
         chain::blocks_at_height
     );
@@ -192,7 +192,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/chain/blocks/:header_id",
+        "/api/v1/chain/blocks/{header_id}",
         HeavyRead,
         chain::block_by_id
     );
@@ -200,7 +200,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/chain/blocks/:header_id/transactions",
+        "/api/v1/chain/blocks/{header_id}/transactions",
         HeavyRead,
         chain::block_transactions
     );
@@ -216,7 +216,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/chain/headers/at-height/:height",
+        "/api/v1/chain/headers/at-height/{height}",
         HeavyRead,
         chain::headers_at_height
     );
@@ -224,7 +224,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/chain/headers/:header_id",
+        "/api/v1/chain/headers/{header_id}",
         HeavyRead,
         chain::header_by_id
     );
@@ -232,7 +232,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/chain/modifiers/:modifier_id",
+        "/api/v1/chain/modifiers/{modifier_id}",
         HeavyRead,
         chain::modifier_by_id
     );
@@ -240,7 +240,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/chain/proofs/:header_id",
+        "/api/v1/chain/proofs/{header_id}",
         HeavyRead,
         chain::block_ad_proofs
     );
@@ -248,7 +248,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/chain/proofs/:header_id/transactions/:tx_id",
+        "/api/v1/chain/proofs/{header_id}/transactions/{tx_id}",
         HeavyRead,
         chain::proof_for_tx
     );
@@ -258,7 +258,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/transactions/:tx_id",
+        "/api/v1/transactions/{tx_id}",
         HeavyRead,
         transactions::tx_by_id
     );
@@ -274,7 +274,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/transactions/:tx_id/status",
+        "/api/v1/transactions/{tx_id}/status",
         HeavyRead,
         tx_intel::status
     );
@@ -292,7 +292,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/mempool/by-address/:address",
+        "/api/v1/mempool/by-address/{address}",
         HeavyRead,
         mempool::by_address
     );
@@ -300,7 +300,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/mempool/by-ergo-tree/:ergo_tree",
+        "/api/v1/mempool/by-ergo-tree/{ergo_tree}",
         HeavyRead,
         mempool::by_ergo_tree
     );
@@ -308,7 +308,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/mempool/by-box-id/:box_id",
+        "/api/v1/mempool/by-box-id/{box_id}",
         HeavyRead,
         mempool::by_box_id
     );
@@ -316,7 +316,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/mempool/by-token-id/:token_id",
+        "/api/v1/mempool/by-token-id/{token_id}",
         HeavyRead,
         mempool::by_token_id
     );
@@ -342,7 +342,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/protocols/:protocol_id/state",
+        "/api/v1/protocols/{protocol_id}/state",
         HeavyRead,
         decode::protocol_state
     );
@@ -350,7 +350,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/boxes/by-address/:address",
+        "/api/v1/boxes/by-address/{address}",
         HeavyRead,
         boxes::boxes_by_address
     );
@@ -358,7 +358,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/boxes/unspent/by-address/:address",
+        "/api/v1/boxes/unspent/by-address/{address}",
         HeavyRead,
         boxes::boxes_unspent_by_address
     );
@@ -382,7 +382,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/boxes/by-template/:template_hash",
+        "/api/v1/boxes/by-template/{template_hash}",
         HeavyRead,
         boxes::boxes_by_template
     );
@@ -390,7 +390,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/boxes/unspent/by-template/:template_hash",
+        "/api/v1/boxes/unspent/by-template/{template_hash}",
         HeavyRead,
         boxes::boxes_unspent_by_template
     );
@@ -398,7 +398,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/boxes/by-token/:token_id",
+        "/api/v1/boxes/by-token/{token_id}",
         HeavyRead,
         boxes::boxes_by_token
     );
@@ -406,7 +406,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/boxes/unspent/by-token/:token_id",
+        "/api/v1/boxes/unspent/by-token/{token_id}",
         HeavyRead,
         boxes::boxes_unspent_by_token
     );
@@ -424,7 +424,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/tokens/:token_id/holders",
+        "/api/v1/tokens/{token_id}/holders",
         HeavyRead,
         tokens::token_holders
     );
@@ -432,7 +432,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/tokens/:token_id/stats",
+        "/api/v1/tokens/{token_id}/stats",
         HeavyRead,
         tokens::token_stats
     );
@@ -442,7 +442,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/addresses/:address/balance",
+        "/api/v1/addresses/{address}/balance",
         HeavyRead,
         addresses::balance
     );
@@ -450,7 +450,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/addresses/:address/transactions",
+        "/api/v1/addresses/{address}/transactions",
         HeavyRead,
         addresses::transactions
     );
@@ -458,7 +458,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/addresses/:address/boxes",
+        "/api/v1/addresses/{address}/boxes",
         HeavyRead,
         boxes::boxes_by_address
     );
@@ -466,7 +466,7 @@ pub(super) fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
         router,
         table,
         GET,
-        "/api/v1/addresses/:address/unspent",
+        "/api/v1/addresses/{address}/unspent",
         HeavyRead,
         boxes::boxes_unspent_by_address
     );

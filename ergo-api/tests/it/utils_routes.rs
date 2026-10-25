@@ -28,23 +28,23 @@ use tower::ServiceExt;
 fn build_utils_router(network: NetworkPrefix) -> Router {
     Router::<NetworkPrefix>::new()
         .route("/utils/seed", get(utils::seed_default_handler))
-        .route("/utils/seed/:length", get(utils::seed_length_handler))
+        .route("/utils/seed/{length}", get(utils::seed_length_handler))
         .route("/utils/hash/blake2b", post(utils::hash_blake2b_handler))
         .route(
-            "/utils/rawToAddress/:pubkey_hex",
+            "/utils/rawToAddress/{pubkey_hex}",
             get(utils::raw_to_address_handler),
         )
         .route(
-            "/utils/addressToRaw/:address",
+            "/utils/addressToRaw/{address}",
             get(utils::address_to_raw_handler),
         )
         .route(
-            "/utils/address/:address",
+            "/utils/address/{address}",
             get(utils::validate_address_get_handler),
         )
         .route("/utils/address", post(utils::validate_address_post_handler))
         .route(
-            "/utils/ergoTreeToAddress/:tree_hex",
+            "/utils/ergoTreeToAddress/{tree_hex}",
             get(utils::ergo_tree_to_address_get_handler),
         )
         .route(

@@ -60,7 +60,7 @@ pub(super) fn admin_router(
             axum::routing::any(crate::auth::unknown_gated_subpath),
         )
         .route(
-            "/node/*rest",
+            "/node/{*rest}",
             "/node/{rest}",
             &[],
             axum::routing::any(crate::auth::unknown_gated_subpath),
@@ -133,7 +133,7 @@ pub(super) fn auxiliary_router(
     let utilities: Router<NetworkPrefix> = Router::new()
         .route("/utils/seed", get(crate::utils::seed_default_handler))
         .route(
-            "/utils/seed/:length",
+            "/utils/seed/{length}",
             get(crate::utils::seed_length_handler),
         )
         .route(
@@ -141,15 +141,15 @@ pub(super) fn auxiliary_router(
             post(crate::utils::hash_blake2b_handler),
         )
         .route(
-            "/utils/rawToAddress/:pubkey_hex",
+            "/utils/rawToAddress/{pubkey_hex}",
             get(crate::utils::raw_to_address_handler),
         )
         .route(
-            "/utils/addressToRaw/:address",
+            "/utils/addressToRaw/{address}",
             get(crate::utils::address_to_raw_handler),
         )
         .route(
-            "/utils/address/:address",
+            "/utils/address/{address}",
             get(crate::utils::validate_address_get_handler),
         )
         .route(
@@ -157,7 +157,7 @@ pub(super) fn auxiliary_router(
             post(crate::utils::validate_address_post_handler),
         )
         .route(
-            "/utils/ergoTreeToAddress/:tree_hex",
+            "/utils/ergoTreeToAddress/{tree_hex}",
             get(crate::utils::ergo_tree_to_address_get_handler),
         )
         .route(
@@ -165,11 +165,11 @@ pub(super) fn auxiliary_router(
             post(crate::utils::ergo_tree_to_address_post_handler),
         )
         .route(
-            "/script/addressToTree/:address",
+            "/script/addressToTree/{address}",
             get(crate::utils::script_address_to_tree_handler),
         )
         .route(
-            "/script/addressToBytes/:address",
+            "/script/addressToBytes/{address}",
             get(crate::utils::script_address_to_bytes_handler),
         );
     let scripts: Router<(NetworkPrefix, crate::v1::ComputePool)> = Router::new()
@@ -206,13 +206,13 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
     );
     let mut gated: FamilyRouter<BlockchainState> = FamilyRouter::new(ApiFamily::Scala)
         .route(
-            "/blockchain/box/byId/:box_id",
+            "/blockchain/box/byId/{box_id}",
             "/blockchain/box/byId/{boxId}",
             &["get"],
             get(box_by_id_handler),
         )
         .route(
-            "/blockchain/box/byIndex/:n",
+            "/blockchain/box/byIndex/{n}",
             "/blockchain/box/byIndex/{boxIndex}",
             &["get"],
             get(box_by_index_handler),
@@ -224,7 +224,7 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
             post(balance_post_handler),
         )
         .route(
-            "/blockchain/balanceForAddress/:address",
+            "/blockchain/balanceForAddress/{address}",
             "/blockchain/balanceForAddress/{address}",
             &["get"],
             get(balance_for_address_handler),
@@ -236,7 +236,7 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
             post(boxes_by_address_post_handler),
         )
         .route(
-            "/blockchain/box/byAddress/:address",
+            "/blockchain/box/byAddress/{address}",
             "/blockchain/box/byAddress/{address}",
             &["get"],
             get(boxes_by_address_get_handler),
@@ -248,7 +248,7 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
             post(boxes_unspent_by_address_post_handler),
         )
         .route(
-            "/blockchain/box/unspent/byAddress/:address",
+            "/blockchain/box/unspent/byAddress/{address}",
             "/blockchain/box/unspent/byAddress/{address}",
             &["get"],
             get(boxes_unspent_by_address_get_handler),
@@ -266,19 +266,19 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
             post(boxes_unspent_by_ergo_tree_post_handler),
         )
         .route(
-            "/blockchain/box/byTemplateHash/:hash",
+            "/blockchain/box/byTemplateHash/{hash}",
             "/blockchain/box/byTemplateHash/{hash}",
             &["get"],
             get(boxes_by_template_hash_handler),
         )
         .route(
-            "/blockchain/box/unspent/byTemplateHash/:hash",
+            "/blockchain/box/unspent/byTemplateHash/{hash}",
             "/blockchain/box/unspent/byTemplateHash/{hash}",
             &["get"],
             get(boxes_unspent_by_template_hash_handler),
         )
         .route(
-            "/blockchain/token/byId/:token_id",
+            "/blockchain/token/byId/{token_id}",
             "/blockchain/token/byId/{tokenId}",
             &["get"],
             get(token_by_id_handler),
@@ -290,13 +290,13 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
             post(tokens_by_ids_handler),
         )
         .route(
-            "/blockchain/box/byTokenId/:token_id",
+            "/blockchain/box/byTokenId/{token_id}",
             "/blockchain/box/byTokenId/{tokenId}",
             &["get"],
             get(boxes_by_token_id_handler),
         )
         .route(
-            "/blockchain/box/unspent/byTokenId/:token_id",
+            "/blockchain/box/unspent/byTokenId/{token_id}",
             "/blockchain/box/unspent/byTokenId/{tokenId}",
             &["get"],
             get(boxes_unspent_by_token_id_handler),
@@ -304,13 +304,13 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
     if state.chain.is_some() {
         gated = gated
             .route(
-                "/blockchain/transaction/byId/:tx_id",
+                "/blockchain/transaction/byId/{tx_id}",
                 "/blockchain/transaction/byId/{txId}",
                 &["get"],
                 get(tx_by_id_handler),
             )
             .route(
-                "/blockchain/transaction/byIndex/:n",
+                "/blockchain/transaction/byIndex/{n}",
                 "/blockchain/transaction/byIndex/{txIndex}",
                 &["get"],
                 get(tx_by_index_handler),
@@ -322,7 +322,7 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
                 post(txs_by_address_post_handler),
             )
             .route(
-                "/blockchain/transaction/byAddress/:address",
+                "/blockchain/transaction/byAddress/{address}",
                 "/blockchain/transaction/byAddress/{address}",
                 &["get"],
                 get(txs_by_address_get_handler),
@@ -340,7 +340,7 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
                 get(box_range_get_handler).post(box_range_post_handler),
             )
             .route(
-                "/blockchain/block/byHeaderId/:header_id",
+                "/blockchain/block/byHeaderId/{header_id}",
                 "/blockchain/block/byHeaderId/{headerId}",
                 &["get"],
                 get(block_by_header_id_handler),
@@ -366,32 +366,35 @@ pub(super) fn compat_read_router(
     let router = Router::new()
         .route("/info", get(info_handler))
         .route("/blocks", get(header_ids_paged_handler))
-        .route("/blocks/at/:height", get(block_ids_at_height_handler))
+        .route("/blocks/at/{height}", get(block_ids_at_height_handler))
         .route("/blocks/chainSlice", get(chain_slice_handler))
-        .route("/blocks/lastHeaders/:count", get(last_headers_handler))
+        .route("/blocks/lastHeaders/{count}", get(last_headers_handler))
         .route("/blocks/headerIds", post(block_by_ids_handler))
-        .route("/blocks/modifier/:modifier_id", get(modifier_by_id_handler))
-        .route("/blocks/:header_id", get(block_by_id_handler))
-        .route("/blocks/:header_id/header", get(header_by_id_handler))
         .route(
-            "/blocks/:header_id/transactions",
+            "/blocks/modifier/{modifier_id}",
+            get(modifier_by_id_handler),
+        )
+        .route("/blocks/{header_id}", get(block_by_id_handler))
+        .route("/blocks/{header_id}/header", get(header_by_id_handler))
+        .route(
+            "/blocks/{header_id}/transactions",
             get(block_transactions_by_id_handler),
         )
         .route(
-            "/blocks/:header_id/proofFor/:tx_id",
+            "/blocks/{header_id}/proofFor/{tx_id}",
             get(proof_for_tx_handler),
         )
         .route(
-            "/nipopow/popowHeaderById/:header_id",
+            "/nipopow/popowHeaderById/{header_id}",
             get(nipopow_header_by_id_handler),
         )
         .route(
-            "/nipopow/popowHeaderByHeight/:height",
+            "/nipopow/popowHeaderByHeight/{height}",
             get(nipopow_header_by_height_handler),
         )
-        .route("/nipopow/proof/:m/:k", get(nipopow_proof_handler))
+        .route("/nipopow/proof/{m}/{k}", get(nipopow_proof_handler))
         .route(
-            "/nipopow/proof/:m/:k/:header_id",
+            "/nipopow/proof/{m}/{k}/{header_id}",
             get(nipopow_proof_at_handler),
         )
         .merge(super::scala_utxo_subtree(utxo_reads_supported))
@@ -418,7 +421,7 @@ pub(super) fn compat_read_router(
             get(pool_tx_ids_handler),
         )
         .route(
-            "/transactions/unconfirmed/:tx_id",
+            "/transactions/unconfirmed/{tx_id}",
             head(pool_contains_handler)
                 .get(crate::compat::handlers::pool_contains_get_hint_handler),
         )
@@ -427,7 +430,7 @@ pub(super) fn compat_read_router(
             get(crate::compat::handlers::pool_txs_paged_handler),
         )
         .route(
-            "/transactions/unconfirmed/byTransactionId/:tx_id",
+            "/transactions/unconfirmed/byTransactionId/{tx_id}",
             get(crate::compat::handlers::pool_tx_by_id_handler),
         )
         .route(

@@ -157,7 +157,7 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
             get(crate::blockchain::indexer_status_handler),
         )
         .route(
-            "/api/v1/transactions/:tx_id/detail",
+            "/api/v1/transactions/{tx_id}/detail",
             "/api/v1/transactions/{txId}/detail",
             &["get"],
             get(crate::blockchain::tx_detail_handler),
@@ -166,13 +166,13 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
     let conditional: FamilyRouter<BlockchainState> = if state.chain_params.is_some() {
         FamilyRouter::new(ApiFamily::Rust)
             .route(
-                "/blockchain/storageRent/eligibleAt/:height",
+                "/blockchain/storageRent/eligibleAt/{height}",
                 "/blockchain/storageRent/eligibleAt/{height}",
                 &["get"],
                 get(crate::blockchain::storage_rent_eligible_handler),
             )
             .route(
-                "/blockchain/storageRent/maturesAt/:height",
+                "/blockchain/storageRent/maturesAt/{height}",
                 "/blockchain/storageRent/maturesAt/{height}",
                 &["get"],
                 get(crate::blockchain::storage_rent_matures_at_handler),

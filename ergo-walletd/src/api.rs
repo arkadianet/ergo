@@ -61,9 +61,9 @@ pub const READ_ROUTE_INVENTORY: &[&str] = &[
     "/balance",
     "/balances",
     "/boxes",
-    "/boxes/:id",
+    "/boxes/{id}",
     "/transactions",
-    "/transactions/:id",
+    "/transactions/{id}",
     "/scans",
     "/scan/listAll",
     "/addresses",
@@ -71,9 +71,9 @@ pub const READ_ROUTE_INVENTORY: &[&str] = &[
     "/api/v1/wallet/balance",
     "/api/v1/wallet/balances",
     "/api/v1/wallet/boxes",
-    "/api/v1/wallet/boxes/:id",
+    "/api/v1/wallet/boxes/{id}",
     "/api/v1/wallet/transactions",
-    "/api/v1/wallet/transactions/:id",
+    "/api/v1/wallet/transactions/{id}",
     "/api/v1/wallet/addresses",
     "/api/v1/scans",
     "/api/v1/scan/listAll",
@@ -86,9 +86,9 @@ pub fn router(context: ApiContext) -> Router {
         .route("/balance", get(balance))
         .route("/balances", get(balance))
         .route("/boxes", get(boxes))
-        .route("/boxes/:id", get(box_by_id))
+        .route("/boxes/{id}", get(box_by_id))
         .route("/transactions", get(transactions))
-        .route("/transactions/:id", get(transaction_by_id))
+        .route("/transactions/{id}", get(transaction_by_id))
         .route("/scans", get(scans))
         .route("/scan/listAll", get(scans))
         .route("/addresses", get(addresses))
@@ -96,9 +96,9 @@ pub fn router(context: ApiContext) -> Router {
         .route("/api/v1/wallet/balance", get(balance))
         .route("/api/v1/wallet/balances", get(balance))
         .route("/api/v1/wallet/boxes", get(boxes))
-        .route("/api/v1/wallet/boxes/:id", get(box_by_id))
+        .route("/api/v1/wallet/boxes/{id}", get(box_by_id))
         .route("/api/v1/wallet/transactions", get(transactions))
-        .route("/api/v1/wallet/transactions/:id", get(transaction_by_id))
+        .route("/api/v1/wallet/transactions/{id}", get(transaction_by_id))
         .route("/api/v1/wallet/addresses", get(addresses))
         .route("/api/v1/scans", get(scans))
         .route("/api/v1/scan/listAll", get(scans))
@@ -123,9 +123,9 @@ pub(crate) fn short_router(context: ApiContext) -> Router {
         .route("/balance", get(balance))
         .route("/balances", get(balance))
         .route("/boxes", get(boxes))
-        .route("/boxes/:id", get(box_by_id))
+        .route("/boxes/{id}", get(box_by_id))
         .route("/transactions", get(transactions))
-        .route("/transactions/:id", get(transaction_by_id))
+        .route("/transactions/{id}", get(transaction_by_id))
         .route("/scans", get(scans))
         .route("/addresses", get(addresses))
         .route("/api/v1/scans", get(scans))

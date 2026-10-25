@@ -361,12 +361,12 @@ pub(super) fn offset_page_at<T>(
 pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
     // Cheap point reads — a single by-id lookup.
     let cheap: Router<V1State> = Router::new()
-        .route("/api/v1/boxes/:box_id", get(boxes::box_by_id))
-        .route("/api/v1/tokens/:token_id", get(tokens::token_by_id))
+        .route("/api/v1/boxes/{box_id}", get(boxes::box_by_id))
+        .route("/api/v1/tokens/{token_id}", get(tokens::token_by_id))
         // ----- mempool/* light point reads -----
         .route("/api/v1/mempool/summary", get(mempool::summary))
         .route(
-            "/api/v1/mempool/transactions/:tx_id",
+            "/api/v1/mempool/transactions/{tx_id}",
             get(mempool::transaction_by_id),
         )
         .route("/api/v1/mempool/fee-histogram", get(mempool::fee_histogram))
@@ -374,7 +374,7 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
         // ----- protocols/* registry discovery (static, indexer-free) -----
         .route("/api/v1/protocols", get(decode::list_protocols))
         .route(
-            "/api/v1/protocols/:protocol_id",
+            "/api/v1/protocols/{protocol_id}",
             get(decode::protocol_by_id),
         )
         // ----- light/* capability advertisement (trivial) -----
@@ -414,36 +414,39 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
         .route("/api/v1/chain/blocks", get(chain::list_blocks))
         .route("/api/v1/chain/blocks/by-ids", post(chain::blocks_by_ids))
         .route(
-            "/api/v1/chain/blocks/at-height/:height",
+            "/api/v1/chain/blocks/at-height/{height}",
             get(chain::blocks_at_height),
         )
-        .route("/api/v1/chain/blocks/:header_id", get(chain::block_by_id))
+        .route("/api/v1/chain/blocks/{header_id}", get(chain::block_by_id))
         .route(
-            "/api/v1/chain/blocks/:header_id/transactions",
+            "/api/v1/chain/blocks/{header_id}/transactions",
             get(chain::block_transactions),
         )
         // ----- chain/headers -----
         .route("/api/v1/chain/headers", get(chain::list_headers))
         .route(
-            "/api/v1/chain/headers/at-height/:height",
+            "/api/v1/chain/headers/at-height/{height}",
             get(chain::headers_at_height),
         )
-        .route("/api/v1/chain/headers/:header_id", get(chain::header_by_id))
+        .route(
+            "/api/v1/chain/headers/{header_id}",
+            get(chain::header_by_id),
+        )
         // ----- chain/modifiers + proofs -----
         .route(
-            "/api/v1/chain/modifiers/:modifier_id",
+            "/api/v1/chain/modifiers/{modifier_id}",
             get(chain::modifier_by_id),
         )
         .route(
-            "/api/v1/chain/proofs/:header_id",
+            "/api/v1/chain/proofs/{header_id}",
             get(chain::block_ad_proofs),
         )
         .route(
-            "/api/v1/chain/proofs/:header_id/transactions/:tx_id",
+            "/api/v1/chain/proofs/{header_id}/transactions/{tx_id}",
             get(chain::proof_for_tx),
         )
         // ----- transactions reads + submit -----
-        .route("/api/v1/transactions/:tx_id", get(transactions::tx_by_id))
+        .route("/api/v1/transactions/{tx_id}", get(transactions::tx_by_id))
         .route("/api/v1/transactions/submit", post(transactions::submit))
         .route("/api/v1/transactions/check", post(transactions::check))
         // ----- transactions/* intelligence reads -----
@@ -451,20 +454,23 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             "/api/v1/transactions/fee-estimate",
             get(tx_intel::fee_estimate),
         )
-        .route("/api/v1/transactions/:tx_id/status", get(tx_intel::status))
+        .route("/api/v1/transactions/{tx_id}/status", get(tx_intel::status))
         // ----- mempool/* lists + submit/check aliases -----
         .route("/api/v1/mempool/transactions", get(mempool::transactions))
         .route(
-            "/api/v1/mempool/by-address/:address",
+            "/api/v1/mempool/by-address/{address}",
             get(mempool::by_address),
         )
         .route(
-            "/api/v1/mempool/by-ergo-tree/:ergo_tree",
+            "/api/v1/mempool/by-ergo-tree/{ergo_tree}",
             get(mempool::by_ergo_tree),
         )
-        .route("/api/v1/mempool/by-box-id/:box_id", get(mempool::by_box_id))
         .route(
-            "/api/v1/mempool/by-token-id/:token_id",
+            "/api/v1/mempool/by-box-id/{box_id}",
+            get(mempool::by_box_id),
+        )
+        .route(
+            "/api/v1/mempool/by-token-id/{token_id}",
             get(mempool::by_token_id),
         )
         // O1: aliases of the canonical transactions/{submit,check} — SAME
@@ -482,15 +488,15 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
         // Off-chain semantic decode (stateless) + the singleton state one-shot.
         .route("/api/v1/boxes/decode", post(decode::decode_off_chain_box))
         .route(
-            "/api/v1/protocols/:protocol_id/state",
+            "/api/v1/protocols/{protocol_id}/state",
             get(decode::protocol_state),
         )
         .route(
-            "/api/v1/boxes/by-address/:address",
+            "/api/v1/boxes/by-address/{address}",
             get(boxes::boxes_by_address),
         )
         .route(
-            "/api/v1/boxes/unspent/by-address/:address",
+            "/api/v1/boxes/unspent/by-address/{address}",
             get(boxes::boxes_unspent_by_address),
         )
         .route(
@@ -502,35 +508,35 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             post(boxes::boxes_unspent_by_ergo_tree),
         )
         .route(
-            "/api/v1/boxes/by-template/:template_hash",
+            "/api/v1/boxes/by-template/{template_hash}",
             get(boxes::boxes_by_template),
         )
         .route(
-            "/api/v1/boxes/unspent/by-template/:template_hash",
+            "/api/v1/boxes/unspent/by-template/{template_hash}",
             get(boxes::boxes_unspent_by_template),
         )
         .route(
-            "/api/v1/boxes/by-token/:token_id",
+            "/api/v1/boxes/by-token/{token_id}",
             get(boxes::boxes_by_token),
         )
         .route(
-            "/api/v1/boxes/unspent/by-token/:token_id",
+            "/api/v1/boxes/unspent/by-token/{token_id}",
             get(boxes::boxes_unspent_by_token),
         )
         // ----- tokens/* -----
         .route("/api/v1/tokens", get(tokens::tokens_list))
         .route(
-            "/api/v1/tokens/:token_id/holders",
+            "/api/v1/tokens/{token_id}/holders",
             get(tokens::token_holders),
         )
-        .route("/api/v1/tokens/:token_id/stats", get(tokens::token_stats))
+        .route("/api/v1/tokens/{token_id}/stats", get(tokens::token_stats))
         // ----- addresses/* (boxes/unspent are dual mounts of boxes::*) -----
         .route(
-            "/api/v1/addresses/:address/balance",
+            "/api/v1/addresses/{address}/balance",
             get(addresses::balance),
         )
         .route(
-            "/api/v1/addresses/:address/transactions",
+            "/api/v1/addresses/{address}/transactions",
             get(addresses::transactions),
         )
         .route(

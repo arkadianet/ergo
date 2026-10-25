@@ -33,19 +33,19 @@ use crate::v1::auth::{require_tier, Tier, V1AuthConfig, V1AuthState};
 use crate::v1::error::{v1_error, Reason};
 
 /// Every Scala-compatible path the wallet owned.
-const COMPAT_PATHS: &[&str] = &["/wallet", "/wallet/*rest", "/scan", "/scan/*rest"];
+const COMPAT_PATHS: &[&str] = &["/wallet", "/wallet/{*rest}", "/scan", "/scan/{*rest}"];
 
 /// Every native `/api/v1/wallet` path.
-const NATIVE_WALLET_PATHS: &[&str] = &["/api/v1/wallet", "/api/v1/wallet/*rest"];
+const NATIVE_WALLET_PATHS: &[&str] = &["/api/v1/wallet", "/api/v1/wallet/{*rest}"];
 
 /// Every native v1 scan, account and PSBT path.
 const PRODUCT_PATHS: &[&str] = &[
     "/api/v1/scan",
-    "/api/v1/scan/*rest",
+    "/api/v1/scan/{*rest}",
     "/api/v1/accounts",
-    "/api/v1/accounts/*rest",
+    "/api/v1/accounts/{*rest}",
     "/api/v1/transactions-psbt",
-    "/api/v1/transactions-psbt/*rest",
+    "/api/v1/transactions-psbt/{*rest}",
 ];
 
 #[derive(Clone)]

@@ -60,7 +60,7 @@ pub struct EmissionInfoJson {
 /// per-network math, available in every node mode including digest).
 pub fn emission_router(view: Arc<dyn EmissionSchedule>) -> Router {
     Router::new()
-        .route("/emission/at/:height", get(emission_at_handler))
+        .route("/emission/at/{height}", get(emission_at_handler))
         .with_state(view)
 }
 
@@ -103,7 +103,7 @@ pub fn emission_scripts_router(scripts: Arc<EmissionScriptsJson>) -> Router {
     use axum::routing::any;
     Router::new()
         .route("/emission/scripts", any(emission_scripts_handler))
-        .route("/emission/scripts/*rest", any(emission_scripts_handler))
+        .route("/emission/scripts/{*rest}", any(emission_scripts_handler))
         .with_state(scripts)
 }
 

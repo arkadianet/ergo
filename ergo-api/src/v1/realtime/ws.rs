@@ -113,7 +113,7 @@ async fn send_frame(
 ) -> Result<(), axum::Error> {
     let text = serde_json::to_string(frame)
         .unwrap_or_else(|_| r#"{"type":"error","reason":"internal_error","message":""}"#.into());
-    socket.send(Message::Text(text)).await
+    socket.send(Message::Text(text.into())).await
 }
 
 async fn send_all(
