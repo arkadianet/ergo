@@ -309,29 +309,65 @@ pub(crate) async fn retrieve_rewards_impl(
                 // Auto-selection skips those rows instead of failing the whole
                 // sweep; a pinned retry keeps them so the caller sees the typed
                 // error (matching the explicit-input path).
+                //
+                // Stop looking up once MAX_SWEEP_INPUTS verified boxes have been
+                // collected: there is no need to probe all ~thousands of rows
+                // when only the first sweep's worth matters. Rows not yet checked
+                // (and not pool-spent) are counted into `remaining` without a
+                // lookup, so `remaining` is an upper bound on the true leftover.
+                // TODO(#682): reconcile these stale rows in the wallet store
+                // instead of silently skipping them.
                 let mut available = Vec::new();
+                let mut skipped_stale = 0usize;
+                let mut had_pool_spent = false;
+                let mut unchecked_remaining = 0usize;
+                let mut first_skipped: Vec<[u8; 32]> = Vec::new();
                 for b in unreserved {
                     if pool_spent(&b) {
+                        had_pool_spent = true;
+                        continue;
+                    }
+                    if available.len() >= MAX_SWEEP_INPUTS {
+                        // Not yet verified: count as remaining without a lookup.
+                        unchecked_remaining += 1;
                         continue;
                     }
                     match chain.lookup_utxo(&b.box_id) {
                         Ok(Some(_)) => available.push(b),
-                        Ok(None) => {} // stale wallet row: skip
+                        Ok(None) => {
+                            skipped_stale += 1;
+                            if first_skipped.len() < 3 {
+                                first_skipped.push(b.box_id);
+                            }
+                        }
                         Err(e) => return Err(map_chain_error(e)),
                     }
                 }
+                if skipped_stale > 0 {
+                    tracing::warn!(
+                        skipped = skipped_stale,
+                        first = ?first_skipped,
+                        "reward rows missing from the chain UTXO set; skipped \
+                         (wallet store lag)"
+                    );
+                }
                 if available.is_empty() {
+                    if had_pool_spent {
+                        return Err(WalletAdminError::BadRequest(
+                            "all matured reward boxes are already being swept by a pending \
+                             transaction; wait for it to confirm"
+                                .into(),
+                        ));
+                    }
                     return Err(WalletAdminError::BadRequest(
-                        "all matured reward boxes are already being swept by a pending \
-                         transaction; wait for it to confirm"
+                        "the wallet's reward rows are behind the chain; wait for the wallet to \
+                         catch up or rescan"
                             .into(),
                     ));
                 }
-                let total = available.len();
-                let take = total.min(MAX_SWEEP_INPUTS);
-                let mut sel = available;
-                sel.truncate(take);
-                (sel, (total - take) as u32)
+                let sel = available;
+                // `available` already holds at most MAX_SWEEP_INPUTS entries.
+                (sel, unchecked_remaining as u32)
             }
         };
 
@@ -1019,6 +1055,180 @@ mod tests {
         .expect("stale wallet rows are skipped, not fatal");
         assert_eq!(outcome.box_ids, vec![hex::encode(rewards[1].box_id)]);
         assert_eq!(outcome.remaining, 0);
+    }
+
+    #[test]
+    fn sweep_auto_selection_caps_at_max_with_stale_rows() {
+        use crate::state::WalletState;
+        use crate::wallet::tables::WALLET_BOXES;
+        use ergo_ser::address::NetworkPrefix;
+        use ergo_wallet::storage::SecretStorage;
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot: Box<dyn crate::engine::SigningView> = Box::new(SweepSigningView {
+            tip: crate::chain::CommittedTip::new(1, [1; 32]),
+            params: ergo_validation::ProtocolParams::mainnet_default(),
+        });
+        let txs: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../test-vectors/mainnet/transactions_1_10.json"
+        ))
+        .unwrap();
+        let bytes = hex::decode(txs[0]["bytes"].as_str().unwrap()).unwrap();
+        let tx = ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap();
+        let mut boxes = std::collections::BTreeMap::new();
+        let mut rewards = Vec::new();
+        for creator in 0u8..105 {
+            let output = ergo_ser::ergo_box::ErgoBox {
+                candidate: tx.output_candidates[1].clone(),
+                transaction_id: ModifierId::from_bytes([creator; 32]),
+                index: 1,
+            };
+            let mut wallet_box = reward_box(output.candidate.value, vec![]);
+            wallet_box.box_id = *output.box_id().unwrap().as_bytes();
+            wallet_box.creation_height = u32::from(creator) + 1;
+            if creator >= 3 {
+                boxes.insert(wallet_box.box_id, output);
+            }
+            rewards.push(wallet_box);
+        }
+        let boxes_check = boxes.clone();
+        let chain = ReservingSweepChain {
+            snapshot: std::sync::Mutex::new(Some(snapshot)),
+            boxes,
+            reserved: std::collections::BTreeSet::new(),
+        };
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        let mut storage = SecretStorage::open(dir.path().join("secrets"));
+        storage
+            .init(ergo_wallet::mnemonic::MnemonicStrength::Words12, "test", "")
+            .unwrap();
+        let mut state = WalletState::empty(false);
+        crate::engine::WalletBootService::unlock_and_sync(
+            &mut storage,
+            &mut state,
+            &db,
+            NetworkPrefix::Mainnet,
+            "test",
+        )
+        .unwrap();
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(WALLET_BOXES).unwrap();
+            for reward in &rewards {
+                table
+                    .insert(reward.box_id, bincode::serialize(reward).unwrap())
+                    .unwrap();
+            }
+        }
+        write.commit().unwrap();
+
+        let storage = RwLock::new(storage);
+        let state = RwLock::new(state);
+        let pool = crate::engine::NoopMempoolOverlay::new();
+        let outcome = ready_without_executor(retrieve_rewards_impl(
+            None,
+            None,
+            MIN_FEE,
+            100_000,
+            None,
+            true,
+            &storage,
+            &state,
+            &db,
+            &chain,
+            &NoSubmit,
+            &pool,
+            NetworkPrefix::Mainnet,
+        ))
+        .expect("capped sweep succeeds");
+        assert_eq!(outcome.box_ids.len(), MAX_SWEEP_INPUTS);
+        for id in &outcome.box_ids {
+            let bytes = hex::decode(id).unwrap();
+            let arr: [u8; 32] = bytes.try_into().unwrap();
+            assert!(boxes_check.contains_key(&arr), "selected box must be chain-present");
+        }
+        assert_eq!(outcome.remaining, 2);
+    }
+
+    #[test]
+    fn sweep_auto_selection_all_stale_errors() {
+        use crate::state::WalletState;
+        use crate::wallet::tables::WALLET_BOXES;
+        use ergo_ser::address::NetworkPrefix;
+        use ergo_wallet::storage::SecretStorage;
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot: Box<dyn crate::engine::SigningView> = Box::new(SweepSigningView {
+            tip: crate::chain::CommittedTip::new(1, [1; 32]),
+            params: ergo_validation::ProtocolParams::mainnet_default(),
+        });
+        let txs: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../test-vectors/mainnet/transactions_1_10.json"
+        ))
+        .unwrap();
+        let bytes = hex::decode(txs[0]["bytes"].as_str().unwrap()).unwrap();
+        let tx = ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap();
+        let mut rewards = Vec::new();
+        for creator in 0u8..5 {
+            let output = ergo_ser::ergo_box::ErgoBox {
+                candidate: tx.output_candidates[1].clone(),
+                transaction_id: ModifierId::from_bytes([creator; 32]),
+                index: 1,
+            };
+            let mut wallet_box = reward_box(output.candidate.value, vec![]);
+            wallet_box.box_id = *output.box_id().unwrap().as_bytes();
+            wallet_box.creation_height = u32::from(creator) + 1;
+            rewards.push(wallet_box);
+        }
+        let chain = ReservingSweepChain {
+            snapshot: std::sync::Mutex::new(Some(snapshot)),
+            boxes: std::collections::BTreeMap::new(),
+            reserved: std::collections::BTreeSet::new(),
+        };
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        let mut storage = SecretStorage::open(dir.path().join("secrets"));
+        storage
+            .init(ergo_wallet::mnemonic::MnemonicStrength::Words12, "test", "")
+            .unwrap();
+        let mut state = WalletState::empty(false);
+        crate::engine::WalletBootService::unlock_and_sync(
+            &mut storage,
+            &mut state,
+            &db,
+            NetworkPrefix::Mainnet,
+            "test",
+        )
+        .unwrap();
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(WALLET_BOXES).unwrap();
+            for reward in &rewards {
+                table
+                    .insert(reward.box_id, bincode::serialize(reward).unwrap())
+                    .unwrap();
+            }
+        }
+        write.commit().unwrap();
+
+        let storage = RwLock::new(storage);
+        let state = RwLock::new(state);
+        let pool = crate::engine::NoopMempoolOverlay::new();
+        let err = ready_without_executor(retrieve_rewards_impl(
+            None,
+            None,
+            MIN_FEE,
+            100_000,
+            None,
+            true,
+            &storage,
+            &state,
+            &db,
+            &chain,
+            &NoSubmit,
+            &pool,
+            NetworkPrefix::Mainnet,
+        ))
+        .map(|_| panic!("expected error"))
+        .unwrap_err();
+        assert!(matches!(err, WalletAdminError::BadRequest(m) if m.contains("behind the chain")));
     }
 
     // ----- error paths -----
