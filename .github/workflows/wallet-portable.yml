@@ -14,7 +14,7 @@ jobs:
       - uses: ./.github/actions/rust
         with:
           targets: aarch64-linux-android,x86_64-linux-android
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: Portable dependency boundary
         run: python3 scripts/check-wallet-portable.py
       - name: Core library feature tests
@@ -47,7 +47,7 @@ jobs:
       - uses: VirtusLab/scala-cli-setup@3f5bf11a33bb88343238780c18257c8fa43789e1
         with:
           scala-cli-version: ${{ steps.rust.outputs.scala_cli }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: |
             . -> target
