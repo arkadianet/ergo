@@ -114,6 +114,10 @@ pub fn next_emission_id(
     Ok(next_from_summaries(tracked, &summaries, 0))
 }
 
+/// Scala picks up an emission box again, when it tracks none, only from an
+/// output worth more than this (100,000 ERG).
+const REACQUIRE_MIN_VALUE: u64 = 100_000 * 1_000_000_000;
+
 fn next_from_summaries(
     tracked: Option<Digest32>,
     transactions: &[EmissionTransaction],
@@ -131,7 +135,7 @@ fn next_from_summaries(
             .find(|tx| tx.matches[index])
             .filter(|tx| {
                 tx.output
-                    .is_some_and(|(_, value)| value > 100_000 * 1_000_000_000)
+                    .is_some_and(|(_, value)| value > REACQUIRE_MIN_VALUE)
             })
     };
     selected.and_then(|tx| tx.output.map(|(id, _)| id))
@@ -180,42 +184,86 @@ pub(crate) fn decode_identity(bytes: &[u8]) -> Result<Option<Digest32>, StateErr
     Ok(Identity::decode(bytes)?.id)
 }
 
+/// Seed the pre-genesis identity under the store's configured `network`.
+///
+/// The network cannot be read from the boxes: mainnet, testnet and devnet
+/// share the genesis emission box, so its id names no network (#666).
 pub(crate) fn seed_genesis(
     txn: &WriteTransaction,
     boxes: &[([u8; 32], Vec<u8>)],
+    network: Network,
 ) -> Result<(), StateError> {
-    for network in [Network::Mainnet, Network::Testnet, Network::Devnet] {
-        let id = genesis_id(network);
-        if boxes.iter().any(|(box_id, _)| box_id == id.as_bytes()) {
-            txn.open_table(EMISSION_IDENTITIES)?.insert(
-                [0u8; 32].as_slice(),
-                Identity {
-                    network,
-                    id: Some(id),
-                }
-                .encode()
-                .as_slice(),
-            )?;
+    let id = genesis_id(network);
+    if boxes.iter().any(|(box_id, _)| box_id == id.as_bytes()) {
+        txn.open_table(EMISSION_IDENTITIES)?.insert(
+            [0u8; 32].as_slice(),
+            Identity {
+                network,
+                id: Some(id),
+            }
+            .encode()
+            .as_slice(),
+        )?;
+    }
+    Ok(())
+}
+
+/// Clear every identity row when any was recorded under a network other
+/// than `network`. Returns whether rows were cleared.
+///
+/// Before #666 a testnet or devnet store recorded `Mainnet`, because the
+/// shared genesis emission box id was matched against mainnet first. Every
+/// row inherits its network from its parent, so one mislabelled row means
+/// the whole table was tracked under mainnet's rules (re-emission included)
+/// and none of its ids can be trusted. The caller re-derives the tip.
+pub(crate) fn clear_if_other_network(
+    txn: &WriteTransaction,
+    network: Network,
+) -> Result<bool, StateError> {
+    let mut table = txn.open_table(EMISSION_IDENTITIES)?;
+    let mut mislabelled = false;
+    for row in table.iter()? {
+        let (_, value) = row?;
+        if Identity::decode(value.value())?.network != network {
+            mislabelled = true;
             break;
         }
     }
-    Ok(())
+    if mislabelled {
+        table.retain(|_, _| false)?;
+    }
+    Ok(mislabelled)
 }
 
 /// Compact validated block data carried into either persistence path. Ordinary
 /// outputs and proofs are not retained; only input ids and emission matches are
 /// needed by Scala's reverse-spend / first-match rules.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct EmissionTransition {
     parent: [u8; 32],
     transactions: Vec<EmissionTransaction>,
+    /// The store's configured network, which labels a newly anchored identity.
+    network: Network,
+}
+
+impl Default for EmissionTransition {
+    fn default() -> Self {
+        Self {
+            parent: [0; 32],
+            transactions: Vec::new(),
+            network: Network::Mainnet,
+        }
+    }
 }
 
 #[derive(Clone)]
 struct EmissionTransaction {
     inputs: Vec<Digest32>,
     matches: [bool; 3],
-    nft_anchor: bool,
+    /// Identifies the emission box without a tracked parent: on mainnet the
+    /// re-emission NFT output after activation; elsewhere an emission-tree
+    /// output worth more than [`REACQUIRE_MIN_VALUE`].
+    anchor: bool,
     output: Option<(Digest32, u64)>,
 }
 
@@ -223,7 +271,7 @@ impl EmissionTransaction {
     fn from_transaction(
         tx: &ergo_ser::transaction::Transaction,
         matches: [bool; 3],
-        nft_anchor: bool,
+        anchor: bool,
     ) -> Result<Self, TrackingError> {
         let output = if matches.iter().any(|matched| *matched) {
             Some((box_id(&output_box(tx)?)?, tx.output_candidates[0].value))
@@ -233,7 +281,7 @@ impl EmissionTransaction {
         Ok(Self {
             inputs: tx.inputs.iter().map(|input| input.box_id).collect(),
             matches,
-            nft_anchor,
+            anchor,
             output,
         })
     }
@@ -241,31 +289,47 @@ impl EmissionTransaction {
 
 const NETWORKS: [Network; 3] = [Network::Mainnet, Network::Testnet, Network::Devnet];
 
+fn network_index(network: Network) -> usize {
+    NETWORKS
+        .iter()
+        .position(|candidate| *candidate == network)
+        .expect("known network")
+}
+
 impl EmissionTransition {
     pub(crate) fn prepare<'a>(
         parent: [u8; 32],
         height: u32,
         txs: impl Iterator<Item = &'a ergo_ser::transaction::Transaction>,
+        network: Network,
     ) -> Result<Self, StateError> {
         let trees = NETWORKS.map(emission_tree);
         let reem = ReemissionParams::mainnet();
+        let index = network_index(network);
         let mut transactions = Vec::new();
         for tx in txs {
-            let matches = std::array::from_fn(|i| {
+            let matches: [bool; 3] = std::array::from_fn(|i| {
                 has_emission_box(tx, height, &trees[i], (i == 0).then_some(&reem))
             });
+            let anchor = match network {
+                Network::Mainnet => height > reem.activation_height && matches[0],
+                Network::Testnet | Network::Devnet => {
+                    matches[index]
+                        && tx
+                            .output_candidates
+                            .first()
+                            .is_some_and(|output| output.value > REACQUIRE_MIN_VALUE)
+                }
+            };
             transactions.push(
-                EmissionTransaction::from_transaction(
-                    tx,
-                    matches,
-                    height > reem.activation_height && matches[0],
-                )
-                .map_err(tracking_error)?,
+                EmissionTransaction::from_transaction(tx, matches, anchor)
+                    .map_err(tracking_error)?,
             );
         }
         Ok(Self {
             parent,
             transactions,
+            network,
         })
     }
 }
@@ -283,22 +347,20 @@ pub(crate) fn persist_transition(
     let mut identity = if let Some(parent) = parent {
         parent
     } else {
-        let genesis = NETWORKS.into_iter().find_map(|network| {
-            let id = genesis_id(network);
-            transition
-                .transactions
-                .iter()
-                .any(|tx| tx.inputs.contains(&id))
-                .then_some(Identity {
-                    network,
-                    id: Some(id),
-                })
-        });
-        if let Some(genesis) = genesis {
-            genesis
-        } else if let Some(tx) = transition.transactions.iter().find(|tx| tx.nft_anchor) {
+        let network = transition.network;
+        let genesis = genesis_id(network);
+        if transition
+            .transactions
+            .iter()
+            .any(|tx| tx.inputs.contains(&genesis))
+        {
+            Identity {
+                network,
+                id: Some(genesis),
+            }
+        } else if let Some(tx) = transition.transactions.iter().find(|tx| tx.anchor) {
             let identity = Identity {
-                network: Network::Mainnet,
+                network,
                 id: tx.output.map(|(id, _)| id),
             };
             table.insert(tip.as_slice(), identity.encode().as_slice())?;
@@ -307,10 +369,7 @@ pub(crate) fn persist_transition(
             return Ok(());
         }
     };
-    let index = NETWORKS
-        .iter()
-        .position(|network| *network == identity.network)
-        .expect("known network");
+    let index = network_index(identity.network);
     identity.id = next_from_summaries(identity.id, &transition.transactions, index);
     table.insert(tip.as_slice(), identity.encode().as_slice())?;
     Ok(())
@@ -318,10 +377,21 @@ pub(crate) fn persist_transition(
 
 /// Startup and rollback recovery retain a bounded historical suffix. Normal apply
 /// carries a compact transition directly from the transactions being applied.
+///
+/// The walk stops at the first block (newest first) whose parent has a row,
+/// or that anchors the identity:
+/// - it spends the genesis emission box;
+/// - on mainnet, after re-emission activation, it carries the re-emission
+///   NFT output;
+/// - on testnet and devnet, its first emission-tree output is worth more
+///   than [`REACQUIRE_MIN_VALUE`]. That is the rule Scala applies when it
+///   tracks no box, and it lets a store whose rows were cleared by
+///   [`clear_if_other_network`] re-derive its tip from the latest block.
 pub(super) fn recover_identity(
     txn: &WriteTransaction,
     tip: &[u8; 32],
     limit: usize,
+    network: Network,
 ) -> Result<(), StateError> {
     let mut table = txn.open_table(EMISSION_IDENTITIES)?;
     if table.get(tip.as_slice())?.is_some() {
@@ -378,39 +448,48 @@ pub(super) fn recover_identity(
             pending.push((current, header.height, block.transactions));
             break;
         }
-        let anchor = [Network::Mainnet, Network::Testnet, Network::Devnet]
-            .into_iter()
-            .find(|network| {
-                let genesis = genesis_id(*network);
-                block
-                    .transactions
-                    .iter()
-                    .any(|tx| tx.inputs.iter().any(|i| i.box_id == genesis))
-            });
-        if let Some(network) = anchor {
+        let genesis = genesis_id(network);
+        if block
+            .transactions
+            .iter()
+            .any(|tx| tx.inputs.iter().any(|i| i.box_id == genesis))
+        {
             identity = Identity {
                 network,
-                id: Some(genesis_id(network)),
+                id: Some(genesis),
             };
             pending.push((current, header.height, block.transactions));
             break;
         }
-        let reem = ReemissionParams::mainnet();
-        if header.height > reem.activation_height {
-            if let Some(tx) = block
-                .transactions
-                .iter()
-                .find(|tx| has_emission_box(tx, header.height, &[], Some(&reem)))
-            {
-                identity = Identity {
-                    network: Network::Mainnet,
-                    id: Some(
-                        box_id(&output_box(tx).map_err(tracking_error)?).map_err(tracking_error)?,
-                    ),
-                };
-                table.insert(current.as_slice(), identity.encode().as_slice())?;
-                break;
+        let anchor = match network {
+            Network::Mainnet => {
+                let reem = ReemissionParams::mainnet();
+                (header.height > reem.activation_height)
+                    .then(|| {
+                        block
+                            .transactions
+                            .iter()
+                            .find(|tx| has_emission_box(tx, header.height, &[], Some(&reem)))
+                    })
+                    .flatten()
             }
+            Network::Testnet | Network::Devnet => {
+                let tree = emission_tree(network);
+                // Scala filters AFTER find (see `next_from_summaries`).
+                block
+                    .transactions
+                    .iter()
+                    .find(|tx| has_emission_box(tx, header.height, &tree, None))
+                    .filter(|tx| tx.output_candidates[0].value > REACQUIRE_MIN_VALUE)
+            }
+        };
+        if let Some(tx) = anchor {
+            identity = Identity {
+                network,
+                id: Some(box_id(&output_box(tx).map_err(tracking_error)?).map_err(tracking_error)?),
+            };
+            table.insert(current.as_slice(), identity.encode().as_slice())?;
+            break;
         }
         let parent = *header.parent_id.as_bytes();
         pending.push((current, header.height, block.transactions));
@@ -454,7 +533,7 @@ impl StateStore {
     /// row atomically with undo metadata before exposing the new tip.
     pub fn recover_emission_identity(&self, tip: &[u8; 32]) -> Result<(), StateError> {
         let txn = crate::begin_write_qr(&self.db)?;
-        recover_identity(&txn, tip, 4096)?;
+        recover_identity(&txn, tip, 4096, self.network)?;
         txn.commit()?;
         Ok(())
     }
@@ -722,7 +801,7 @@ mod tests {
             table.remove(first.as_slice()).unwrap();
             table.remove(tip.as_slice()).unwrap();
         }
-        recover_identity(&txn, &tip, 1).unwrap();
+        recover_identity(&txn, &tip, 1, store.network).unwrap();
         assert!(txn
             .open_table(EMISSION_IDENTITIES)
             .unwrap()
@@ -812,6 +891,109 @@ mod tests {
                 Some(Some(target_id))
             );
         }
+    }
+
+    // ----- network (#666) -----
+
+    fn identity_row(store: &StateStore, key: &[u8; 32]) -> Option<Identity> {
+        let txn = store.db.begin_read().unwrap();
+        let table = txn.open_table(EMISSION_IDENTITIES).unwrap();
+        table
+            .get(key.as_slice())
+            .unwrap()
+            .map(|row| Identity::decode(row.value()).unwrap())
+    }
+
+    /// The root cause: the three networks share one genesis emission box, so
+    /// its id cannot name the network.
+    #[test]
+    fn networks_share_the_genesis_emission_box() {
+        for network in [Network::Testnet, Network::Devnet] {
+            assert_eq!(genesis_id(network), genesis_id(Network::Mainnet));
+            assert_eq!(emission_tree(network), emission_tree(Network::Mainnet));
+        }
+    }
+
+    #[test]
+    fn seed_genesis_records_the_configured_network() {
+        let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        for network in NETWORKS {
+            let txn = crate::begin_write_qr(&store.db).unwrap();
+            seed_genesis(&txn, &[(*genesis_id(network).as_bytes(), vec![])], network).unwrap();
+            txn.commit().unwrap();
+            let row = identity_row(&store, &[0; 32]).unwrap();
+            assert_eq!(row.network, network);
+            assert_eq!(row.id, Some(genesis_id(network)));
+        }
+    }
+
+    /// A testnet store from before #666: its rows say mainnet, so after
+    /// re-emission activation it applied mainnet's NFT rule, lost the box
+    /// (`Some(None)`), and stayed lost. `set_network(Testnet)` clears the rows
+    /// and re-derives the tip, and tracking then follows testnet's rules.
+    #[test]
+    fn set_network_rebuilds_a_testnet_store_recorded_as_mainnet() {
+        let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let (mut store, seed) = seeded_store(&dir.path().join("state.redb"));
+        let txn = crate::begin_write_qr(&store.db).unwrap();
+        txn.open_table(EMISSION_IDENTITIES)
+            .unwrap()
+            .insert(
+                [0u8; 32].as_slice(),
+                Identity {
+                    network: Network::Mainnet,
+                    id: Some(seed),
+                }
+                .encode()
+                .as_slice(),
+            )
+            .unwrap();
+        txn.commit().unwrap();
+        let height = ReemissionParams::mainnet().activation_height + 1;
+        let tx = transaction(seed, height);
+        let expected = box_id(&output_box(&tx).unwrap()).unwrap();
+        let tip = apply(&mut store, height, vec![tx], 1);
+        assert_eq!(store.emission_identity(&tip).unwrap(), Some(None));
+
+        assert!(store.set_network(Network::Testnet).unwrap());
+        assert_eq!(store.emission_identity(&tip).unwrap(), Some(Some(expected)));
+        assert_eq!(
+            identity_row(&store, &tip).unwrap().network,
+            Network::Testnet
+        );
+        assert!(identity_row(&store, &[0; 32]).is_none());
+
+        let next = transaction(expected, height + 1);
+        let next_id = box_id(&output_box(&next).unwrap()).unwrap();
+        let tip = apply(&mut store, height + 1, vec![next], 2);
+        assert_eq!(store.emission_identity(&tip).unwrap(), Some(Some(next_id)));
+        assert!(!store.set_network(Network::Testnet).unwrap());
+    }
+
+    #[test]
+    fn set_network_keeps_rows_recorded_under_the_same_network() {
+        let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let (mut store, seed) = seeded_store(&dir.path().join("state.redb"));
+        let tx = transaction(seed, 1);
+        let expected = box_id(&output_box(&tx).unwrap()).unwrap();
+        let tip = apply(&mut store, 1, vec![tx], 1);
+        assert!(!store.set_network(Network::Devnet).unwrap());
+        assert_eq!(store.network(), Network::Devnet);
+        assert_eq!(store.emission_identity(&tip).unwrap(), Some(Some(expected)));
+        assert_eq!(identity_row(&store, &[0; 32]).unwrap().id, Some(seed));
+    }
+
+    #[test]
+    fn set_network_refuses_after_the_persist_pipeline_starts() {
+        let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let (mut store, _) = seeded_store(&dir.path().join("state.redb"));
+        store.enable_persist_pipeline(8).unwrap();
+        assert!(matches!(
+            store.set_network(Network::Testnet),
+            Err(StateError::InvalidPrecondition { .. })
+        ));
+        assert_eq!(store.network(), Network::Mainnet);
     }
 
     // ----- error paths -----

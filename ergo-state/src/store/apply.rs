@@ -158,6 +158,7 @@ impl StateStore {
             self.chain_state.best_full_block_id,
             height,
             checked.iter().map(|tx| tx.transaction()),
+            self.network,
         )?;
         let t_build = t_build_start.elapsed();
         // Track build_utxo_changes time so the apply-phase breakdown
@@ -220,6 +221,7 @@ impl StateStore {
             self.chain_state.best_full_block_id,
             height,
             transactions.iter(),
+            self.network,
         )?;
 
         // Genesis (height 1) is not an epoch start; raw-tx test paths do
@@ -260,6 +262,7 @@ impl StateStore {
             self.chain_state.best_full_block_id,
             height,
             transactions.iter(),
+            self.network,
         )?;
         self.apply_utxo_changes(
             height,

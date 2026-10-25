@@ -384,6 +384,9 @@ impl StateStore {
 
         let mut store = Self {
             difficulty_params: ergo_chain_spec::DifficultyParams::mainnet(),
+            // Boot overrides via `set_network`; mainnet is what the old
+            // genesis-box detection always resolved to.
+            network: ergo_chain_spec::Network::Mainnet,
             headers: crate::header_store::HeaderSectionTables::new(db.clone()),
             db,
             db_path: path.to_path_buf(),
