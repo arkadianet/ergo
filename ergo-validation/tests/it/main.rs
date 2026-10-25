@@ -37,6 +37,7 @@ mod reference_607_check_pow;
 mod reference_607_creation_height;
 mod reference_607_sigma_proofs;
 mod reference_607_tx;
+mod reference_607_upcoming_context;
 mod reference_serialization;
 mod rejection_parity;
 mod same_block_data_inputs;

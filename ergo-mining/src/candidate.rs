@@ -477,13 +477,20 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
     };
 
     let (active_params, validation_settings) = view.tip_snapshot_params().map_err(state_err)?;
+    // `CONTEXT.headers` for the candidate's transactions: the newest nine, as
+    // Scala's `upcoming(...)` gives its candidates and as block validation
+    // gives the mined block (`ergo_validation::UPCOMING_LAST_HEADERS`). Ten
+    // would let a script that reads `CONTEXT.headers(9)` pass selection and
+    // then fail the block this node mined.
     let last_headers = if devnet && parent_height < 10 {
         let heights: Vec<u32> = (1..=parent_height).rev().collect();
         load_epoch_headers(view, &heights, &parent_header)?
     } else {
         view.last_applied_chain_window_10()
             .map_err(state_err)?
-            .to_vec()
+            .into_iter()
+            .take(ergo_validation::UPCOMING_LAST_HEADERS)
+            .collect()
     };
 
     // 2b. Epoch-boundary recompute. At a voting-epoch start the candidate's
@@ -724,7 +731,7 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
         pre_header_version: pre_header.version,
         pre_header_parent_id: parent_id,
         pre_header_n_bits: new_n_bits as u64,
-        pre_header_votes: candidate_votes,
+        pre_header_votes: candidate_votes.into(),
     };
 
     let validated_emission = match built_emission {

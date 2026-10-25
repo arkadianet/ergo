@@ -813,7 +813,7 @@ mod tests {
             pre_header_version: header.version,
             pre_header_parent_id: *header.parent_id.as_bytes(),
             pre_header_n_bits: u64::from(header.n_bits),
-            pre_header_votes: header.votes,
+            pre_header_votes: header.votes.into(),
         };
         let last_headers = view.last_applied_chain_window_10().unwrap();
         fixture

@@ -30,7 +30,9 @@ pub struct CandidateValidationContext {
     /// Derived once from the candidate protocol version; stored as byte bits
     /// with signed activation semantics, like `TransactionContext`.
     pub activated_script_version: u8,
-    /// Up to 10 applied headers, tip-first; empty before the first block.
+    /// The newest applied headers, tip-first: up to
+    /// [`UPCOMING_LAST_HEADERS`](crate::UPCOMING_LAST_HEADERS) (9), as
+    /// Scala's `upcoming(...)` gives a candidate. Empty before the first block.
     pub last_headers: Vec<Header>,
     /// AvlTreeData for `CONTEXT.LastBlockUtxoRootHash`, constructed
     /// from `parent_header.state_root` with all-ops-allowed flags and

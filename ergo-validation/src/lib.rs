@@ -50,7 +50,9 @@ pub use active_params::{
     parse_active_params, scala_launch, scala_launch_for_network, scala_launch_mainnet,
     scala_launch_testnet, ActiveParamsError, ActiveProtocolParameters,
 };
-pub use context::{LocalPolicy, ProtocolParams, TransactionContext, UtxoView};
+pub use context::{
+    LocalPolicy, ProtocolParams, TransactionContext, UtxoView, UPCOMING_LAST_HEADERS,
+};
 pub use cost::{CostAccumulator, CostError, JitCost};
 pub use error::ValidationError;
 pub use fee::MAINNET_FEE_PROPOSITION_BYTES;

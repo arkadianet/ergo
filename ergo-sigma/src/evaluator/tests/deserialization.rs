@@ -639,6 +639,37 @@ fn opcode_atleast_no_trivial_stays_threshold() {
 /// `CONTEXT.headers.size` — pins the regression: `eval_size_of` had no
 /// `CollHeader` arm, so a script reading the header count raised a type
 /// error where Scala answers the number of headers (10 on mainnet).
+/// `CONTEXT.preHeader.votes` is the header's three bytes, or an empty
+/// `Coll[Byte]` in Scala's mempool context (`simplifiedUpcoming()` predicts
+/// `votes = Array.emptyByteArray`).
+#[test]
+fn pre_header_votes_are_three_bytes_or_empty() {
+    let votes = op(
+        0xDB,
+        Payload::MethodCall {
+            type_id: 105,
+            method_id: 7,
+            obj: Box::new(op(
+                0xDB,
+                Payload::MethodCall {
+                    type_id: 101,
+                    method_id: 3,
+                    obj: Box::new(op(0xFE, Payload::Zero)),
+                    args: vec![],
+                    type_args: vec![],
+                },
+            )),
+            args: vec![],
+            type_args: vec![],
+        },
+    );
+    let mut ctx = ReductionContext::minimal(500_000, 0);
+    ctx.pre_header_votes = [1, 2, 3].into();
+    assert_eq!(run_eval_ctx(&votes, &ctx), Value::CollBytes(vec![1, 2, 3]));
+    ctx.pre_header_votes = PreHeaderVotes::Empty;
+    assert_eq!(run_eval_ctx(&votes, &ctx), Value::CollBytes(vec![]));
+}
+
 #[test]
 fn opcode_size_of_context_headers() {
     let headers = vec![test_eval_header_v2(), test_eval_header_v2()];

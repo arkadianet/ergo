@@ -58,10 +58,11 @@ pub struct TxValidationCtx<'a> {
     pub cost: &'a mut CostAccumulator,
     /// Block headers for evaluator `CONTEXT.headers`, tip-first. The
     /// count is caller-defined: block validation passes exactly 9
-    /// (`sigmaLastHeaders = lastHeaders.drop(1)` Scala parity), while
-    /// candidate/mempool admission passes 10 (`UpcomingStateContext`
-    /// parity). Scripts observe `headers.size`, so the two surfaces must
-    /// never silently converge.
+    /// (`sigmaLastHeaders = lastHeaders.drop(1)`), and candidate/mempool
+    /// admission passes the newest [`crate::UPCOMING_LAST_HEADERS`] (9,
+    /// `UpcomingStateContext` built from `lastHeaders.take(9)` since Scala
+    /// `681a1842d`). Scripts observe `headers.size`, so a caller passing a
+    /// different count changes what scripts see.
     pub last_headers: &'a [ergo_ser::header::Header],
     /// Network-constant consensus rules applied inside this validation
     /// (currently EIP-27 re-emission). Default is "no extra rules", which

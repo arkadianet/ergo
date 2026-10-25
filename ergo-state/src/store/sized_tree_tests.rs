@@ -41,7 +41,7 @@ fn sized_output_trees_use_canonical_utxo_bytes_and_survive_reopen() {
             pre_header_version: 4,
             pre_header_parent_id: [0; 32],
             pre_header_n_bits: 0,
-            pre_header_votes: [0; 3],
+            pre_header_votes: [0; 3].into(),
         };
         let mut params = ProtocolParams::mainnet_default();
         params.block_version = 4;

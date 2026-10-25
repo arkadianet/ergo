@@ -289,7 +289,7 @@ fn probe_cost_of_pending_tx_e67() {
         pre_header_version: version,
         pre_header_parent_id: parent_id,
         pre_header_n_bits: nbits,
-        pre_header_votes: [0u8; 3],
+        pre_header_votes: [0u8; 3].into(),
     };
     let params = ProtocolParams::mainnet_default();
 

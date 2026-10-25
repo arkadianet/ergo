@@ -250,7 +250,7 @@ fn replay_fixture(
             pre_header_version: hdr.version,
             pre_header_parent_id: *hdr.parent_id.as_bytes(),
             pre_header_n_bits: u64::from(hdr.n_bits),
-            pre_header_votes: hdr.votes,
+            pre_header_votes: hdr.votes.into(),
         };
         let last_headers = replay_headers(&headers, h);
         if let Some(recorded) = fixture.contexts.get(&h.to_string()) {
@@ -879,7 +879,7 @@ mod ranges {
                         pre_header_version: hdr.version,
                         pre_header_parent_id: *hdr.parent_id.as_bytes(),
                         pre_header_n_bits: u64::from(hdr.n_bits),
-                        pre_header_votes: hdr.votes,
+                        pre_header_votes: hdr.votes.into(),
                     };
                     let last_headers = replay_headers(&headers, v.height);
                     let mut cost = CostAccumulator::new(

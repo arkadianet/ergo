@@ -860,7 +860,7 @@ fn make_verifier_context<'a>(
         pre_header_version: 3,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0x1a01_7660u64,
-        pre_header_votes: [0, 0, 0],
+        pre_header_votes: [0, 0, 0].into(),
         extension: indexmap::IndexMap::new(),
         input_extensions: &[],
         last_headers: &[],

@@ -96,7 +96,7 @@ mod mining_helper_tests {
                 pre_header_version: 4,
                 pre_header_parent_id: [0; 32],
                 pre_header_n_bits: 0,
-                pre_header_votes: [0; 3],
+                pre_header_votes: [0; 3].into(),
             };
             assert_eq!(ctx.block_version(), v, "version round-trip {v}");
         }

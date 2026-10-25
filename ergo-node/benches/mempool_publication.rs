@@ -158,7 +158,7 @@ fn bench_admission(initial_pool: usize, size: usize, subscriber_count: usize) {
         pre_header_version: 3,
         pre_header_parent_id: [0; 32],
         pre_header_n_bits: 0,
-        pre_header_votes: [0; 3],
+        pre_header_votes: [0; 3].into(),
     };
     let params = ProtocolParams::mainnet_default();
     let utxo = EmptyUtxo;

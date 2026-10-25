@@ -730,7 +730,9 @@ pub(super) fn eval_no_arg_method(
         }
         (105, 7) => {
             add_method_cost(cost, COST_PRE_HEADER_VOTES)?;
-            Ok(Some(Value::CollBytes(ctx.pre_header_votes.to_vec())))
+            Ok(Some(Value::CollBytes(
+                ctx.pre_header_votes.as_slice().to_vec(),
+            )))
         }
         // SGlobal(106).groupGenerator(1) -> GroupElement      cost: 10
         (106, 1) => {

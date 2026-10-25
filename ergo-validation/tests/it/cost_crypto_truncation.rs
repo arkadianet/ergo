@@ -134,7 +134,7 @@ pub(super) fn validate_transaction_case(
         pre_header_version: context.block_version,
         pre_header_parent_id: [0; 32],
         pre_header_n_bits: context.n_bits,
-        pre_header_votes: [0; 3],
+        pre_header_votes: [0; 3].into(),
     };
     let p = &context.voted_params;
     let params = ProtocolParams {

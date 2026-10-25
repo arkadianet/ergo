@@ -3,8 +3,10 @@
 //!
 //! Scala exposes **9** headers to `CONTEXT.headers` while validating a
 //! block (`ErgoStateContext.process` → `sigmaLastHeaders =
-//! lastHeaders.drop(1)`), and 10 on the candidate/mempool surface
-//! (`UpcomingStateContext`, whole `lastHeaders`). This node used to feed
+//! lastHeaders.drop(1)`). The candidate/mempool surface exposes 9 as well
+//! since Scala `681a1842d` (`UpcomingStateContext` from
+//! `lastHeaders.take(9)`, oracle-pinned by `reference_607_upcoming_context`);
+//! before it, 10. This node used to feed
 //! all 10 into block-validation script eval, so scripts indexing
 //! `CONTEXT.headers(9)` reduced here but threw
 //! `ArrayIndexOutOfBoundsException` on the JVM: 15 poisoned blocks were
@@ -156,7 +158,7 @@ fn poison_tx_rejected_with_nine_window_accepted_with_ten() {
         pre_header_version: block_header.version,
         pre_header_parent_id: *block_header.parent_id.as_bytes(),
         pre_header_n_bits: block_header.n_bits as u64,
-        pre_header_votes: block_header.votes,
+        pre_header_votes: block_header.votes.into(),
     };
 
     let (tx_bytes, tx_id_hex) = load_poison_tx();

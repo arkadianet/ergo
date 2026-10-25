@@ -59,7 +59,7 @@ fn trace_captures_opcode_costs() {
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
-        pre_header_votes: [0u8; 3],
+        pre_header_votes: [0u8; 3].into(),
         input_extensions: &[],
     };
 
@@ -170,7 +170,7 @@ fn trace_pins_method_indexof_cumulative_total() {
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
-        pre_header_votes: [0u8; 3],
+        pre_header_votes: [0u8; 3].into(),
         input_extensions: &[],
     };
 

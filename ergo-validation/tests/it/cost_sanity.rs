@@ -130,7 +130,7 @@ fn run_corpus_recording(
             pre_header_version: 0,
             pre_header_parent_id: [0u8; 32],
             pre_header_n_bits: 0,
-            pre_header_votes: [0u8; 3],
+            pre_header_votes: [0u8; 3].into(),
         };
         let mut cost = CostAccumulator::recording_only();
         let mut tx_cx = ergo_validation::TxValidationCtx {
@@ -257,7 +257,7 @@ fn corpus_passes_with_enforcing_inner() {
             pre_header_version: 0,
             pre_header_parent_id: [0u8; 32],
             pre_header_n_bits: 0,
-            pre_header_votes: [0u8; 3],
+            pre_header_votes: [0u8; 3].into(),
         };
         // Fresh enforcing accumulator per transaction
         let mut cost = CostAccumulator::new(JitCost::from_block_cost(BLOCK_COST_LIMIT).unwrap());

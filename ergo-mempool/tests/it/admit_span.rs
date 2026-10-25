@@ -100,7 +100,7 @@ fn tx_ctx() -> TransactionContext {
         pre_header_version: 3,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
-        pre_header_votes: [0u8; 3],
+        pre_header_votes: [0u8; 3].into(),
     }
 }
 

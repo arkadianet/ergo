@@ -183,7 +183,7 @@ fn chain_validate_blocks_2_10_with_state_store() {
             pre_header_version: 0,
             pre_header_parent_id: [0u8; 32],
             pre_header_n_bits: 0,
-            pre_header_votes: [0u8; 3],
+            pre_header_votes: [0u8; 3].into(),
         };
         let mut cost = CostAccumulator::recording_only();
         let mut tx_cx = ergo_validation::TxValidationCtx {

@@ -370,7 +370,7 @@ fn scala_pending_tx_oracle() {
         pre_header_version: tip_version,
         pre_header_parent_id: tip_parent,
         pre_header_n_bits: tip_nbits,
-        pre_header_votes: votes,
+        pre_header_votes: votes.into(),
     };
     let params = ProtocolParams::mainnet_default();
 

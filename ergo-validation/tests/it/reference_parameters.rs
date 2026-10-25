@@ -208,7 +208,7 @@ fn parameter_subsets_match_reference() {
             pre_header_version: 4,
             pre_header_parent_id: [0; 32],
             pre_header_n_bits: 0,
-            pre_header_votes: [0; 3],
+            pre_header_votes: [0; 3].into(),
         };
         let mut cost = ergo_primitives::cost::CostAccumulator::new(
             ergo_primitives::cost::JitCost::from_block_cost(params.max_block_cost).unwrap(),

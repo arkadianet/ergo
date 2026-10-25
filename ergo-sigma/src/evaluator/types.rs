@@ -289,6 +289,8 @@ impl SigmaValidationSettings {
     }
 }
 
+pub use ergo_ser::pre_header::PreHeaderVotes;
+
 /// Evaluation context — borrows transaction-scoped box data.
 ///
 /// All box collections are borrowed slices, not owned vectors.
@@ -321,7 +323,7 @@ pub struct ReductionContext<'a> {
     /// Encoded difficulty (SPreHeader.nBits).
     pub pre_header_n_bits: u64,
     /// Miner votes (SPreHeader.votes).
-    pub pre_header_votes: [u8; 3],
+    pub pre_header_votes: PreHeaderVotes,
     /// Context extension variables from the SELF input's spending
     /// proof. Keys are variable indices (0-255), values are typed
     /// Sigma constants. Backs `0xE3 GetVar` and the v6 method-call
@@ -394,7 +396,7 @@ impl<'a> ReductionContext<'a> {
             pre_header_version: 0,
             pre_header_parent_id: [0u8; 32],
             pre_header_n_bits: 0,
-            pre_header_votes: [0u8; 3],
+            pre_header_votes: PreHeaderVotes::Bytes([0u8; 3]),
             extension: indexmap::IndexMap::new(),
             input_extensions: &[],
             last_headers: &[],

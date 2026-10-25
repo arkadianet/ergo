@@ -75,7 +75,7 @@ impl Fixture {
             pre_header_version: 3,
             pre_header_parent_id: [0; 32],
             pre_header_n_bits: 0,
-            pre_header_votes: [0; 3],
+            pre_header_votes: [0; 3].into(),
         }
     }
 
