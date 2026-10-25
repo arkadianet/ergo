@@ -94,6 +94,23 @@
 //! (`HEIGHT+1`, a `Plus`) is untouchable. Literal-tuple receivers take the
 //! `Tup(a,b)` case (`:60`) and stay on the general path.
 //!
+//! # Env values are root-scope nodes
+//!
+//! `buildGraph` (`GraphBuilding.scala:416-422`) builds every env value at the
+//! root of the program lambda BEFORE the body:
+//! `envVals.map { case (k, v) => k -> buildNode(ctxC, Map.empty, v) }`. For a
+//! contract template the env holds one `ConstantPlaceholder` per parameter
+//! (`SigmaCompiler.compileTyped`'s `env ++ placeholdersEnv`); for a plain
+//! compile it holds the lifted env constants. Each such node is therefore in
+//! the global table, and every later build of an identical node — in any
+//! thunk — hash-conses to it. A parameter read in two sibling `&&` right arms
+//! (`HEIGHT > 0 && a > 1 && a < 9`) is ONE root symbol used twice, hence a root
+//! `ValDef`, not two thunk-local copies. `cse` seeds these nodes into the root
+//! scope before interning the body; one that no body node equals is unreachable
+//! from the root and emits nothing. A body constant equal to an env value
+//! shares its node even when the script never names that entry
+//! (`fromBase16("0102")` twice under an env holding `a = 0102`).
+//!
 //! # Lambdas are NOT thunks
 //!
 //! `FuncValue` (`0xD9`) bodies do NOT push a hash-cons scope: `lambda`
@@ -214,8 +231,15 @@ const GLOBAL: u8 = 0xDD;
 /// count, and a final `crate::fold::fold` must run over its output to collapse the
 /// constant adjacencies it exposes by P4-inlining constant-valued `val`s (the
 /// constant-through-`val` case — see `crate::tree::compile`, oracle-pinned).
-pub(crate) fn cse(root: Expr) -> Expr {
+///
+/// `env_nodes` are the env values Scala builds at the root before the body (see
+/// the module docs): interned first, at the root scope, so the body's uses of
+/// them share one symbol across thunks.
+pub(crate) fn cse(root: Expr, env_nodes: &[Expr]) -> Expr {
     let mut it = Interner::new();
+    for node in env_nodes {
+        it.intern(node);
+    }
     let root_sym = it.intern(&root);
     it.materialize(root_sym)
 }
@@ -234,6 +258,10 @@ mod tests {
     const PLUS: u8 = 0x9A;
     const GT: u8 = 0x91;
     const LT: u8 = 0x8F;
+    const EQ: u8 = 0x93;
+    const NEQ: u8 = 0x94;
+    /// `groupGenerator` — a zero-arg, hoistable `GroupElement` node.
+    const GROUP_GENERATOR: u8 = 0x82;
     const HEIGHT_OP: u8 = 0xA3;
     const INPUTS_OP: u8 = 0xA4;
     const BIN_XOR: u8 = 0xF4;
@@ -452,6 +480,91 @@ mod tests {
             count_op(&it, PLUS),
             1,
             "condition-built HEIGHT+1 must be shared across both branches (keystone)"
+        );
+    }
+
+    /// `ConstantPlaceholder(index)` (`0x73`) — a contract-template parameter.
+    fn placeholder(index: u32) -> Expr {
+        Expr::Op(IrNode {
+            opcode: 0x73,
+            payload: Payload::ConstPlaceholder { index },
+        })
+    }
+
+    /// `HEIGHT > 0 && x > 1 && x < 9` — `x` read only in the two sibling `&&`
+    /// right arms.
+    fn read_in_sibling_and_arms(x: Expr) -> Expr {
+        op2(
+            BIN_AND,
+            op2(
+                BIN_AND,
+                op2(GT, height(), int(0)),
+                op2(GT, x.clone(), int(1)),
+            ),
+            op2(LT, x, int(9)),
+        )
+    }
+
+    #[test]
+    fn env_placeholder_read_in_sibling_and_arms_is_one_root_valdef() {
+        // `buildGraph` builds the template's placeholder env at the root before
+        // the body, so both `&&` right arms hash-cons to that one node: used
+        // twice → a root ValDef. Oracle (`ct`, sigma-state 6.0.6,
+        // `reuse_lazy_and.es`): `d801 d601 7300 d1 eded 91a30400 91 7201 0402
+        // 8f 7201 0412`.
+        let body = read_in_sibling_and_arms(placeholder(0));
+        let expected = block(
+            vec![valdef(1, placeholder(0))],
+            read_in_sibling_and_arms(valuse(1)),
+        );
+        assert_eq!(cse(body.clone(), &[placeholder(0)]), expected);
+        // Without the env node each arm builds its own thunk-local copy (the E2
+        // rule) and each single-use copy inlines.
+        assert_eq!(cse(body.clone(), &[]), body);
+    }
+
+    #[test]
+    fn env_node_unused_or_used_once_changes_nothing() {
+        // An env node the body never reads is unreachable from the root, and
+        // one read once still inlines: neither emits a ValDef.
+        let body = op2(
+            BIN_AND,
+            op2(GT, height(), int(0)),
+            op2(GT, placeholder(1), int(1)),
+        );
+        assert_eq!(cse(body.clone(), &[placeholder(0), placeholder(1)]), body);
+    }
+
+    #[test]
+    fn env_constant_shared_across_if_branches_hoists_unless_primitive() {
+        // Plain compile: the lifted env constants are root nodes too. A
+        // GroupElement (Scala `LiftedConst`) read in both `if` branches is one
+        // symbol used twice → a ValDef; an `Int` (Scala `Const`, P4) stays
+        // inline even though it is shared.
+        let branches = |x: Expr, other: Expr| {
+            op3(
+                IF,
+                op2(GT, height(), int(5)),
+                op2(EQ, x.clone(), other.clone()),
+                op2(NEQ, x, other),
+            )
+        };
+        let ge = ge_const(0x42);
+        let generator = || op0(GROUP_GENERATOR);
+        assert_eq!(
+            cse(branches(ge.clone(), generator()), std::slice::from_ref(&ge)),
+            block(
+                vec![valdef(1, ge.clone())],
+                branches(valuse(1), generator())
+            )
+        );
+        assert_eq!(
+            cse(branches(ge.clone(), generator()), &[]),
+            branches(ge, generator())
+        );
+        assert_eq!(
+            cse(branches(int(7), height()), &[int(7)]),
+            branches(int(7), height())
         );
     }
 

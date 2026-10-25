@@ -1,5 +1,5 @@
 {
-  "_captured": "2026-09-30",
+  "_captured": "2026-09-30; reuse_* vectors 2026-10-25",
   "_format": "verb ct; oracle reply verbatim (never hand-edited). 'OK <hex>' = ContractTemplate.serializer.toBytes(SigmaTemplateCompiler(NET).compile(source)) as Base16; 'REJECT <line:col> <ExClass>'.",
   "_source": "TyperOracle.scala ct verb, scala-cli sigma-state 6.0.6 (Scala 2.12.21, JVM 17), ORACLE_TREE_VERSION=3, ORACLE_NETWORK=testnet. Sources under test-vectors/ergoscript/contract/sources/.",
   "_note": "M7 byte-exact target is the FULL ACCEPT class, ≤4 params (Map1..Map4 declaration order) AND ≥5 params (Scala 2.12 HashTrieMap placeholder-iteration order, e.g. five/six/eight_hashorder — name sets whose order differs from declaration and alphabetical). The 'returns_with_text' vector is an oracle-REJECT (returnTag consumes only the bare '@returns' literal, trailing text fails the docLine Newline).",
@@ -125,6 +125,42 @@
       "source": "/**\n * Eight SigmaProp params — the recon's p8 discriminator; includes the\n * zeta/bravo and delta/beta root-bucket collisions.\n */\n@contract def gate8h(sigma: SigmaProp, delta: SigmaProp, kappa: SigmaProp, omega: SigmaProp, theta: SigmaProp, gamma: SigmaProp, lambda: SigmaProp, beta: SigmaProp) = sigma && delta && kappa && omega && theta && gamma && lambda && beta\n",
       "verb": "ct",
       "oracle": "OK 0006676174653868774569676874205369676d6150726f7020706172616d7320e2809420746865207265636f6e2773207038206469736372696d696e61746f723b20696e636c7564657320746865207a6574612f627261766f20616e642064656c74612f6265746120726f6f742d6275636b657420636f6c6c6973696f6e732e0808080808080808080008057369676d6100000564656c74610001056b617070610002056f6d656761000305746865746100040567616d6d610005066c616d6264610006046265746100071eea02ea02ea02ea02ea02ea02ea0273037305730073027304730773017306"
+    },
+    {
+      "name": "reuse_lazy_and",
+      "source": "/**\n * One param read in two sibling `&&` right arms: Scala builds the placeholder\n * at the root, so both arms share it and it becomes one ValDef.\n */\n@contract def reuseAnd(a: Int) = sigmaProp(HEIGHT > 0 && a > 1 && a < 9)\n",
+      "verb": "ct",
+      "oracle": "OK 00087265757365416e6489014f6e6520706172616d207265616420696e2074776f207369626c696e6720602626602072696768742061726d733a205363616c61206275696c64732074686520706c616365686f6c6465722061742074686520726f6f742c20736f20626f74682061726d7320736861726520697420616e64206974206265636f6d6573206f6e652056616c4465662e010400010161000017d801d6017300d1eded91a3040091720104028f72010412"
+    },
+    {
+      "name": "reuse_lazy_and_four",
+      "source": "/**\n * Four params; only `d` is read twice, in two sibling `&&` right arms.\n */\n@contract def reuseAnd4(a: Int, b: Int, c: Int, d: Int) = sigmaProp(a > 0 && b > 1 && c + d > 0 && d > 1)\n",
+      "verb": "ct",
+      "oracle": "OK 00097265757365416e643444466f757220706172616d733b206f6e6c792060646020697320726561642074776963652c20696e2074776f207369626c696e6720602626602072696768742061726d732e040404040400040161000001620001016300020164000321d801d6017303d1ededed91730004009173010402919a7302720104009172010402"
+    },
+    {
+      "name": "reuse_if_branches",
+      "source": "/**\n * One param read in both branches of an `if` (each branch is its own thunk).\n */\n@contract def reuseIf(a: Int) = sigmaProp(if (HEIGHT > 5) a > 1 else a < 9)\n",
+      "verb": "ct",
+      "oracle": "OK 0007726575736549664a4f6e6520706172616d207265616420696e20626f7468206272616e63686573206f6620616e2060696660202865616368206272616e636820697320697473206f776e207468756e6b292e010400010161000016d801d6017300d19591a3040a91720104028f72010412"
+    },
+    {
+      "name": "reuse_pair_projection",
+      "source": "/**\n * A tuple param projected in two sibling `&&` right arms: the shared\n * placeholder is the projections' receiver.\n */\n@contract def reusePair(x: Int, pair: (Int, Long)) = sigmaProp(x > 0 && pair._1 > 0 && pair._2 > 0L)\n",
+      "verb": "ct",
+      "oracle": "OK 00097265757365506169726c41207475706c6520706172616d2070726f6a656374656420696e2074776f207369626c696e6720602626602072696768742061726d733a207468652073686172656420706c616365686f6c646572206973207468652070726f6a656374696f6e73272072656365697665722e02044005000201780000047061697200011cd801d6017301d1eded9173000400918c7201010400918c7201020500"
+    },
+    {
+      "name": "reuse_six_hashorder",
+      "source": "/**\n * Six params, three of them read twice, one only across `&&` right arms\n * (`echo`); exercises the shared-placeholder ValDefs under Scala 2.12\n * HashTrieMap placeholder order.\n */\n@contract def reuse6(alpha: Int, bravo: Int, charlie: Int, delta: Int, echo: Int, foxtrot: Int) = sigmaProp(foxtrot > alpha && alpha > foxtrot - 1 && bravo + charlie + delta + echo > 0 && echo > 1)\n",
+      "verb": "ct",
+      "oracle": "OK 0006726575736536a80153697820706172616d732c207468726565206f66207468656d20726561642074776963652c206f6e65206f6e6c79206163726f737320602626602072696768742061726d732028606563686f60293b2065786572636973657320746865207368617265642d706c616365686f6c6465722056616c4465667320756e646572205363616c6120322e31322048617368547269654d617020706c616365686f6c646572206f726465722e06040404040404000605616c706861000005627261766f000107636861726c696500020564656c74610003046563686f000407666f7874726f74000532d803d6017305d6027300d6037303d1ededed91720172029172029972010402919a9a9a730273017304720304009172030402"
+    },
+    {
+      "name": "reuse_mixed_types_six",
+      "source": "/**\n * Six params of richer types; the tuple param is projected in two sibling\n * `&&` right arms.\n */\n@contract def reuseTypes6(ge: GroupElement, bi: BigInt, pair: (Int, Long), nested: Coll[Coll[Byte]], b: Byte, sh: Short) = proveDlog(ge) && sigmaProp(bi > 0.toBigInt && pair._1 > 0 && pair._2 > 0L && nested.size > 0 && b > 0.toByte && sh > 0.toShort)\n",
+      "verb": "ct",
+      "oracle": "OK 000b72657573655479706573365853697820706172616d73206f66207269636865722074797065733b20746865207475706c6520706172616d2069732070726f6a656374656420696e2074776f207369626c696e6720602626602072696768742061726d732e06070640051a020300060267650000026269000104706169720002066e6573746564000301620004027368000535d801d6017304ea02cd7301d1ededededed917300060100918c7201010400918c720102050091b17303040091730202009173050300"
     }
   ]
 }

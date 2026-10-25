@@ -1,5 +1,5 @@
 {
-  "_captured": "2026-09-30",
+  "_captured": "2026-09-30; cce env-root-scope vectors 2026-10-25; cce unused-env vectors 2026-10-25",
   "_format": "verb: cc|cce|ccs; oracle reply fields verbatim (never hand-edited); settings pinned per-record",
   "_source": "TyperOracle.scala cc/cce/ccs verbs, scala-cli sigma-state 6.0.6, ORACLE_TREE_VERSION per-record (one oracle spawn per version) ORACLE_NETWORK=testnet; golden_seed.txt typecheck-ACCEPT sources: 187 vectors (37 compile-ACCEPT, 150 compile-REJECT recorded verbatim); corpus: 79 sources fed under cc, 18 compile-ACCEPT kept, 61 compile-REJECT excluded (counted here per the Task-10 brief); compile_probes.txt (Task-11 wave-1 GraphBuilding gate): 112 vectors (62 compile-ACCEPT, 50 compile-REJECT recorded verbatim); M4 Task-1 (gap F2, recon-gap.md Finding 2): `sigmaProp(col1.slice[Long](0, 1).size == 1)` moved from `ccs` to `cce` — the `ccs` capture bound `col1` to a per-element ConcreteCollection SValue (TyperOracle.scala:176), an oracle-harness artifact our EnvValue cannot represent and the real compile API never produces; `cce`'s `col1` is a single LongArrayConstant (TyperOracle.scala:141), API-reachable and now a genuine same-shape probe",
   "vectors": [
@@ -3707,6 +3707,94 @@
       "tree_hex": null,
       "tree_version": 3,
       "verb": "cc"
+    },
+    {
+      "network": "testnet",
+      "oracle": "ACCEPT",
+      "p2s_address": "2QdaQeS5B8sZRHeWhXKdBJSwXwwXCFEbu5QPVSQ73Gg9jFBiAPNXNTeQE3A",
+      "p2sh_address": "pZdSd8GGYTkb2N56nwNNVabGyT2zy139Vu9Csdi",
+      "reject_class": null,
+      "source": "sigmaProp(HEIGHT > 0 && OUTPUTS(0).propositionBytes == a && SELF.propositionBytes != a)",
+      "tree_hex": "1b24030e02010204000400d801d6017300d1eded91a3730193c2b2a5730200720194c2a77201",
+      "tree_version": 3,
+      "verb": "cce"
+    },
+    {
+      "network": "testnet",
+      "oracle": "ACCEPT",
+      "p2s_address": "2FCPEVZ2W2kHPcUw4sTfiK77GoJ5EZCywbD4isickQxk6wBWhiLQUPb3zNzUnZ4h9gv8R5H8PTpQedVgvgSuDczy8v9CVB2dFQpp",
+      "p2sh_address": "qYBce65NAAmbpq23vYY1W5HfNZCF25wM9UtmGQx",
+      "reject_class": null,
+      "source": "sigmaProp(HEIGHT > 0 && SELF.R4[GroupElement].get == g3 && SELF.R5[GroupElement].get == g3)",
+      "tree_hex": "1b420207025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc0400d801d6017300d1eded91a3730193e4c6a70407720193e4c6a705077201",
+      "tree_version": 3,
+      "verb": "cce"
+    },
+    {
+      "network": "testnet",
+      "oracle": "ACCEPT",
+      "p2s_address": "KVgEnvcVmkgYV4e4zanvo8vRwf4CMvudB4sUnaUq59UqQwXkDKPNLr1sF",
+      "p2sh_address": "pdSYmVtFfuhuaj84SMCgkow4LqXGn7mCpCNM7Ew",
+      "reject_class": null,
+      "source": "sigmaProp(HEIGHT > 0 && n1 > SELF.R4[BigInt].get && n1 < SELF.R5[BigInt].get)",
+      "tree_hex": "1b23020601050400d801d6017300d1eded91a37301917201e4c6a704068f7201e4c6a70506",
+      "tree_version": 3,
+      "verb": "cce"
+    },
+    {
+      "network": "testnet",
+      "oracle": "ACCEPT",
+      "p2s_address": "KVgEnxEudU1DRkUsj2dt4CDFWJxhXSqzjcMAga3F2s5G1BzYMYVR24uCH",
+      "p2sh_address": "rdJMKXh9YGZ7r6nHxS8MVyZidGz7nercgAPQeB4",
+      "reject_class": null,
+      "source": "sigmaProp(if (HEIGHT > 5) col1 == SELF.R4[Coll[Long]].get else col1 != SELF.R5[Coll[Long]].get)",
+      "tree_hex": "1b230211020204040ad801d6017300d19591a37301937201e4c6a70411947201e4c6a70511",
+      "tree_version": 3,
+      "verb": "cce"
+    },
+    {
+      "network": "testnet",
+      "oracle": "ACCEPT",
+      "p2s_address": "9R32HFGuhYiZnxX4xEe7KPjG6Z16gMoRujYKHCQ1go5K9c1cC",
+      "p2sh_address": "px9w8QqcmHCGusnyT9P9U2XFPgoTqnLTCzmgURW",
+      "reject_class": null,
+      "source": "sigmaProp(OUTPUTS(0).propositionBytes == a || SELF.propositionBytes == a)",
+      "tree_hex": "1b1d020e0201020400d801d6017300d1ec93c2b2a5730100720193c2a77201",
+      "tree_version": 3,
+      "verb": "cce"
+    },
+    {
+      "network": "testnet",
+      "oracle": "ACCEPT",
+      "p2s_address": "e962TdLZGcHEpNv4y6HriubKWfYQmaTuQ1bGxPsaEVjnRY7UmX",
+      "p2sh_address": "qgFMqREx5R2ZMMBuveWENEbhEaj3d4fPvZC596i",
+      "reject_class": null,
+      "source": "sigmaProp(HEIGHT > 0 && SELF.R4[Byte].get == bb1 && SELF.R5[Byte].get == bb1)",
+      "tree_hex": "1b1e03040002010201d1eded91a3730093e4c6a70402730193e4c6a705027302",
+      "tree_version": 3,
+      "verb": "cce"
+    },
+    {
+      "network": "testnet",
+      "oracle": "ACCEPT",
+      "p2s_address": "2QdaQeS5B8sZRHeWhXKdBJSwXwwXCFEbu5QPVSQ73Gg9jFBiAPNXNTeQE3A",
+      "p2sh_address": "pZdSd8GGYTkb2N56nwNNVabGyT2zy139Vu9Csdi",
+      "reject_class": null,
+      "source": "sigmaProp(HEIGHT > 0 && OUTPUTS(0).propositionBytes == fromBase16(\"0102\") && SELF.propositionBytes != fromBase16(\"0102\"))",
+      "tree_hex": "1b24030e02010204000400d801d6017300d1eded91a3730193c2b2a5730200720194c2a77201",
+      "tree_version": 3,
+      "verb": "cce"
+    },
+    {
+      "network": "testnet",
+      "oracle": "ACCEPT",
+      "p2s_address": "5C2dTkbfFk8AbUzc4qMtpDDktNQr2W2GyEJWjB83kC2r8M1yqV6iYQcw",
+      "p2sh_address": "qoRSmCVdDdsrfSqUn5dUwkAsF6k2VjrupxTd9Px",
+      "reject_class": null,
+      "source": "sigmaProp(HEIGHT > 0 && OUTPUTS(0).propositionBytes == fromBase16(\"0506\") && SELF.propositionBytes != fromBase16(\"0506\"))",
+      "tree_hex": "1b2204040004000e0205060e020506d1eded91a3730093c2b2a5730100730294c2a77303",
+      "tree_version": 3,
+      "verb": "cce"
     }
   ]
 }
