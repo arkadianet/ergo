@@ -379,7 +379,7 @@ fn coll_updated_inputs_updated_self_succeeds_via_eval() {
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
-        pre_header_votes: [0u8; 3],
+        pre_header_votes: [0u8; 3].into(),
         input_extensions: &[],
     };
     let expr = coll_updated_via_method_call(op_inputs(), const_int(0), op_self());
@@ -431,7 +431,7 @@ fn coll_updated_inputs_rejects_int_element_via_eval() {
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
-        pre_header_votes: [0u8; 3],
+        pre_header_votes: [0u8; 3].into(),
         input_extensions: &[],
     };
     let expr = coll_updated_via_method_call(op_inputs(), const_int(0), const_int(99));

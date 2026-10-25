@@ -310,8 +310,9 @@ pub struct TransactionContext {
     pub pre_header_parent_id: [u8; 32],
     /// Encoded difficulty (nBits from header).
     pub pre_header_n_bits: u64,
-    /// Miner votes (3 bytes from header).
-    pub pre_header_votes: [u8; 3],
+    /// Miner votes: a header's 3 bytes, or none in the mempool context
+    /// ([`Self::mempool_upcoming`]).
+    pub pre_header_votes: ergo_sigma::evaluator::PreHeaderVotes,
 }
 
 impl TransactionContext {
@@ -322,7 +323,43 @@ impl TransactionContext {
     pub fn block_version(&self) -> u8 {
         self.activated_script_version.wrapping_add(1)
     }
+
+    /// The context Scala's mempool validates against,
+    /// `ErgoStateContext.simplifiedUpcoming()`: the block after `tip`, with
+    /// the fields no one can know yet filled with fixed values.
+    ///
+    /// - `HEIGHT` is `tip.height + 1` and `parentId` is `tip_id`
+    ///   (`PreHeader.apply` via `AutolykosPowScheme.derivedHeaderFields`).
+    /// - `timestamp` is `tip.timestamp + 1`; `nBits` and the pre-header
+    ///   version are the tip's.
+    /// - `minerPk` is the group generator and `votes` is empty.
+    ///
+    /// `block_version` is the active parameters' block version, which sets the
+    /// activated script version. The caller passes the newest
+    /// [`MEMPOOL_LAST_HEADERS`] headers as `CONTEXT.headers`.
+    pub fn mempool_upcoming(
+        tip: &ergo_ser::header::Header,
+        tip_id: &[u8; 32],
+        block_version: u8,
+    ) -> Self {
+        Self {
+            height: tip.height.saturating_add(1),
+            miner_pubkey: ergo_ser::sigma_value::SECP256K1_GENERATOR,
+            pre_header_timestamp: tip.timestamp.saturating_add(1),
+            activated_script_version: crate::derive_activated_script_version(block_version),
+            pre_header_version: tip.version,
+            pre_header_parent_id: *tip_id,
+            pre_header_n_bits: tip.n_bits as u64,
+            pre_header_votes: ergo_sigma::evaluator::PreHeaderVotes::Empty,
+        }
+    }
 }
+
+/// How many of the newest headers, the tip first, Scala's mempool context
+/// exposes as `CONTEXT.headers`. `simplifiedUpcoming()` keeps
+/// `lastHeaders.take(Constants.LastHeadersInContext - 1)`: the predicted
+/// block takes the tenth place.
+pub const MEMPOOL_LAST_HEADERS: usize = 9;
 
 #[cfg(test)]
 mod tests {

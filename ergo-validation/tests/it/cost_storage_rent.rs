@@ -115,7 +115,7 @@ fn verify_case(case: &Value) -> (&'static str, u64) {
         pre_header_version: pre[0],
         pre_header_parent_id: pre[1..33].try_into().unwrap(),
         pre_header_n_bits: u64::from_be_bytes(pre[41..49].try_into().unwrap()),
-        pre_header_votes: pre[86..89].try_into().unwrap(),
+        pre_header_votes: <[u8; 3]>::try_from(&pre[86..89]).unwrap().into(),
     };
     let params = ProtocolParams {
         storage_fee_factor: req["storage_fee_factor"]

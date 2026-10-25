@@ -121,7 +121,7 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
         pre_header_version: pre[0],
         pre_header_parent_id: pre[1..33].try_into()?,
         pre_header_n_bits: u64::from_be_bytes(pre[41..49].try_into()?),
-        pre_header_votes: pre[86..89].try_into()?,
+        pre_header_votes: <[u8; 3]>::try_from(&pre[86..89])?.into(),
     };
     // The same curve validation used by consensus frame readers.
     let mut pk = vec![7];

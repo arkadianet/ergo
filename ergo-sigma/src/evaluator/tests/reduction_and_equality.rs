@@ -104,7 +104,7 @@ fn box_equality_self_vs_inputs_0() {
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
-        pre_header_votes: [0u8; 3],
+        pre_header_votes: [0u8; 3].into(),
         input_extensions: &[],
     };
     // SELF == INPUTS(0) — same underlying box
@@ -153,7 +153,7 @@ fn box_equality_in_tuple() {
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
-        pre_header_votes: [0u8; 3],
+        pre_header_votes: [0u8; 3].into(),
         input_extensions: &[],
     };
     // (SELF, 42) == (INPUTS(0), 42) — nested box in tuple
@@ -201,7 +201,7 @@ fn box_equality_in_option() {
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
-        pre_header_votes: [0u8; 3],
+        pre_header_votes: [0u8; 3].into(),
         input_extensions: &[],
     };
     // Some(SELF) == Some(INPUTS(0))
@@ -264,7 +264,7 @@ fn box_collection_vs_derived_tuple() {
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
-        pre_header_votes: [0u8; 3],
+        pre_header_votes: [0u8; 3].into(),
         input_extensions: &[],
     };
     // Left: BoxCollection(Inputs) — the raw INPUTS carrier
@@ -347,7 +347,7 @@ fn coll_box_eq_cost_uses_per_item() {
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
-        pre_header_votes: [0u8; 3],
+        pre_header_votes: [0u8; 3].into(),
         input_extensions: &[],
     };
     // BoxCollection(Inputs) with 2 boxes

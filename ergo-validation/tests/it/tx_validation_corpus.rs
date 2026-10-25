@@ -152,7 +152,7 @@ fn chain_validate_blocks_2_through_10() {
             pre_header_version: 0,
             pre_header_parent_id: [0u8; 32],
             pre_header_n_bits: 0,
-            pre_header_votes: [0u8; 3],
+            pre_header_votes: [0u8; 3].into(),
         };
         let mut cost =
             CostAccumulator::new(JitCost::from_block_cost(params.max_block_cost).unwrap());

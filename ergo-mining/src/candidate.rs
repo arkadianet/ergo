@@ -724,7 +724,7 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
         pre_header_version: pre_header.version,
         pre_header_parent_id: parent_id,
         pre_header_n_bits: new_n_bits as u64,
-        pre_header_votes: candidate_votes,
+        pre_header_votes: candidate_votes.into(),
     };
 
     let validated_emission = match built_emission {

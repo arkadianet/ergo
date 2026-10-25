@@ -117,7 +117,7 @@ impl ReductionContextOwned {
             pre_header_version: self.pre_header_version,
             pre_header_parent_id: self.pre_header_parent_id,
             pre_header_n_bits: self.pre_header_n_bits,
-            pre_header_votes: self.pre_header_votes,
+            pre_header_votes: self.pre_header_votes.into(),
             extension: self.extension.clone(),
             input_extensions: &self.input_extensions,
             last_headers: &self.last_headers,

@@ -326,7 +326,7 @@ fn mempool_admits_mainnet_corpus_1761k() {
             pre_header_version: hi.version,
             pre_header_parent_id: hi.parent_id,
             pre_header_n_bits: hi.n_bits,
-            pre_header_votes: hi.votes,
+            pre_header_votes: hi.votes.into(),
         };
 
         for v in block_txs {

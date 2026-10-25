@@ -58,7 +58,7 @@ fn reemission_spending_matches_reference() {
             pre_header_version: 4,
             pre_header_parent_id: [0; 32],
             pre_header_n_bits: 0,
-            pre_header_votes: [0; 3],
+            pre_header_votes: [0; 3].into(),
         };
         let mut cost =
             CostAccumulator::new(JitCost::from_block_cost(params.max_block_cost).unwrap());

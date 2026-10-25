@@ -1261,7 +1261,7 @@ mod tests {
             pre_header_version: 3,
             pre_header_parent_id: [0; 32],
             pre_header_n_bits: 0,
-            pre_header_votes: [0; 3],
+            pre_header_votes: [0; 3].into(),
         }
     }
 
@@ -1492,7 +1492,7 @@ mod tests {
             pre_header_version: 3,
             pre_header_parent_id: [0u8; 32],
             pre_header_n_bits: 0,
-            pre_header_votes: [0u8; 3],
+            pre_header_votes: [0u8; 3].into(),
         };
 
         // A cost ceiling that fits only a few of the ~2.1k-cost claims must
@@ -1563,7 +1563,7 @@ mod tests {
             pre_header_version: 3,
             pre_header_parent_id: [0u8; 32],
             pre_header_n_bits: 0,
-            pre_header_votes: [0u8; 3],
+            pre_header_votes: [0u8; 3].into(),
         };
 
         let (checked, cost, _size) = build_budget_bounded_rent_claim(
@@ -1701,7 +1701,7 @@ mod tests {
             pre_header_version: 3,
             pre_header_parent_id: [0u8; 32],
             pre_header_n_bits: 0,
-            pre_header_votes: [0u8; 3],
+            pre_header_votes: [0u8; 3].into(),
         };
 
         let (checked, _, _) = build_budget_bounded_rent_claim(

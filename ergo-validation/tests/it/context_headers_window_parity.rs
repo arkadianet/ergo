@@ -156,7 +156,7 @@ fn poison_tx_rejected_with_nine_window_accepted_with_ten() {
         pre_header_version: block_header.version,
         pre_header_parent_id: *block_header.parent_id.as_bytes(),
         pre_header_n_bits: block_header.n_bits as u64,
-        pre_header_votes: block_header.votes,
+        pre_header_votes: block_header.votes.into(),
     };
 
     let (tx_bytes, tx_id_hex) = load_poison_tx();

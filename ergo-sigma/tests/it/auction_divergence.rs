@@ -344,7 +344,7 @@ fn diagnose_auction_divergence_700001() {
                 pre_header_version: 0,
                 pre_header_parent_id: [0u8; 32],
                 pre_header_n_bits: 0,
-                pre_header_votes: [0u8; 3],
+                pre_header_votes: [0u8; 3].into(),
                 input_extensions: &[],
             };
 

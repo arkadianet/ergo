@@ -288,7 +288,7 @@ fn validate_full_block_sequential_impl(
         pre_header_version: header.version,
         pre_header_parent_id: *header.parent_id.as_bytes(),
         pre_header_n_bits: header.n_bits as u64,
-        pre_header_votes: header.votes,
+        pre_header_votes: header.votes.into(),
     };
 
     let mut overlay = BlockUtxoOverlay::new(ctx.utxo, txs);
@@ -604,7 +604,7 @@ fn validate_full_block_parallel_impl(
         pre_header_version: header.version,
         pre_header_parent_id: *header.parent_id.as_bytes(),
         pre_header_n_bits: header.n_bits as u64,
-        pre_header_votes: header.votes,
+        pre_header_votes: header.votes.into(),
     };
 
     let mut overlay = BlockUtxoOverlay::new(ctx.utxo, txs);

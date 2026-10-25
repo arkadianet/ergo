@@ -32,7 +32,7 @@ fn sized_output_trees_pass_the_production_mempool_validator_with_exact_costs() {
             pre_header_version: 4,
             pre_header_parent_id: bytes(&pre["parentId"]).try_into().unwrap(),
             pre_header_n_bits: pre["nBits"].as_u64().unwrap(),
-            pre_header_votes: bytes(&pre["votes"]).try_into().unwrap(),
+            pre_header_votes: <[u8; 3]>::try_from(bytes(&pre["votes"])).unwrap().into(),
         };
         let mut params = ProtocolParams::mainnet_default();
         params.block_version = 4;

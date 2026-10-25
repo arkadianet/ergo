@@ -30,3 +30,33 @@ pub struct CandidatePreHeader {
     /// 33-byte compressed secp256k1 miner pubkey.
     pub miner_pubkey: [u8; 33],
 }
+
+/// `CONTEXT.preHeader.votes`.
+///
+/// A header or block candidate carries three vote bytes. Scala's mempool
+/// context (`ErgoStateContext.simplifiedUpcoming`) predicts the next block
+/// with `votes = Array.emptyByteArray`, which scripts see as an empty
+/// `Coll[Byte]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreHeaderVotes {
+    /// Three vote bytes.
+    Bytes([u8; 3]),
+    /// No vote bytes.
+    Empty,
+}
+
+impl PreHeaderVotes {
+    /// The vote bytes scripts read: three, or none.
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Bytes(bytes) => bytes,
+            Self::Empty => &[],
+        }
+    }
+}
+
+impl From<[u8; 3]> for PreHeaderVotes {
+    fn from(bytes: [u8; 3]) -> Self {
+        Self::Bytes(bytes)
+    }
+}

@@ -82,7 +82,7 @@ fn validate(entry: &J, mempool: bool) -> Result<NodeVerdict, String> {
         pre_header_version: pre_version,
         pre_header_parent_id: fixed(&pre["parentId"], "preHeader.parentId")?,
         pre_header_n_bits: number(&pre["nBits"], "preHeader.nBits")?,
-        pre_header_votes: fixed(&pre["votes"], "preHeader.votes")?,
+        pre_header_votes: fixed(&pre["votes"], "preHeader.votes")?.into(),
     };
     let headers = entry["headers_hex"]
         .as_array()
