@@ -24,9 +24,7 @@ pub struct ExecutionMetadata {
 
 fn executable_identity(path: &Path) -> io::Result<Value> {
     let bytes = std::fs::read(path)?;
-    Ok(
-        json!({"path": path, "bytes": bytes.len(), "sha256": format!("{:x}", Sha256::digest(bytes))}),
-    )
+    Ok(json!({"path": path, "bytes": bytes.len(), "sha256": hex::encode(Sha256::digest(bytes))}))
 }
 
 fn command_identity() -> io::Result<Value> {
@@ -56,7 +54,7 @@ fn archive_source(source: &Value, root: &Path) -> io::Result<PathBuf> {
             "oracle source snapshot unavailable",
         )
     })?;
-    let identity = format!("{:x}", Sha256::digest(text.as_bytes()));
+    let identity = hex::encode(Sha256::digest(text.as_bytes()));
     if source["source_sha256"].as_str() != Some(&identity) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -301,7 +299,7 @@ mod tests {
         let source = "// ordinary diagnostic source fixture\n";
         let metadata = json!({
             "source_snapshot_utf8": source,
-            "source_sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
+            "source_sha256": hex::encode(Sha256::digest(source.as_bytes())),
         });
         let relative = archive_source(&metadata, root.path()).unwrap();
         assert_eq!(

@@ -8,7 +8,7 @@
 
 use crate::derivation::{DerivationPath, HARDENED_OFFSET};
 use crate::error::WalletError;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{ProjectivePoint, Scalar, SecretKey};
 use sha2::Sha512;

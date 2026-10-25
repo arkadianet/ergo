@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rerun-if-changed={}", path.display());
         rows.push(serde_json::json!({
             "path": relative, "bytes": bytes.len(),
-            "sha256": format!("{:x}", Sha256::digest(&bytes)),
+            "sha256": hex::encode(Sha256::digest(&bytes)),
         }));
     }
     let rows = canonical(&serde_json::Value::Array(rows));

@@ -719,7 +719,7 @@ fn run_oracle(
             "generation_mode": if structured { "structured-gen" } else { "oracle-mutation" },
             "ordered_corpus_sha256": corpus.iter().map(|bytes| {
                 use sha2::Digest;
-                format!("{:x}", sha2::Sha256::digest(bytes))
+                hex::encode(sha2::Sha256::digest(bytes))
             }).collect::<Vec<_>>(),
         }),
     ) {
