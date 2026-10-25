@@ -659,6 +659,11 @@ pub struct StateStore {
     /// `set_blocks_to_keep`), so a testnet store proves with testnet
     /// epochs instead of silently assuming mainnet.
     difficulty_params: ergo_chain_spec::DifficultyParams,
+    /// The network this store follows, which labels and selects the rules
+    /// for the emission identity (`emission.rs`). Defaults to mainnet at
+    /// `open`; boot sets the configured network through
+    /// [`Self::set_network`] before genesis or any apply.
+    network: ergo_chain_spec::Network,
     /// Mode 3 retention window: `-1` = archive (no pruning, default),
     /// `0` = canonical Mode 6 headers-only (never prunes blocks
     /// because no full-block apply happens), `> 0` = suffix-window
@@ -1096,7 +1101,7 @@ impl StateStore {
                 self.chain_state.to_persisted().serialize().as_slice(),
             )?;
         }
-        emission::seed_genesis(&write_txn, boxes)?;
+        emission::seed_genesis(&write_txn, boxes, self.network)?;
         write_txn.commit()?;
         self.tree.clear_dirty();
         // Genesis writes synchronously above, so redb already holds these.
@@ -1858,6 +1863,54 @@ impl StateStore {
     /// The difficulty schedule the NiPoPoW prover uses.
     pub fn difficulty_params(&self) -> &ergo_chain_spec::DifficultyParams {
         &self.difficulty_params
+    }
+
+    /// Set the network this store follows (mainnet at `open`). Boot calls
+    /// this with `chain_spec.network` right after open, before genesis, any
+    /// apply, or enabling the persist pipeline.
+    ///
+    /// It also repairs stores written before #666, where a testnet or devnet
+    /// node recorded its emission identity as mainnet. If any identity row
+    /// names another network, every row is cleared and the tip's identity is
+    /// recovered again under `network`. Returns whether rows were cleared.
+    pub fn set_network(&mut self, network: ergo_chain_spec::Network) -> Result<bool, StateError> {
+        if self.persist_pipeline.is_some() {
+            return Err(StateError::InvalidPrecondition {
+                what: "set_network: persist pipeline already enabled",
+            });
+        }
+        self.network = network;
+        let txn = crate::begin_write_qr(&self.db)?;
+        let cleared = emission::clear_if_other_network(&txn, network)?;
+        if cleared {
+            emission::recover_identity(&txn, &self.chain_state.best_full_block_id, 4096, network)?;
+        }
+        txn.commit()?;
+        // Recovery is best effort: missing, pruned or too-distant history
+        // leaves the tip without a row.
+        if cleared {
+            if self
+                .emission_identity(&self.chain_state.best_full_block_id)?
+                .is_some()
+            {
+                tracing::warn!(
+                    ?network,
+                    "emission identity was recorded under another network; rebuilt it from the tip",
+                );
+            } else {
+                tracing::warn!(
+                    ?network,
+                    "emission identity was recorded under another network; cleared it, but local \
+                     history could not rebuild it at the tip",
+                );
+            }
+        }
+        Ok(cleared)
+    }
+
+    /// The network set by [`Self::set_network`] (mainnet by default).
+    pub fn network(&self) -> ergo_chain_spec::Network {
+        self.network
     }
 
     /// Read the current `blocks_to_keep` setting. Returns `-1`
@@ -4312,6 +4365,7 @@ mod tests {
             store.chain_state.best_full_block_id,
             2,
             std::iter::empty(),
+            store.network,
         )
         .unwrap();
         let result = store.apply_utxo_changes(

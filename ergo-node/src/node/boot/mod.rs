@@ -402,6 +402,13 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     // lengths + use_last_epochs) — override the mainnet open-default
     // so a testnet store proves with testnet epochs.
     store.set_difficulty_params(config.chain_spec.difficulty.clone());
+    // The emission identity is labelled with, and tracked under the rules
+    // of, the configured network. Also repairs testnet and devnet stores
+    // that recorded mainnet (#666). Before the persist pipeline starts.
+    store.set_network(config.chain_spec.network).map_err(|e| {
+        report_boot_storage_failure(&db_path, "set_network", &e);
+        Box::new(e) as NodeError
+    })?;
     // Post-open stamp: write the sentinel for fresh + legacy dirs.
     // The early gate above already refused any mismatch on existing
     // sentinels; this call is a no-op when one is already present.
