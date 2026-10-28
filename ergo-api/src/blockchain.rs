@@ -43,6 +43,7 @@ mod boxes;
 mod byaddress;
 mod byergotree;
 mod bytemplate;
+mod non_p2pk;
 mod range;
 mod storage_rent;
 mod tokens;
@@ -70,6 +71,7 @@ pub use byaddress::{
 pub use byergotree::{boxes_by_ergo_tree_post_handler, boxes_unspent_by_ergo_tree_post_handler};
 pub(crate) use bytemplate::pool_unspent_for_template;
 pub use bytemplate::{boxes_by_template_hash_handler, boxes_unspent_by_template_hash_handler};
+pub use non_p2pk::{boxes_non_p2pk_handler, NonP2pkQuery, NonP2pkResponse};
 pub use range::{
     box_range_get_handler, box_range_post_handler, transaction_range_get_handler,
     transaction_range_post_handler,

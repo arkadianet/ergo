@@ -807,6 +807,7 @@ fn production_inventory_tracks_aliases_and_all_conditional_rust_routes() {
         ("/api/v1/mining/minerStats", "get"),
         ("/api/v1/indexer/status", "get"),
         ("/api/v1/transactions/{txId}/detail", "get"),
+        ("/blockchain/box/nonP2pk", "get"),
         ("/blockchain/storageRent/eligibleAt/{height}", "get"),
         ("/blockchain/storageRent/maturesAt/{height}", "get"),
         ("/blockchain/storageRent/maturesInRange", "get"),

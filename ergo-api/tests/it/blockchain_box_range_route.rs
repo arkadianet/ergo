@@ -8,6 +8,9 @@
 //!   route emits box-ids, not transactions).
 //! - Wire shape: bare `[ModifierId]` array — global-range projection of
 //!   `IndexedErgoBox.box_id()` only, no enrichment.
+//! - `/blockchain/box/nonP2pk` (Rust-only): forward scan that skips P2PK
+//!   trees, honours `limit` / `scanLimit` / `unspentOnly`, and returns a
+//!   resume cursor that is `null` at the end of the index.
 //! - Scala mounts no method directive (`*`); GET and POST go to the
 //!   same dispatch and return identical bodies for identical queries.
 
@@ -98,6 +101,87 @@ async fn range_rejects_offsets_outside_scala_int_domain() {
     let (status, body) = json_get(app, "/blockchain/box/range?offset=2147483647&limit=0").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, serde_json::json!([]));
+}
+
+// ---- /blockchain/box/nonP2pk ------------------------------------------------
+
+#[tokio::test]
+async fn non_p2pk_503_indexer_syncing() {
+    let app = build_app(Arc::new(StubIndexer::with_status(IndexerStatus::Syncing)));
+    let (status, body) = json_get(app, "/blockchain/box/nonP2pk").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["reason"], "indexer-syncing");
+}
+
+#[tokio::test]
+async fn non_p2pk_400_on_out_of_range_limits() {
+    for query in ["limit=0", "limit=16385", "scanLimit=0", "scanLimit=262145"] {
+        let app = build_app(Arc::new(StubIndexer::caught_up(Vec::new())));
+        let (status, body) = json_get(app, &format!("/blockchain/box/nonP2pk?{query}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(body["reason"], "bad-request", "{query}");
+    }
+}
+
+#[tokio::test]
+async fn non_p2pk_200_skips_p2pk_and_ends_with_null_cursor() {
+    let app = build_app(Arc::new(StubIndexer::caught_up(mixed_boxes())));
+    let (status, body) = json_get(app, "/blockchain/box/nonP2pk").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(global_indexes(&body), vec![1, 3, 5]);
+    assert_eq!(body["nextIndex"], serde_json::Value::Null);
+    assert_eq!(body["scanned"], 6);
+    let first = &body["items"][0];
+    assert_eq!(
+        first["ergoTree"],
+        hex::encode(contract_box(1, false).box_data.candidate.ergo_tree_bytes())
+    );
+    assert!(first["boxId"].is_string());
+    assert!(first["address"].is_string());
+}
+
+#[tokio::test]
+async fn non_p2pk_200_limit_stops_after_last_match_and_resumes() {
+    let stub = Arc::new(StubIndexer::caught_up(mixed_boxes()));
+    let (_, page1) = json_get(build_app(stub.clone()), "/blockchain/box/nonP2pk?limit=2").await;
+    assert_eq!(global_indexes(&page1), vec![1, 3]);
+    assert_eq!(page1["nextIndex"], 4);
+    assert_eq!(page1["scanned"], 4);
+
+    let (_, page2) = json_get(
+        build_app(stub),
+        "/blockchain/box/nonP2pk?limit=2&fromIndex=4",
+    )
+    .await;
+    assert_eq!(global_indexes(&page2), vec![5]);
+    assert_eq!(page2["nextIndex"], serde_json::Value::Null);
+    assert_eq!(page2["scanned"], 2);
+}
+
+#[tokio::test]
+async fn non_p2pk_200_scan_limit_bounds_the_walk() {
+    let app = build_app(Arc::new(StubIndexer::caught_up(mixed_boxes())));
+    let (status, body) = json_get(app, "/blockchain/box/nonP2pk?fromIndex=2&scanLimit=2").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(global_indexes(&body), vec![3]);
+    assert_eq!(body["nextIndex"], 4);
+    assert_eq!(body["scanned"], 2);
+}
+
+#[tokio::test]
+async fn non_p2pk_200_unspent_only_drops_spent_boxes() {
+    let app = build_app(Arc::new(StubIndexer::caught_up(mixed_boxes())));
+    let (_, body) = json_get(app, "/blockchain/box/nonP2pk?unspentOnly=true").await;
+    assert_eq!(global_indexes(&body), vec![1, 5]);
+}
+
+#[tokio::test]
+async fn non_p2pk_200_past_end_is_empty() {
+    let app = build_app(Arc::new(StubIndexer::caught_up(mixed_boxes())));
+    let (_, body) = json_get(app, "/blockchain/box/nonP2pk?fromIndex=100").await;
+    assert_eq!(global_indexes(&body), Vec::<i64>::new());
+    assert_eq!(body["nextIndex"], serde_json::Value::Null);
+    assert_eq!(body["scanned"], 0);
 }
 
 // ---- 200 dispatch + projection --------------------------------------------
@@ -256,6 +340,58 @@ fn fixture_box(pubkey: [u8; 33], height: i32, value: u64, global_index: i64) -> 
         box_data,
         global_index,
     }
+}
+
+/// `sigmaProp(true)` script: a minimal non-P2PK tree.
+fn contract_tree() -> ErgoTree {
+    ErgoTree {
+        version: 0,
+        has_size: false,
+        constant_segregation: false,
+        reserved_header_bits: 0,
+        constants: Vec::new(),
+        body: Expr::Const {
+            tpe: SigmaType::SSigmaProp,
+            val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+        },
+    }
+}
+
+fn contract_box(global_index: i64, spent: bool) -> IndexedErgoBox {
+    let mut b = fixture_box([0x02; 33], 100, 1_000, global_index);
+    b.box_data.candidate = ErgoBoxCandidate::new(
+        1_000,
+        contract_tree(),
+        100,
+        Vec::new(),
+        AdditionalRegisters::empty(),
+    )
+    .expect("ErgoBoxCandidate::new");
+    if spent {
+        b.spending_tx_id = Some(ergo_primitives::digest::Digest32::from_bytes([0xEE; 32]));
+    }
+    b
+}
+
+/// Global indexes 0..6: P2PK at 0, 2, 4; contracts at 1, 3 (spent), 5.
+fn mixed_boxes() -> Vec<IndexedErgoBox> {
+    vec![
+        fixture_box([0x02; 33], 100, 1_000, 0),
+        contract_box(1, false),
+        fixture_box([0x03; 33], 100, 1_000, 2),
+        contract_box(3, true),
+        fixture_box([0x04; 33], 100, 1_000, 4),
+        contract_box(5, false),
+    ]
+}
+
+fn global_indexes(body: &serde_json::Value) -> Vec<i64> {
+    body["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .map(|b| b["globalIndex"].as_i64().expect("globalIndex"))
+        .collect()
 }
 
 fn build_app(indexer: Arc<dyn IndexerQuery>) -> axum::Router {
