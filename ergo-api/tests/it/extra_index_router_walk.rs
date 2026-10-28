@@ -239,6 +239,12 @@ const ROUTES: &[RouteRowStatic] = &[
 /// — operators consume one OpenAPI document covering everything mounted,
 /// regardless of provenance.
 const RUST_EXCLUSIVE_ROUTES: &[RouteRowStatic] = &[
+    // Non-P2PK box scan. Mounts whenever the indexer is plumbed.
+    RouteRowStatic {
+        methods: &["GET"],
+        path: "/blockchain/box/nonP2pk",
+        phase: Phase::P2,
+    },
     // Storage-rent surface. Mounts whenever the indexer is plumbed
     // AND the bridge supplies a `ChainParamsView`.
     RouteRowStatic {

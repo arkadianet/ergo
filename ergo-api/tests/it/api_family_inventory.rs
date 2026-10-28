@@ -191,6 +191,7 @@ fn canonical_rust_openapi_is_the_union_of_both_fragments_and_known_aliases() {
 
     let required = BTreeSet::from([
         operation("/api/v1/transactions/{txId}/detail", "get"),
+        operation("/blockchain/box/nonP2pk", "get"),
         operation("/blockchain/storageRent/eligibleAt/{height}", "get"),
         operation("/blockchain/storageRent/maturesAt/{height}", "get"),
         operation("/blockchain/storageRent/maturesInRange", "get"),

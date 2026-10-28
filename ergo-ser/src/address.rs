@@ -68,6 +68,11 @@ pub fn encode_address(network: NetworkPrefix, tree: &ErgoTree, ergo_tree_bytes: 
     }
 }
 
+/// Whether `tree` encodes as a P2PK address under [`encode_address`].
+pub fn is_p2pk(tree: &ErgoTree) -> bool {
+    detect_p2pk(tree).is_some()
+}
+
 /// P2PK detection: tree must have no segregated constants and a body that
 /// is a constant `SigmaProp(ProveDlog(ge))` (Scala `SigmaPropConstant`).
 fn detect_p2pk(tree: &ErgoTree) -> Option<&GroupElement> {

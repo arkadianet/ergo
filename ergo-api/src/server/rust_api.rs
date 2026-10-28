@@ -163,6 +163,18 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
             get(crate::blockchain::tx_detail_handler),
         );
 
+    let gated: FamilyRouter<BlockchainState> = FamilyRouter::new(ApiFamily::Rust)
+        .route(
+            "/blockchain/box/nonP2pk",
+            "/blockchain/box/nonP2pk",
+            &["get"],
+            get(crate::blockchain::boxes_non_p2pk_handler),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            enforce_status_gate,
+        ));
+
     let conditional: FamilyRouter<BlockchainState> = if state.chain_params.is_some() {
         FamilyRouter::new(ApiFamily::Rust)
             .route(
@@ -190,7 +202,10 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
     } else {
         FamilyRouter::new(ApiFamily::Rust)
     };
-    always_open.merge(conditional).with_state(state)
+    always_open
+        .merge(gated)
+        .merge(conditional)
+        .with_state(state)
 }
 
 /// The retired native `/api/v1/wallet/*` paths, which answer `410
