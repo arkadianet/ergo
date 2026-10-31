@@ -170,7 +170,7 @@ dns-lookup = "4"
 # Test infrastructure
 tempfile = "3"
 proptest = "1"
-rand     = "0.8"
+rand     = "0.10"
 
 # Default test profile: opt-level 1 cuts crypto-heavy oracle tests
 # from ~4min to ~30s while keeping debug info for backtraces.
