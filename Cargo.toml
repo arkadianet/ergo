@@ -126,7 +126,7 @@ redb_legacy = { package = "redb", version = "=2.6.3" }
 lru               = "0.18"
 crossbeam-channel = "0.5"
 arc-swap          = "1"
-parking_lot       = "0.12"
+parking_lot       = "0.13"
 scoped-tls-hkt    = "0.1.5"
 
 # Parallelism
