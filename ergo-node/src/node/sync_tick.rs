@@ -289,7 +289,7 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
             .filter(|(addr, _)| state.registry.peers.contains_key(addr))
             .collect();
         let connected_addrs: Vec<PeerId> = connected.iter().map(|(a, _)| *a).collect();
-        let seed = rand::RngCore::next_u64(&mut rand::rngs::OsRng);
+        let seed = rand::Rng::next_u64(&mut rand::rand_core::UnwrapErr(rand::rngs::SysRng));
         let selected = state
             .coordinator
             .peers_to_sync_with(&connected_addrs, now, seed);

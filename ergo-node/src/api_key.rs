@@ -5,7 +5,7 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 
 use ergo_api::auth::ApiSecurity;
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::SysRng, TryRng};
 use zeroize::Zeroizing;
 
 use crate::config::ApiKeyCommand;
@@ -97,7 +97,7 @@ pub(crate) struct GeneratedKey {
 impl GeneratedKey {
     pub(crate) fn generate(path: &Path) -> Result<Self> {
         let mut random = Zeroizing::new([0u8; 32]);
-        OsRng
+        SysRng
             .try_fill_bytes(random.as_mut())
             .map_err(|_| fail(1, "generate", path, "OS entropy unavailable"))?;
         let mut secret = Zeroizing::new([0u8; 64]);

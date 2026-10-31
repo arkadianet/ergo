@@ -13,7 +13,7 @@ authors    = ["Konstantin Knizhnik <knizhnik@garret.ru>", "Ross Weir"]
 # workspace's, so the vendored code builds against what it was written for.
 [dependencies]
 bytes     = { version = "1.0.1", default-features = false }
-rand      = { version = "0.10.2", default-features = false }
+rand      = { version = "0.8.3", default-features = false }
 blake2    = { version = "0.10.6", default-features = false }
 anyhow    = { version = "1.0", default-features = false }
 byteorder = { version = "1.4.3", default-features = false }
@@ -21,7 +21,7 @@ base16    = { version = "0.2.1", default-features = false, features = ["alloc"] 
 sha2      = { version = "0.9.8", default-features = false }
 
 [dev-dependencies]
-rand = { version = "0.10.2", features = ["std"] }
+rand = { version = "0.8.3", features = ["std"] }
 # The crates.io release this crate replaced, for tests/differential_0_1_1.rs.
 ergo_avltree_rust_0_1_1 = { package = "ergo_avltree_rust", version = "=0.1.1" }
 

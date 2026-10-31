@@ -206,15 +206,21 @@ impl EncryptedSecretV2 {
     ) -> Result<Self, WalletError> {
         let mut salt = [0u8; 32];
         let mut iv = [0u8; 12];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut salt);
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut iv);
+        rand::Rng::fill_bytes(
+            &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+            &mut salt,
+        );
+        rand::Rng::fill_bytes(&mut rand::rand_core::UnwrapErr(rand::rngs::SysRng), &mut iv);
         let key = crate::encryption::derive_key_argon2id(password.as_bytes(), &salt, params)?;
         let seed_aad = Self::aad(params, &salt, &iv, use_pre_1627);
         let sealed = crate::encryption::seal(&key, &iv, seed, &seed_aad)?;
         let data_key = data_key
             .map(|data_key| {
                 let mut key_iv = [0u8; 12];
-                rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key_iv);
+                rand::Rng::fill_bytes(
+                    &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                    &mut key_iv,
+                );
                 crate::encryption::seal(
                     &key,
                     &key_iv,
@@ -1081,8 +1087,11 @@ impl SecretStorage {
         // Scala `AES.encrypt` (32 bytes).
         let mut salt = [0u8; 32];
         let mut iv = [0u8; 12];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut salt);
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut iv);
+        rand::Rng::fill_bytes(
+            &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+            &mut salt,
+        );
+        rand::Rng::fill_bytes(&mut rand::rand_core::UnwrapErr(rand::rngs::SysRng), &mut iv);
 
         // Java PBEKeySpec encodes the password as UTF-8 for these PRFs.
         let key = crate::encryption::derive_key_pbkdf2_with_prf(

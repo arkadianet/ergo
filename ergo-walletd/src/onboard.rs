@@ -39,7 +39,10 @@ fn invalid(message: impl Into<String>) -> ConfigError {
 /// 32 random bytes as 64 hex characters, the node's credential format.
 fn new_secret() -> Zeroizing<String> {
     let mut random = Zeroizing::new([0u8; 32]);
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, random.as_mut());
+    rand::Rng::fill_bytes(
+        &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+        random.as_mut(),
+    );
     Zeroizing::new(hex::encode(random.as_ref()))
 }
 

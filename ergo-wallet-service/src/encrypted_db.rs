@@ -86,7 +86,10 @@ impl DataKey {
     /// A fresh random key from the operating system.
     pub fn generate() -> Self {
         let mut bytes = Zeroizing::new([0u8; 32]);
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, bytes.as_mut());
+        rand::Rng::fill_bytes(
+            &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+            bytes.as_mut(),
+        );
         Self(bytes)
     }
 
@@ -228,7 +231,10 @@ impl EncryptedBackend {
 
     fn initialize(file: File, key: &DataKey) -> Result<Self, EncryptedDbError> {
         let mut file_id = [0u8; 16];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut file_id);
+        rand::Rng::fill_bytes(
+            &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+            &mut file_id,
+        );
         let backend = Self::assemble(
             file,
             key,
@@ -456,7 +462,10 @@ impl EncryptedBackend {
     fn store_copy(&self, index: u64, copy: usize, sequence: u64, plain: &[u8]) -> io::Result<()> {
         debug_assert_eq!(plain.len(), SECTOR);
         let mut nonce = [0u8; NONCE];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+        rand::Rng::fill_bytes(
+            &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+            &mut nonce,
+        );
         let sealed = self
             .cipher
             .encrypt(
