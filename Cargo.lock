@@ -815,7 +815,7 @@ dependencies = [
  "num-integer",
  "num-traits",
  "proptest",
- "rand 0.8.6",
+ "rand 0.10.2",
  "redb 4.3.0",
  "reqwest",
  "serde",
@@ -844,7 +844,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "ergo_avltree_rust",
- "rand 0.8.6",
+ "rand 0.10.2",
  "sha2 0.9.9",
 ]
 
@@ -1021,7 +1021,7 @@ dependencies = [
  "maxminddb",
  "num-bigint",
  "parking_lot",
- "rand 0.8.6",
+ "rand 0.10.2",
  "rayon",
  "redb 2.6.3",
  "redb 4.3.0",
@@ -1145,7 +1145,7 @@ dependencies = [
  "lru",
  "num-bigint",
  "proptest",
- "rand 0.8.6",
+ "rand 0.10.2",
  "redb 2.6.3",
  "redb 4.3.0",
  "scoped-tls-hkt",
@@ -1231,7 +1231,7 @@ dependencies = [
  "num-bigint",
  "pbkdf2",
  "predicates",
- "rand 0.8.6",
+ "rand 0.10.2",
  "rpassword",
  "serde",
  "serde_json",
@@ -1270,7 +1270,7 @@ dependencies = [
  "hmac",
  "k256",
  "parking_lot",
- "rand 0.8.6",
+ "rand 0.10.2",
  "redb 2.6.3",
  "redb 4.3.0",
  "serde",
@@ -1311,7 +1311,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "parking_lot",
- "rand 0.8.6",
+ "rand 0.10.2",
  "redb 4.3.0",
  "reqwest",
  "rustix",
@@ -1340,7 +1340,7 @@ dependencies = [
  "blake2",
  "byteorder",
  "bytes",
- "rand 0.8.6",
+ "rand 0.8.8",
  "sha2 0.9.9",
 ]
 
@@ -1562,7 +1562,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "777e981195aca8a5251c1801fa2f32f1dc0dc63cba8953722ede90a5a3b5517e"
 dependencies = [
  "derive_more",
- "rand 0.8.6",
+ "rand 0.8.8",
  "thiserror 1.0.69",
 ]
 
@@ -2423,9 +2423,9 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.8.6"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -3486,7 +3486,7 @@ dependencies = [
  "http",
  "httparse",
  "log",
- "rand 0.8.6",
+ "rand 0.8.8",
  "sha1",
  "thiserror 1.0.69",
  "utf-8",
