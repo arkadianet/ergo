@@ -134,6 +134,20 @@ where
             {
                 return Outcome::WriteRejected;
             }
+            // A size-delimited tree's body parse can read past the last byte the
+            // value consumes. When the consumed prefix alone also runs out of
+            // input, the verdict rested on trailing bytes no writer reproduces.
+            // Scala shares this: for the transaction seed in
+            // nightly_roundtrip_2026_10_31.tsv, sigma-state 6.0.6 accepts the
+            // input, writes exactly our bytes, and rejects both those and the
+            // consumed prefix.
+            if matches!(e, ReadError::UnexpectedEnd { .. }) && r1.position() < input.len() {
+                let mut prefix = VlqReader::new(&input[..r1.position()])
+                    .with_activated_script_version(CURRENT_ACTIVATED_VERSION);
+                if matches!(decode(&mut prefix), Err(ReadError::UnexpectedEnd { .. })) {
+                    return Outcome::WriteRejected;
+                }
+            }
             // A nested box's tree can read past the box's own bytes before a
             // validation failure rewinds the reader, so its verdict depends on
             // what follows the box: a dropped suffix, or a later field the
@@ -142,13 +156,22 @@ where
             // our bytes and then rejects them. Exempt it only when every
             // retained box reappears verbatim in the output and the output is
             // not the input itself; a corrupted box, or the same bytes failing
-            // twice, still report a Bug.
+            // twice, still report a Bug. The writer may also re-encode the box
+            // itself canonically (a non-canonical VLQ height), changing the
+            // bytes its own script's parse looked ahead into: sigma-state 6.0.6
+            // does the same for the constant seed in
+            // nightly_roundtrip_2026_10_31.tsv. A box may reappear in its
+            // written form only when its script is opaque.
             let boxes = v1.retained_boxes();
+            let appears =
+                |bytes: &[u8]| !bytes.is_empty() && b1.windows(bytes.len()).any(|w| w == bytes);
             if !boxes.is_empty()
                 && b1 != input
-                && boxes
-                    .iter()
-                    .all(|bx| !bx.is_empty() && b1.windows(bx.len()).any(|w| w == *bx))
+                && boxes.iter().all(|bx| {
+                    appears(bx.received)
+                        || (box_script_is_opaque(bx.received)
+                            && bx.written.iter().any(|form| appears(form)))
+                })
             {
                 return Outcome::WriteRejected;
             }
@@ -201,12 +224,12 @@ where
 
     // Follow Scala's one-level-per-pass Upcast stripping to a byte fixed point.
     let mut bytes = b1;
-    let mut value = &v2;
-    let mut owned_value;
+    let mut written = v1;
+    let mut value = v2;
     let mut rounds = 0;
     loop {
         let mut writer = VlqWriter::new();
-        if let Err(e) = encode(&mut writer, value) {
+        if let Err(e) = encode(&mut writer, &value) {
             return Outcome::bug(format!("re-encode of own output failed: {e:?}"), &bytes);
         }
         let next_bytes = writer.result();
@@ -221,7 +244,14 @@ where
             }
             break;
         }
-        if !value.has_pending_upcast_strip() {
+        // Pre-v3, a re-read can cast an operand expression up where the
+        // writer stripped a cast from a constant inside it, e.g.
+        // `Div(Mul(Byte, Byte), Short)`. The writer keeps that cast, so the
+        // bytes change once more; sigma-state 6.0.6 writes the same sequence
+        // (seed nightly-2026-10-31-expression-cast-reinserted). Follow a step
+        // that changed the value as the model predicted; the same value
+        // written to new bytes is still a Bug.
+        if !value.has_pending_upcast_strip() && value == written {
             return Outcome::bug("serialize is not a fixed point (b1 != b2)".into(), input);
         }
         rounds += 1;
@@ -254,14 +284,20 @@ where
             return Outcome::bug("structure changed across re-encode".into(), input);
         }
         bytes = next_bytes;
-        owned_value = next;
-        value = &owned_value;
+        written = std::mem::replace(&mut value, next);
     }
     Outcome::Accepted
 }
 
 fn tree_is_unparsed(tree: &ergo_ser::ergo_tree::ErgoTree) -> bool {
     matches!(tree.body, ergo_ser::opcode::Expr::Unparsed(_))
+}
+
+/// Whether the box in `bytes` reads with a script whose body did not parse.
+fn box_script_is_opaque(bytes: &[u8]) -> bool {
+    let mut r = VlqReader::new(bytes).with_activated_script_version(CURRENT_ACTIVATED_VERSION);
+    ergo_ser::ergo_box::read_ergo_box(&mut r)
+        .is_ok_and(|b| tree_is_unparsed(b.candidate.ergo_tree()))
 }
 
 fn box_candidate_is_unparsed(c: &ergo_ser::ergo_box::ErgoBoxCandidate) -> bool {
@@ -1942,8 +1978,8 @@ mod tests {
         }
     }
 
-    /// Runs 36775308168 (sigma-state 6.0.6) and 38036611491 (6.0.7): every
-    /// first serialization matches the reference's.
+    /// Runs 36775308168 (sigma-state 6.0.6), 38036611491 (6.0.7) and
+    /// 41182640735 (6.0.6): every first serialization matches the reference's.
     #[test]
     fn nightly_crashes_match_scala_serialization_and_outcomes() {
         std::thread::Builder::new()
@@ -1952,6 +1988,7 @@ mod tests {
                 for line in [
                     include_str!("../../test-vectors/scala/sigma/nightly_roundtrip_2026_10_01.tsv"),
                     include_str!("../../test-vectors/scala/sigma/nightly_roundtrip_2026_10_10.tsv"),
+                    include_str!("../../test-vectors/scala/sigma/nightly_roundtrip_2026_10_31.tsv"),
                 ]
                 .iter()
                 .flat_map(|tsv| tsv.lines())
@@ -1982,13 +2019,26 @@ mod tests {
                     }
                     let mut reader = VlqReader::new(&bytes).with_activated_script_version(3);
                     let mut writer = VlqWriter::new();
-                    if fields[0] == "ergo_box_candidate" {
-                        let value =
-                            ergo_ser::ergo_box::read_ergo_box_candidate(&mut reader).unwrap();
-                        ergo_ser::ergo_box::write_ergo_box_candidate(&mut writer, &value).unwrap();
-                    } else {
-                        let value = read_ergo_tree_gated(&mut reader).unwrap();
-                        ergo_ser::ergo_tree::write_ergo_tree(&mut writer, &value).unwrap();
+                    match fields[0] {
+                        "ergo_box_candidate" => {
+                            let value =
+                                ergo_ser::ergo_box::read_ergo_box_candidate(&mut reader).unwrap();
+                            ergo_ser::ergo_box::write_ergo_box_candidate(&mut writer, &value)
+                                .unwrap();
+                        }
+                        "constant" => {
+                            let value = ergo_ser::sigma_value::read_constant(&mut reader).unwrap();
+                            write_constant_pair(&mut writer, &value).unwrap();
+                        }
+                        "transaction" => {
+                            let value =
+                                ergo_ser::transaction::read_transaction(&mut reader).unwrap();
+                            ergo_ser::transaction::write_transaction(&mut writer, &value).unwrap();
+                        }
+                        _ => {
+                            let value = read_ergo_tree_gated(&mut reader).unwrap();
+                            ergo_ser::ergo_tree::write_ergo_tree(&mut writer, &value).unwrap();
+                        }
                     }
                     assert_eq!(hex::encode(writer.result()), fields[3], "{}", fields[1]);
                     let expected = match fields[2] {
