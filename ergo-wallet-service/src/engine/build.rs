@@ -2131,7 +2131,7 @@ mod tests {
         // 2 ERG would take the NFT box and 200 more.
         match pay(2_000_000_000).err() {
             Some(WalletAdminError::BadRequest(detail)) => {
-                assert!(detail.contains("more than 100 inputs"), "{detail}")
+                assert!(detail.contains("within 100 inputs"), "{detail}")
             }
             other => panic!("expected bad_request, got {other:?}"),
         }

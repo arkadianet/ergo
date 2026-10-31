@@ -63,8 +63,8 @@ pub trait BoxSelector {
     /// change amounts on success, or `WalletError::BoxSelection` if no valid
     /// selection exists (insufficient funds, missing token, duplicate candidate
     /// ids, or an unrepresentable selected ERG/token total), or
-    /// `WalletError::InputLimit` if the candidates can fund the target only
-    /// with more than [`MAX_SELECTED_INPUTS`] boxes.
+    /// `WalletError::InputLimit` if the candidates fund the target but no
+    /// selection within [`MAX_SELECTED_INPUTS`] boxes was found.
     fn select(
         &self,
         candidates: &[BoxSummary],

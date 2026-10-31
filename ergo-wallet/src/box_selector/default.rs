@@ -1,9 +1,9 @@
 //! DefaultBoxSelector port from Scala's `DefaultBoxSelector.scala`.
 //!
-//! Algorithm: sort candidates by ERG value DESC. First take the boxes that
-//! hold a token the target still needs, until every required token is
-//! covered; then take the largest remaining boxes until the target ERG is
-//! covered. Scala takes ERG boxes first and token boxes after; taking token
+//! Algorithm: sort candidates by ERG value DESC. First, for each required
+//! token, take the boxes holding the most of it until it is covered; then take
+//! the largest remaining boxes until the target ERG is covered. Scala takes
+//! ERG boxes first and token boxes after; taking token
 //! boxes first counts their ERG toward the target, and never sweeps every box
 //! larger than a low-value token box to reach it. When the natural change
 //! would fall below `min_change_value`, prefer additional inputs until change
@@ -41,20 +41,29 @@ impl BoxSelector for DefaultBoxSelector {
         let mut picked = Picked::default();
         let mut used = vec![false; sorted.len()];
 
-        // 1. Boxes holding a token the target still needs. A box without one
-        //    only adds ERG, which step 2 takes from the largest boxes instead.
-        for (index, candidate) in sorted.iter().enumerate() {
-            if picked.tokens_covered(target) {
-                break;
+        // 1. For each required token, the unused boxes holding the most of it
+        //    until it is covered: largest first takes the fewest boxes for one
+        //    token, and a box taken for one token counts toward the others. A
+        //    box without a required token only adds ERG, which step 2 takes
+        //    from the largest boxes instead.
+        for (token_id, required) in &target.tokens {
+            let mut holders: Vec<usize> = (0..sorted.len())
+                .filter(|&index| {
+                    !used[index] && sorted[index].tokens.get(token_id).is_some_and(|&a| a > 0)
+                })
+                .collect();
+            // Stable: equal amounts keep the larger ERG value first.
+            holders.sort_by_key(|&index| Reverse(sorted[index].tokens[token_id]));
+            for index in holders {
+                if picked.tokens.get(token_id).copied().unwrap_or(0) >= *required {
+                    break;
+                }
+                if picked.ids.len() == MAX_SELECTED_INPUTS {
+                    return at_input_limit(picked, candidates, target);
+                }
+                picked.add(sorted[index])?;
+                used[index] = true;
             }
-            if !picked.still_needs_token_of(candidate, target) {
-                continue;
-            }
-            if picked.ids.len() == MAX_SELECTED_INPUTS {
-                return at_input_limit(picked, candidates, target);
-            }
-            picked.add(candidate)?;
-            used[index] = true;
         }
         if !picked.tokens_covered(target) {
             // Step 1 took every box holding a token that is still short.
@@ -126,16 +135,6 @@ impl Picked {
             .all(|(id, required)| self.tokens.get(id).copied().unwrap_or(0) >= *required)
     }
 
-    /// Whether `candidate` holds a required token not yet fully covered.
-    fn still_needs_token_of(&self, candidate: &BoxSummary, target: &SelectionTarget) -> bool {
-        candidate.tokens.keys().any(|id| {
-            target
-                .tokens
-                .get(id)
-                .is_some_and(|required| self.tokens.get(id).copied().unwrap_or(0) < *required)
-        })
-    }
-
     /// The target ERG and every required token are covered, whatever the change.
     fn funded(&self, target: &SelectionTarget) -> bool {
         self.erg >= target.erg_amount && self.tokens_covered(target)
@@ -161,7 +160,9 @@ impl Picked {
 
 /// The selection holds [`MAX_SELECTED_INPUTS`] boxes and needs another. A
 /// funded selection lacks only a viable change amount, so it is returned as
-/// when every candidate is used. Otherwise this is a shortfall if all the
+/// when every candidate is used. So is one box that funds the target alone,
+/// which the greedy order can miss when many tokens are required, each with a
+/// larger holder elsewhere. Otherwise this is a shortfall if all the
 /// candidates together cannot fund the target, and the input limit if they can.
 fn at_input_limit(
     picked: Picked,
@@ -171,9 +172,21 @@ fn at_input_limit(
     if picked.funded(target) {
         return Ok(picked.into_result(target));
     }
+    let funds_alone = |candidate: &&BoxSummary| {
+        candidate.value >= target.erg_amount
+            && target
+                .tokens
+                .iter()
+                .all(|(id, required)| candidate.tokens.get(id).copied().unwrap_or(0) >= *required)
+    };
+    if let Some(candidate) = candidates.iter().find(funds_alone) {
+        let mut alone = Picked::default();
+        alone.add(candidate)?;
+        return Ok(alone.into_result(target));
+    }
     Err(candidate_shortfall(candidates, target).unwrap_or_else(|| {
         WalletError::InputLimit(format!(
-            "covering the target takes more than {MAX_SELECTED_INPUTS} inputs; \
+            "the selector could not cover the target within {MAX_SELECTED_INPUTS} inputs; \
              consolidate the wallet's boxes or name the inputs explicitly"
         ))
     }))
@@ -389,5 +402,47 @@ mod tests {
         let result = DefaultBoxSelector.select(&candidates, &target).unwrap();
         assert_eq!(result.selected_ids.len(), MAX_SELECTED_INPUTS);
         assert_eq!(result.change_erg, 1);
+    }
+
+    #[test]
+    fn the_largest_token_holder_is_taken_before_larger_erg_boxes() {
+        // 150 high-value boxes with 1 token each, and one low-value box with
+        // all 120 required: in ERG order the cap fills with partial holders.
+        let mut candidates: Vec<_> = (1..=150).map(|id| candidate(id, 100, 1)).collect();
+        candidates.push(candidate(0xFF, 10, 120));
+        let mut target = target(50);
+        target.tokens.insert([7; 32], 120);
+        let result = DefaultBoxSelector.select(&candidates, &target).unwrap();
+        assert_eq!(result.selected_ids, vec![[0xFF; 32], [1; 32]]);
+        assert_eq!(result.change_erg, 60);
+        assert_eq!(result.change_tokens, BTreeMap::from([([7; 32], 1)]));
+    }
+
+    #[test]
+    fn one_box_funding_the_target_alone_beats_the_input_limit() {
+        // 101 required tokens. Each has a larger holder than the one box that
+        // holds all of them, so the per-token order fills the cap first.
+        let token = |n: u8| {
+            let mut id = [0; 32];
+            id[0] = n;
+            id
+        };
+        let mut candidates: Vec<BoxSummary> = (1..=101)
+            .map(|n| BoxSummary {
+                box_id: [n; 32],
+                value: 10,
+                tokens: BTreeMap::from([(token(n), 2)]),
+            })
+            .collect();
+        candidates.push(BoxSummary {
+            box_id: [0xFF; 32],
+            value: 50,
+            tokens: (1..=101).map(|n| (token(n), 1)).collect(),
+        });
+        let mut target = target(20);
+        target.tokens = (1..=101).map(|n| (token(n), 1)).collect();
+        let result = DefaultBoxSelector.select(&candidates, &target).unwrap();
+        assert_eq!(result.selected_ids, vec![[0xFF; 32]]);
+        assert_eq!(result.change_erg, 30);
     }
 }

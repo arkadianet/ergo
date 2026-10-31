@@ -100,9 +100,10 @@ pub enum WalletError {
     #[error("box selection failed: {0}")]
     BoxSelection(String),
 
-    /// The candidates can fund the target only with more boxes than one
-    /// transaction may spend (`box_selector::MAX_SELECTED_INPUTS`). Maps to
-    /// REST `400 reason: "bad_request"`.
+    /// The candidates together fund the target, but the selector found no
+    /// selection within the boxes one transaction may spend
+    /// (`box_selector::MAX_SELECTED_INPUTS`). Maps to REST
+    /// `400 reason: "bad_request"`.
     #[error("box selection failed: {0}")]
     InputLimit(String),
 
