@@ -100,6 +100,12 @@ pub enum WalletError {
     #[error("box selection failed: {0}")]
     BoxSelection(String),
 
+    /// The candidates can fund the target only with more boxes than one
+    /// transaction may spend (`box_selector::MAX_SELECTED_INPUTS`). Maps to
+    /// REST `400 reason: "bad_request"`.
+    #[error("box selection failed: {0}")]
+    InputLimit(String),
+
     /// Transaction building failed at the structural level — usually a
     /// fee/change calculation produced negative ERG or violated minBoxValue.
     #[error("tx building failed: {0}")]
