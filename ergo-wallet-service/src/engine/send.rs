@@ -226,6 +226,9 @@ pub(crate) fn transaction_sign_impl(
     store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
     custody: Option<&dyn super::NonceCustody>,
+    supplied_inputs: Option<&[String]>,
+    supplied_data_inputs: Option<&[String]>,
+    mempool: &dyn crate::engine::MempoolOverlay,
 ) -> Result<Vec<u8>, WalletAdminError> {
     // Keys the caller supplied in this request: a hex nonce for one of them
     // reveals nothing the caller does not already hold.
@@ -252,7 +255,17 @@ pub(crate) fn transaction_sign_impl(
             })
         })
         .transpose()?;
-    let snapshot = chain.signing_view().map_err(map_chain_error)?;
+    // Inputs resolve from the committed UTXO set, then from the pool (an
+    // unconfirmed parent, as the native sign does), then from boxes the caller
+    // supplied in `inputs` / `dataInputs` (Scala's `inputsRaw`).
+    let supplied = supplied_boxes(unsigned_tx_hex, supplied_inputs, supplied_data_inputs)?;
+    let snapshot = super::chain::PoolSigningView::new(
+        Box::new(super::chain::PoolSigningView::new(
+            chain.signing_view().map_err(map_chain_error)?,
+            mempool.box_snapshot(&[]).outputs,
+        )),
+        std::sync::Arc::new(supplied),
+    );
     transaction_sign_impl_with_snapshot(
         unsigned_tx_hex,
         external_secret_dtos,
@@ -260,8 +273,73 @@ pub(crate) fn transaction_sign_impl(
         storage,
         state,
         store,
-        snapshot.as_ref(),
+        &snapshot,
     )
+}
+
+/// The serialized boxes a `transaction/sign` caller supplied, keyed by box id.
+/// An entry of 32 bytes is a box id (resolved from the chain or the pool, as
+/// without it); a longer entry is a serialized box, which must be one of the
+/// transaction's inputs or data inputs. A box id is the hash of the box's
+/// bytes, so a supplied box is the real box or it matches no input.
+fn supplied_boxes(
+    unsigned_tx_hex: &str,
+    inputs: Option<&[String]>,
+    data_inputs: Option<&[String]>,
+) -> Result<
+    std::collections::HashMap<ergo_primitives::digest::Digest32, ergo_ser::ergo_box::ErgoBox>,
+    WalletAdminError,
+> {
+    let mut supplied = std::collections::HashMap::new();
+    let entries: Vec<(&str, &String)> = inputs
+        .unwrap_or(&[])
+        .iter()
+        .map(|e| ("inputs", e))
+        .chain(data_inputs.unwrap_or(&[]).iter().map(|e| ("dataInputs", e)))
+        .collect();
+    if entries.is_empty() {
+        return Ok(supplied);
+    }
+    let unsigned_tx = hex::decode(unsigned_tx_hex)
+        .ok()
+        .and_then(|bytes| {
+            ergo_ser::transaction::read_unsigned_transaction(
+                &mut ergo_primitives::reader::VlqReader::new(&bytes),
+            )
+            .ok()
+        })
+        .ok_or_else(|| WalletAdminError::BadRequest("unsigned_tx decode failed".into()))?;
+    let wanted: std::collections::HashSet<_> = unsigned_tx
+        .inputs
+        .iter()
+        .map(|i| i.box_id)
+        .chain(unsigned_tx.data_inputs.iter().map(|d| d.box_id))
+        .collect();
+    for (field, entry) in entries {
+        let bytes = hex::decode(entry)
+            .map_err(|_| WalletAdminError::BadRequest(format!("{field}: bad hex")))?;
+        if bytes.len() == 32 {
+            continue; // a box id
+        }
+        let mut reader = ergo_primitives::reader::VlqReader::new(&bytes);
+        let ergo_box = ergo_ser::ergo_box::read_ergo_box(&mut reader)
+            .ok()
+            .filter(|_| reader.is_empty())
+            .ok_or_else(|| {
+                WalletAdminError::BadRequest(format!("{field}: not a serialized box"))
+            })?;
+        let id = ergo_box
+            .box_id()
+            .map_err(|e| WalletAdminError::BadRequest(format!("{field}: box id: {e:?}")))?;
+        if !wanted.contains(&id) {
+            return Err(WalletAdminError::BadRequest(format!(
+                "{field}: box {} is not an input of this transaction",
+                hex::encode(id.as_bytes())
+            )));
+        }
+        supplied.insert(id, ergo_box);
+    }
+    Ok(supplied)
 }
 
 /// The public image a caller-supplied secret proves. A DH tuple counts only
@@ -621,6 +699,9 @@ impl WalletEngine {
             self.store.as_ref(),
             self.chain.as_ref(),
             self.nonce_custody.as_deref(),
+            request.inputs.as_deref(),
+            request.data_inputs.as_deref(),
+            self.mempool.as_ref(),
         );
         result.map(|signed_tx_bytes| {
             use ergo_wallet_protocol::scala::sending::{SignedTxDto, TransactionSignResponse};
