@@ -14,11 +14,24 @@ use ergo_wallet_protocol::scala::sending::{
     TransactionSignResponse,
 };
 
-use super::build::{build_unsigned_tx, MIN_BOX_VALUE};
+use super::build::{build_unsigned_tx_with_pool, MIN_BOX_VALUE};
 use super::hints_codec::tx_hints_bag_from_dto;
 use super::sign::{decode_external_secret, serialize_signed_tx, sign_unsigned_tx};
 use crate::engine::{map_chain_error, SigningView, TxSubmitter, WalletChainAccess, WalletEngine};
 use ergo_wallet_protocol::WalletAdminError;
+
+/// The committed signing view, extended with the pool outputs a caller-named
+/// input resolved from, when there is a pool snapshot.
+fn signing_view(
+    chain: &dyn WalletChainAccess,
+    pool: Option<crate::engine::mempool::MempoolBoxSnapshot>,
+) -> Result<Box<dyn SigningView>, WalletAdminError> {
+    let view = chain.signing_view().map_err(map_chain_error)?;
+    Ok(match pool {
+        Some(pool) => Box::new(super::chain::PoolSigningView::new(view, pool.outputs)),
+        None => view,
+    })
+}
 
 /// `PaymentSend` + `TransactionSend` shared path: build, sign, self-verify, submit.
 ///
@@ -39,6 +52,7 @@ pub(crate) async fn payment_send_impl(
     chain: &dyn WalletChainAccess,
     submitter: &dyn TxSubmitter,
     network: ergo_ser::address::NetworkPrefix,
+    mempool: &dyn crate::engine::MempoolOverlay,
 ) -> Result<String, WalletAdminError> {
     // Reject immediately with a clean 400 wallet_locked rather than letting
     // the signing path fail deep inside prove_sigma with MissingSecret → 500.
@@ -46,7 +60,9 @@ pub(crate) async fn payment_send_impl(
         return Err(WalletAdminError::Locked);
     }
 
-    let unsigned_bytes = build_unsigned_tx(
+    // Caller-named inputs may chain off the wallet's own unconfirmed outputs.
+    let pool = override_inputs.map(|_| mempool.box_snapshot(&[]));
+    let unsigned_bytes = build_unsigned_tx_with_pool(
         requests,
         override_inputs,
         override_data_inputs,
@@ -56,6 +72,7 @@ pub(crate) async fn payment_send_impl(
         store,
         chain,
         network,
+        pool.clone(),
     )?
     .bytes;
 
@@ -70,7 +87,7 @@ pub(crate) async fn payment_send_impl(
     // `payment_send_impl` is spawned on a multi-thread runtime where any
     // value live across an .await must be `Send`. An explicit `drop()`
     // does not shrink the future state machine's scope; a block does.
-    let snapshot = chain.signing_view().map_err(map_chain_error)?;
+    let snapshot = signing_view(chain, pool)?;
     let signed_tx = {
         let storage = storage.read();
         sign_unsigned_tx(
@@ -118,12 +135,15 @@ pub(crate) fn transaction_generate_impl(
     store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
     network: ergo_ser::address::NetworkPrefix,
+    mempool: &dyn crate::engine::MempoolOverlay,
 ) -> Result<Vec<u8>, WalletAdminError> {
     if storage.read().unlocked().is_none() {
         return Err(WalletAdminError::Locked);
     }
 
-    let unsigned_bytes = build_unsigned_tx(
+    // Caller-named inputs may chain off the wallet's own unconfirmed outputs.
+    let pool = override_inputs.map(|_| mempool.box_snapshot(&[]));
+    let unsigned_bytes = build_unsigned_tx_with_pool(
         requests,
         override_inputs,
         override_data_inputs,
@@ -133,6 +153,7 @@ pub(crate) fn transaction_generate_impl(
         store,
         chain,
         network,
+        pool.clone(),
     )?
     .bytes;
 
@@ -143,7 +164,7 @@ pub(crate) fn transaction_generate_impl(
     };
 
     let storage = storage.read();
-    let snapshot = chain.signing_view().map_err(map_chain_error)?;
+    let snapshot = signing_view(chain, pool)?;
     let signed_tx = sign_unsigned_tx(
         &unsigned_tx,
         &storage,
@@ -170,12 +191,15 @@ pub(crate) fn transaction_generate_unsigned_impl(
     store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
     network: ergo_ser::address::NetworkPrefix,
+    mempool: &dyn crate::engine::MempoolOverlay,
 ) -> Result<Vec<u8>, WalletAdminError> {
     // Require the wallet to be unlocked so change-address is available.
     {
         let _storage = storage.read();
     }
-    build_unsigned_tx(
+    // Caller-named inputs may chain off the wallet's own unconfirmed outputs.
+    let pool = override_inputs.map(|_| mempool.box_snapshot(&[]));
+    build_unsigned_tx_with_pool(
         requests,
         override_inputs,
         override_data_inputs,
@@ -185,6 +209,7 @@ pub(crate) fn transaction_generate_unsigned_impl(
         store,
         chain,
         network,
+        pool,
     )
     .map(|built| built.bytes)
 }
@@ -469,6 +494,7 @@ impl WalletEngine {
             self.chain.as_ref(),
             self.submitter.as_ref(),
             self.config.network,
+            self.mempool.as_ref(),
         )
         .await
     }
@@ -540,6 +566,7 @@ impl WalletEngine {
             self.store.as_ref(),
             self.chain.as_ref(),
             self.config.network,
+            self.mempool.as_ref(),
         );
         result.map(|signed_tx_bytes| {
             use ergo_wallet_protocol::scala::sending::{SignedTxDto, TransactionGenerateResponse};
@@ -566,6 +593,7 @@ impl WalletEngine {
             self.store.as_ref(),
             self.chain.as_ref(),
             self.config.network,
+            self.mempool.as_ref(),
         );
         result.map(|unsigned_tx_bytes| {
             use ergo_wallet_protocol::scala::sending::{
@@ -620,6 +648,7 @@ impl WalletEngine {
             self.chain.as_ref(),
             self.submitter.as_ref(),
             self.config.network,
+            self.mempool.as_ref(),
         )
         .await
     }

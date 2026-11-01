@@ -23,6 +23,8 @@ infrastructure.
 
 ### Changed
 
+- **Wallet 0-conf chaining:** a caller-named input (`inputs` on `/wallet/transaction/send`, `/wallet/transaction/generate` and `generateUnsigned`, or a native `boxIds` input source) may now be an unconfirmed output of a pending transaction, so a wallet can spend its own just-sent change before it confirms. The box must pay a tree the wallet tracks and must not be spent by another pending transaction (both refused with 400). Auto-selection is unchanged: it reaches pool outputs only with `minConfirmations = -1`.
+
 - **Wallet daemon sync (#665):** `ergo-walletd` no longer reads the whole chain to learn what it should already know.
   - A wallet created with `init` starts at the node's tip instead of block 1: a fresh mnemonic has no history. `restore` is unchanged in what it must find.
   - A daemon with nothing to match (no tracked key and no registered scan) idles instead of downloading blocks.
