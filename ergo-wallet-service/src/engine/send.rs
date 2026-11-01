@@ -358,7 +358,7 @@ pub(crate) fn boxes_collect_impl(
 
     let selector = crate::box_selector::default::DefaultBoxSelector;
     let selection = crate::box_selector::BoxSelector::select(&selector, &summaries, &target)
-        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        .map_err(super::build::map_build_error)?;
 
     let boxes = selection.selected_ids.iter().map(hex::encode).collect();
     let change_boxes = if selection.change_erg > 0 || !selection.change_tokens.is_empty() {

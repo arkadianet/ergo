@@ -649,11 +649,13 @@ fn build_unsigned_tx_with_options(
 /// Map an `ergo_wallet` build error to a typed [`WalletAdminError`]. A box-selection
 /// shortfall (including a reward-box burn the inputs cannot fund) is a well-formed
 /// request the wallet cannot satisfy → `InsufficientFunds(422)`, not `Internal`.
+/// A target the wallet can fund only past the input cap → `BadRequest(400)`.
 pub(crate) fn map_build_error(e: ergo_wallet::error::WalletError) -> WalletAdminError {
     match &e {
         ergo_wallet::error::WalletError::BoxSelection(m) => {
             WalletAdminError::InsufficientFunds(m.clone())
         }
+        ergo_wallet::error::WalletError::InputLimit(m) => WalletAdminError::BadRequest(m.clone()),
         ergo_wallet::error::WalletError::ReemissionTokenOnOutput(m) => {
             WalletAdminError::ReemissionSpendNotAllowed(m.clone())
         }
@@ -2025,6 +2027,114 @@ mod tests {
         let bytes = ergo_ser::address::build_p2pk_tree_bytes(&pk).unwrap();
         let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
         ergo_ser::ergo_tree::read_ergo_tree(&mut r).unwrap()
+    }
+
+    /// Auto selection for ERG plus an NFT held in a minimum-value box takes that
+    /// box and the fewest larger boxes, not every box worth more than it (#693).
+    /// A payment that needs more than the input cap is a 400, not a 500.
+    #[test]
+    fn auto_selection_takes_the_token_box_and_caps_inputs() {
+        use crate::wallet::{
+            tables::WALLET_BOXES,
+            types::{BoxProvenance, BoxStatus, WalletBox},
+        };
+        let addr = test_addr();
+        let nft = [0x42; 32];
+        let nft_box = [0xAA; 32];
+        let chain = BurnTestChain {
+            reward_id: nft_box,
+            reward_box: ergo_ser::ergo_box::ErgoBox {
+                candidate: ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                    1_000_000,
+                    p2pk_tree(&addr),
+                    100,
+                    vec![],
+                    Default::default(),
+                )
+                .unwrap(),
+                transaction_id: ergo_primitives::digest::ModifierId::from(
+                    ergo_primitives::digest::Digest32::from_bytes([0xCD; 32]),
+                ),
+                index: 0,
+            },
+            rules: ergo_validation::ReemissionRuleInputs {
+                check_rules: true,
+                emission: None,
+                activation_height: 1000,
+                reemission_token_id: REEMISSION_TOKEN,
+                pay_to_reemission_tree: hex::decode(PAY2R_HEX).unwrap(),
+            },
+            tip: 200,
+        };
+        let mut wallet = crate::state::WalletState::empty(false);
+        wallet.set_change_address(addr.clone());
+        let state = RwLock::new(wallet);
+
+        // 1,000 boxes of 0.01 ERG and the NFT in a 0.001 ERG box.
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(WALLET_BOXES).unwrap();
+            let boxes = (1..=1_000u32)
+                .map(|n| {
+                    let mut box_id = [0; 32];
+                    box_id[..4].copy_from_slice(&n.to_be_bytes());
+                    (box_id, 10_000_000, vec![])
+                })
+                .chain([(nft_box, 1_000_000, vec![(nft, 1)])]);
+            for (box_id, value, assets) in boxes {
+                let wb = WalletBox {
+                    box_id,
+                    creation_tx_id: [0xCD; 32],
+                    creation_output_index: 0,
+                    creation_height: 100,
+                    value,
+                    assets,
+                    status: BoxStatus::Confirmed,
+                    provenance: BoxProvenance::Owned,
+                };
+                table
+                    .insert(box_id, bincode::serialize(&wb).unwrap())
+                    .unwrap();
+            }
+        }
+        write.commit().unwrap();
+
+        let pay = |value| {
+            build_unsigned_tx(
+                &[PaymentRequestDto {
+                    address: addr.clone(),
+                    value,
+                    assets: vec![ergo_wallet_protocol::scala::sending::AssetDto {
+                        token_id: hex::encode(nft),
+                        amount: 1,
+                    }],
+                }],
+                None,
+                None,
+                None,
+                None,
+                &state,
+                &db,
+                &chain,
+                NetworkPrefix::Mainnet,
+            )
+        };
+
+        // 0.5 ERG + 0.001 fee: the NFT box and 50 boxes, with no change.
+        let built = pay(500_000_000).unwrap();
+        assert_eq!(built.selected[0].box_id, nft_box);
+        assert_eq!(built.selected.len(), 51);
+        assert!(built.change_outputs.is_empty());
+
+        // 2 ERG would take the NFT box and 200 more.
+        match pay(2_000_000_000).err() {
+            Some(WalletAdminError::BadRequest(detail)) => {
+                assert!(detail.contains("within 100 inputs"), "{detail}")
+            }
+            other => panic!("expected bad_request, got {other:?}"),
+        }
     }
 
     /// ORACLE: an explicit-input spend of a reward box (value <= floor, carrying

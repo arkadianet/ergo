@@ -39,5 +39,16 @@ pub(crate) fn native_err(status: StatusCode, reason: &str, detail: Option<String
 pub(crate) fn map_err(e: WalletAdminError) -> NativeErr {
     let mapped = ergo_wallet_protocol::WalletErrorSurface::NativeV1.map(&e);
     let status = StatusCode::from_u16(mapped.status).expect("protocol wallet status is valid");
+    log_server_error(status, mapped.reason, &e);
     native_err(status, mapped.reason, mapped.detail)
+}
+
+/// A 5xx response carries no detail, so the log is the only place it shows.
+/// Both the native and the Scala-compat mappers call this.
+pub(crate) fn log_server_error(status: StatusCode, reason: &str, e: &WalletAdminError) {
+    if status == StatusCode::INTERNAL_SERVER_ERROR {
+        tracing::error!(%status, reason, error = %e, "wallet request failed");
+    } else if status.is_server_error() {
+        tracing::warn!(%status, reason, error = %e, "wallet request failed");
+    }
 }

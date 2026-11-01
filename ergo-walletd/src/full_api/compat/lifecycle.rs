@@ -17,6 +17,7 @@ pub(crate) fn map_err(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let mapped = ergo_wallet_protocol::WalletErrorSurface::Scala.map(&e);
     let status = StatusCode::from_u16(mapped.status).expect("protocol wallet status is valid");
+    super::super::native::error::log_server_error(status, mapped.reason, &e);
     let detail = if status.is_server_error() {
         None
     } else {

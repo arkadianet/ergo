@@ -1,12 +1,21 @@
 //! Box selection: choose UTXO subset that funds a payment.
 //!
 //! Two implementations per Scala:
-//! - DefaultBoxSelector: greedy by value DESC (default)
+//! - DefaultBoxSelector: needed-token boxes first, then greedy by value DESC
+//!   (default)
 //! - ReplaceCompactCollectBoxSelector: compaction-aware (currently delegates
 //!   to DefaultBoxSelector; full compaction optimization not yet implemented)
 
 use crate::error::WalletError;
 use std::collections::BTreeMap;
+
+/// Most boxes one selection may spend. Every input adds the `inputCost`
+/// parameter (2,000 on mainnet) to a transaction's cost before any script
+/// runs, so a few thousand inputs exceed the block cost limit (about 8
+/// million) and the transaction cannot be signed. 100 P2PK inputs come to
+/// about 10 KB against the 98 KB mempool size limit; the reward sweep uses
+/// the same cap.
+pub const MAX_SELECTED_INPUTS: usize = 100;
 
 /// What the selector must cover.
 #[derive(Debug, Clone)]
@@ -53,7 +62,9 @@ pub trait BoxSelector {
     /// WALLET_BOXES (the wallet's tracked-set). Returns selected box ids and
     /// change amounts on success, or `WalletError::BoxSelection` if no valid
     /// selection exists (insufficient funds, missing token, duplicate candidate
-    /// ids, or an unrepresentable selected ERG/token total).
+    /// ids, or an unrepresentable selected ERG/token total), or
+    /// `WalletError::InputLimit` if the candidates fund the target but no
+    /// selection within [`MAX_SELECTED_INPUTS`] boxes was found.
     fn select(
         &self,
         candidates: &[BoxSummary],
