@@ -373,6 +373,20 @@ fn seed_daemon_loads_separate_credentials_syncs_and_restarts_locked() {
         None,
     );
     assert_eq!(sealed.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // Message signing too: a sealed daemon holds no key.
+    let sealed_sign = local_response(
+        &client,
+        &restarted,
+        Method::POST,
+        "/api/v1/wallet/messages/sign",
+        Some(
+            json!({"scheme": "rosen-intents-quote-v1", "key": {"path": "m/44'/429'/0'/0/0"},
+                    "message": {"quote": "00"}, "allowSpendKey": true}),
+        ),
+    );
+    assert_eq!(sealed_sign.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = serde_json::from_slice(&sealed_sign.bytes().unwrap()).unwrap();
+    assert_eq!(body["reason"], "wallet_sealed");
     let raw = std::fs::read(data.join("wallet.redb")).unwrap();
     assert!(!raw.starts_with(b"redb"), "wallet.redb must be encrypted");
     for item in addresses_before["items"].as_array().unwrap() {

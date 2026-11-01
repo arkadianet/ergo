@@ -36,6 +36,7 @@ get /api/v1/wallet/change-address
 put /api/v1/wallet/change-address
 post /api/v1/wallet/init
 post /api/v1/wallet/lock
+post /api/v1/wallet/messages/sign
 get /api/v1/wallet/mining-jobs
 post /api/v1/wallet/mining-jobs
 post /api/v1/wallet/mining-jobs/{job_id}/cancel
