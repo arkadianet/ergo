@@ -130,6 +130,8 @@ struct Inner {
     recovery_generation: AtomicU64,
     /// When the current unlock began and when the last wallet operation ran.
     session: Mutex<Option<UnlockSession>>,
+    /// `[security] message_signing`: serve `messages/sign`.
+    message_signing: AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -316,6 +318,7 @@ impl WalletHost {
                 rescan_task: Mutex::new(None),
                 recovery_generation: AtomicU64::new(0),
                 session: Mutex::new(None),
+                message_signing: AtomicBool::new(false),
             }),
         })
     }
@@ -570,6 +573,16 @@ impl WalletHost {
     /// for wallet keys, every engine lock wipes them).
     pub fn allow_caller_nonces(&self) {
         self.inner.engine.lock().allow_caller_nonces();
+    }
+
+    /// Serve `POST /api/v1/wallet/messages/sign` (`[security]
+    /// message_signing = true`). Off by default.
+    pub fn allow_message_signing(&self) {
+        self.inner.message_signing.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn message_signing_allowed(&self) -> bool {
+        self.inner.message_signing.load(Ordering::SeqCst)
     }
 
     /// Seal the wallet database key into the keystore a later `init` or

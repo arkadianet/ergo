@@ -212,6 +212,20 @@ impl WalletApi {
     ) -> Result<admin_advanced::DeriveNextKeyResponse, WalletAdminError> {
         self.host.derive_next_key_declaring(fresh).await
     }
+    /// `POST /api/v1/wallet/messages/sign`, behind `[security] message_signing`.
+    pub async fn sign_message(
+        &self,
+        request: ergo_wallet_protocol::native::dto::SignMessageRequest,
+    ) -> Result<ergo_wallet_protocol::native::dto::SignMessageResponse, WalletAdminError> {
+        if !self.host.message_signing_allowed() {
+            return Err(WalletAdminError::Forbidden(
+                "message signing is disabled; set [security] message_signing = true".into(),
+            ));
+        }
+        self.host
+            .call(move |engine| engine.sign_message(request))
+            .await
+    }
     pub async fn get_private_key(
         &self,
         request: admin_advanced::GetPrivateKeyRequest,

@@ -564,6 +564,19 @@ pub(crate) async fn retrieve_rewards(
     Ok(no_store(resp))
 }
 
+/// `POST /api/v1/wallet/messages/sign` — sign one message of a named scheme
+/// (`kadia-maker-quote-v1`, `rosen-intents-quote-v1`) with a tracked wallet
+/// key. Needs `[security] message_signing = true` and an unlocked wallet; the
+/// wallet's first and change keys sign only with `allowSpendKey`.
+/// `Cache-Control: no-store`.
+pub(crate) async fn sign_message(
+    State(admin): State<Arc<WalletApi>>,
+    StrictJson(req): StrictJson<dto::SignMessageRequest>,
+) -> Result<NoStoreJson<dto::SignMessageResponse>, NativeErr> {
+    let resp = admin.sign_message(req).await.map_err(error::map_err)?;
+    Ok(no_store(resp))
+}
+
 pub(super) fn router(admin: Arc<WalletApi>) -> axum::Router {
     use axum::routing::{get, post};
     axum::Router::new()
@@ -593,6 +606,7 @@ pub(super) fn router(admin: Arc<WalletApi>) -> axum::Router {
         .route("/api/v1/wallet/transactions/build", post(build_transaction))
         .route("/api/v1/wallet/transactions/sign", post(sign_transaction))
         .route("/api/v1/wallet/transactions/send", post(send_transaction))
+        .route("/api/v1/wallet/messages/sign", post(sign_message))
         .route("/api/v1/wallet/rewards/retrieve", post(retrieve_rewards))
         .route(
             "/api/v1/wallet/mining-jobs",

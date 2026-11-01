@@ -16,6 +16,10 @@ infrastructure.
 
 ## [Unreleased]
 
+### Added
+
+- **Wallet message signing:** `ergo-walletd` serves `POST /api/v1/wallet/messages/sign` behind `[security] message_signing = true` (off by default). It signs a Kadia DEX maker-vault quote (`kadia-maker-quote-v1`) or a Rosen Intents quote (`rosen-intents-quote-v1`) with a key the wallet tracks, and nothing else: no raw bytes, no bare hashes. The wallet's first and change keys sign only with `allowSpendKey`. See [wallet message signing](docs/wallet-message-signing.md).
+
 ### Security
 
 - **k256 0.14** (elliptic-curve 0.14, crypto-bigint 0.7.10) clears RUSTSEC-2026-0387, timing variability in crypto-bigint operations meant to be constant-time. k256 0.13's scalar add, sub and neg used those operations on secret scalars when the wallet signs. The temporary ignore added in #686 is removed. k256 is now built without its ECDSA, Schnorr and pkcs8 features, which the node never used. 33-byte point decoding, `Reduce`, scalar arithmetic and point arithmetic were compared between k256 0.13.4 and 0.14.0 with no differences: 1,282,048 decode inputs (every lead byte), 20,005 `Reduce` inputs and 3,000 random arithmetic pairs. crypto-bigint 0.7.8 was later yanked; 0.7.10 changes Montgomery multiplication carries and replaces ctutils primitives, and gave the same results as 0.7.8 on 200,000 decode inputs, 200,000 `Reduce` and `from_repr` inputs, 200,000 scalar arithmetic sets (including inversion) and 20,000 point arithmetic sets.
