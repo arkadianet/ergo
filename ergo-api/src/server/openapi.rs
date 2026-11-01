@@ -377,8 +377,9 @@ pub fn established_openapi_operations() -> BTreeSet<RouteOperation> {
 }
 
 fn established_rust_contracts() -> OpenApiDocument {
-    const PATHS: [&str; 4] = [
+    const PATHS: [&str; 5] = [
         "/api/v1/transactions/{txId}/detail",
+        "/blockchain/box/nonP2pk",
         "/blockchain/storageRent/eligibleAt/{height}",
         "/blockchain/storageRent/maturesAt/{height}",
         "/blockchain/storageRent/maturesInRange",
@@ -529,6 +530,7 @@ pub fn openapi_operations(openapi: &OpenApiDocument) -> BTreeSet<RouteOperation>
 fn exclude_from_scala_openapi(path: &str) -> bool {
     path.starts_with("/api/v1/")
         || path.starts_with("/blockchain/storageRent/")
+        || path == "/blockchain/box/nonP2pk"
         // The wallet runs in `ergo-walletd`; the node only answers these
         // paths with `410 wallet_moved`.
         || path.starts_with("/wallet/")

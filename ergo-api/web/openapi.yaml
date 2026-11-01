@@ -128,6 +128,9 @@ info:
       the apply path uses (so the surface can never disagree
       with the chain). Indexer-gated like the rest of
       `/blockchain/*`.
+    - `/blockchain/box/nonP2pk?fromIndex=&limit=&scanLimit=&unspentOnly=` —
+      forward scan over the global box index returning every box
+      whose ErgoTree is not P2PK, with a resume cursor. Indexer-gated.
 
     ## Everything else
 
@@ -8539,6 +8542,97 @@ paths:
                 $ref: '#/components/schemas/StorageRentEligibleResponse'
         '503':
           description: Voted parameters not available, or chain-params view not configured.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /blockchain/box/nonP2pk:
+    get:
+      summary: Scan the global box index for boxes that are not P2PK
+      description: |
+        Walks global box indexes `[fromIndex, fromIndex + scanLimit)` in
+        ascending order and returns every box whose ErgoTree does not
+        encode as a P2PK address. The scan stops early once `limit`
+        matches are collected. Resume with `fromIndex = nextIndex`;
+        `nextIndex` is `null` once the scan reaches the end of the index.
+
+        Reads run in chunks, each in its own indexer snapshot. A reorg
+        that rewrites boxes behind the cursor is not reflected in
+        later pages.
+
+        **Rust-node-exclusive.** No Scala equivalent.
+      operationId: getBoxesNonP2pk
+      tags:
+        - blockchain
+      parameters:
+        - in: query
+          name: fromIndex
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - in: query
+          name: limit
+          required: false
+          description: Maximum number of matching boxes to return.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 16384
+            default: 100
+        - in: query
+          name: scanLimit
+          required: false
+          description: Maximum number of boxes to examine in this call.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 262144
+            default: 65536
+        - in: query
+          name: unspentOnly
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Matching boxes and the resume cursor.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - items
+                  - nextIndex
+                  - scanned
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/IndexedErgoBox'
+                  nextIndex:
+                    type: integer
+                    format: int64
+                    nullable: true
+                    description: Index to resume from; null at the end of the index.
+                  scanned:
+                    type: integer
+                    format: int64
+                    description: Number of boxes examined by this call.
+        '400':
+          description: limit or scanLimit out of range.
           content:
             application/json:
               schema:
