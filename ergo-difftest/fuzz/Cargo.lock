@@ -713,6 +713,7 @@ dependencies = [
  "aes-gcm",
  "async-trait",
  "bincode",
+ "blake2",
  "ergo-chain-spec",
  "ergo-primitives",
  "ergo-ser",
