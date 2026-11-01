@@ -18,6 +18,13 @@ use ergo_ser::{
     transaction::{Transaction, UnsignedTransaction},
 };
 
+/// A box retained as its received bytes inside a value.
+pub(super) struct RetainedBox<'a> {
+    pub(super) received: &'a [u8],
+    /// The canonical and pre-v3 forms a writer emits instead, where computed.
+    pub(super) written: Vec<&'a [u8]>,
+}
+
 pub(super) trait ParityNormalize {
     fn parity_normalized(&self, after_write: bool) -> impl PartialEq;
 
@@ -41,8 +48,8 @@ pub(super) trait ParityNormalize {
         false
     }
 
-    /// Bytes of every retained (opaque) box this value holds, in wire order.
-    fn retained_boxes(&self) -> Vec<&[u8]> {
+    /// Every retained (opaque) box this value holds, in wire order.
+    fn retained_boxes(&self) -> Vec<RetainedBox<'_>> {
         Vec::new()
     }
 
@@ -144,7 +151,7 @@ impl<A: ParityNormalize, B: ParityNormalize> ParityNormalize for (A, B) {
     fn has_depth_expanding_boolean(&self) -> bool {
         self.0.has_depth_expanding_boolean() || self.1.has_depth_expanding_boolean()
     }
-    fn retained_boxes(&self) -> Vec<&[u8]> {
+    fn retained_boxes(&self) -> Vec<RetainedBox<'_>> {
         let mut boxes = self.0.retained_boxes();
         boxes.extend(self.1.retained_boxes());
         boxes
@@ -182,7 +189,7 @@ impl<T: ParityNormalize> ParityNormalize for Vec<T> {
             .flat_map(ParityNormalize::header_values)
             .collect()
     }
-    fn retained_boxes(&self) -> Vec<&[u8]> {
+    fn retained_boxes(&self) -> Vec<RetainedBox<'_>> {
         self.iter()
             .flat_map(ParityNormalize::retained_boxes)
             .collect()
@@ -220,7 +227,10 @@ fn normalize_value(value: &mut SigmaValue, version: u8, after_write: bool) {
                 .for_each(|x| normalize_value(x, version, after_write));
         }
         SigmaValue::Opt(Some(inner)) => normalize_value(inner, version, after_write),
-        SigmaValue::Unevaluated(expr) => normalize_expr(expr, version, after_write, &[]),
+        SigmaValue::Unevaluated(expr) => {
+            let types = OperandTypes::new(expr, &[], version, after_write);
+            normalize_expr(expr, version, after_write, &types)
+        }
         _ => {}
     }
 }
@@ -244,11 +254,24 @@ impl ParityNormalize for SigmaValue {
             _ => false,
         }
     }
-    fn retained_boxes(&self) -> Vec<&[u8]> {
+    fn retained_boxes(&self) -> Vec<RetainedBox<'_>> {
         match self {
-            SigmaValue::OpaqueBoxBytes(bytes) | SigmaValue::CanonicalBoxBytes { bytes, .. } => {
-                vec![bytes.as_slice()]
-            }
+            SigmaValue::OpaqueBoxBytes(bytes) => vec![RetainedBox {
+                received: bytes,
+                written: Vec::new(),
+            }],
+            SigmaValue::CanonicalBoxBytes {
+                bytes,
+                canonical_bytes,
+                legacy_bytes,
+            } => vec![RetainedBox {
+                received: bytes,
+                written: [Some(canonical_bytes), legacy_bytes.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|form| form.as_deref().ok())
+                    .collect(),
+            }],
             SigmaValue::Coll(CollValue::Values(items))
             | SigmaValue::Tuple(items)
             | SigmaValue::ConcreteCollection { items, .. } => items.retained_boxes(),
@@ -273,12 +296,37 @@ impl ParityNormalize for SigmaValue {
     }
 }
 
-fn normalize_expr(
-    expr: &mut Expr,
-    version: u8,
-    after_write: bool,
-    constants: &[(SigmaType, SigmaValue)],
-) {
+/// What the Upcast reinsertion below needs to type an operand as the parser does.
+struct OperandTypes<'a> {
+    constants: &'a [(SigmaType, SigmaValue)],
+    /// The parse-order typer over the body as read, keyed by
+    /// [`ergo_ser::ergo_tree::node_key`]: a `ValUse` has its latest binding's
+    /// type. Built only where the reinsertion is modelled; the keys hold while
+    /// the body is mutated in place.
+    as_read: std::collections::HashMap<usize, SigmaType>,
+}
+
+impl<'a> OperandTypes<'a> {
+    fn new(
+        body: &Expr,
+        constants: &'a [(SigmaType, SigmaValue)],
+        version: u8,
+        after_write: bool,
+    ) -> Self {
+        let mut as_read = std::collections::HashMap::new();
+        if after_write && version < 3 {
+            ergo_ser::ergo_tree::record_node_types(
+                body,
+                constants,
+                &std::collections::HashSet::new(),
+                &mut as_read,
+            );
+        }
+        Self { constants, as_read }
+    }
+}
+
+fn normalize_expr(expr: &mut Expr, version: u8, after_write: bool, types: &OperandTypes) {
     // Test the DIRECT input before descending: Scala strips one level per pass.
     // Collapsing chains to their fixed point would hide lost cast targets or
     // a writer that incorrectly removes multiple levels in a single pass.
@@ -354,7 +402,7 @@ fn normalize_expr(
         | Payload::NoneValue { .. } => vec![],
     };
     for child in children {
-        normalize_expr(child, version, after_write, constants);
+        normalize_expr(child, version, after_write, types);
     }
     // MethodCall.companion chooses PropertyCall for an empty argument list.
     if after_write && matches!(&node.payload, Payload::MethodCall { args, .. } if args.is_empty()) {
@@ -371,7 +419,7 @@ fn normalize_expr(
         && matches!(node.opcode, 0x8f..=0x94 | 0x99..=0x9a | 0x9c..=0x9e | 0xa1..=0xa2)
     {
         if let Payload::Two(a, b) = &mut node.payload {
-            reinsert_operand_upcast(a, b, constants);
+            reinsert_operand_upcast(a, b, types);
         }
     }
     // ByIndexSerializer.parse reinserts an Int Upcast for a byte/short index
@@ -398,15 +446,24 @@ fn normalize_expr(
 }
 
 /// Numeric type of a binary-operator operand: explicit in the IR for a constant or a
-/// numeric cast, otherwise the node's own static typer. `None` when unknown.
-fn operand_numeric_type(expr: &Expr, constants: &[(SigmaType, SigmaValue)]) -> Option<SigmaType> {
+/// numeric cast, otherwise the parser's precise typer on the operand as
+/// normalized so far, whose own casts may have been stripped. An operand it
+/// cannot type alone (one reading an outer binding) takes its type as read.
+/// The lenient root-type typer would leave e.g. `Negation` untyped and miss a
+/// reinsertion the parser makes. `None` when unknown.
+fn operand_numeric_type(expr: &Expr, types: &OperandTypes) -> Option<SigmaType> {
     let tpe = match expr {
         Expr::Const { tpe, .. } => tpe.clone(),
         Expr::Op(IrNode {
             payload: Payload::NumericCast { tpe, .. },
             ..
         }) => tpe.clone(),
-        _ => ergo_ser::ergo_tree::determinable_root_type_of(expr, constants)?,
+        _ => ergo_ser::ergo_tree::exact_type_of(expr, types.constants).or_else(|| {
+            types
+                .as_read
+                .get(&ergo_ser::ergo_tree::node_key(expr))
+                .cloned()
+        })?,
     };
     numeric_rank(&tpe).map(|_| tpe)
 }
@@ -425,10 +482,10 @@ fn numeric_rank(tpe: &SigmaType) -> Option<u8> {
 
 /// The parser's pre-v3 binary-operator Upcast: wrap the narrower of two numeric
 /// operands of known type in an Upcast to the wider type.
-fn reinsert_operand_upcast(a: &mut Expr, b: &mut Expr, constants: &[(SigmaType, SigmaValue)]) {
+fn reinsert_operand_upcast(a: &mut Expr, b: &mut Expr, types: &OperandTypes) {
     let (Some(ta), Some(tb)) = (
-        operand_numeric_type(a, constants),
-        operand_numeric_type(b, constants),
+        operand_numeric_type(a, types),
+        operand_numeric_type(b, types),
     ) else {
         return;
     };
@@ -564,7 +621,7 @@ impl ParityNormalize for ErgoTree {
         }
         headers
     }
-    fn retained_boxes(&self) -> Vec<&[u8]> {
+    fn retained_boxes(&self) -> Vec<RetainedBox<'_>> {
         let mut boxes = self.constants.retained_boxes();
         for (_, expr) in ergo_ser::opcode::preorder(&self.body) {
             if let Expr::Const { val, .. } = expr {
@@ -662,7 +719,7 @@ macro_rules! view {
                 let $v = self;
                 $headers
             }
-            fn retained_boxes(&self) -> Vec<&[u8]> {
+            fn retained_boxes(&self) -> Vec<RetainedBox<'_>> {
                 let $v = self;
                 $boxes
             }
@@ -879,8 +936,8 @@ pub(super) fn normalized_tree(tree: &ErgoTree, after_write: bool) -> ErgoTree {
     for (_, value) in &mut tree.constants {
         normalize_value(value, tree.version, after_write);
     }
-    let constants = tree.constants.clone();
-    normalize_expr(&mut tree.body, tree.version, after_write, &constants);
+    let types = OperandTypes::new(&tree.body, &tree.constants, tree.version, after_write);
+    normalize_expr(&mut tree.body, tree.version, after_write, &types);
     tree
 }
 

@@ -16,7 +16,7 @@ pub fn substitution_type_of(body: &crate::opcode::Expr) -> Option<crate::sigma_t
 }
 
 /// Exact static type of a tree body (fresh binding store), or `None`.
-pub(super) fn exact_type_of(
+pub fn exact_type_of(
     body: &crate::opcode::Expr,
     constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
 ) -> Option<crate::sigma_type::SigmaType> {
