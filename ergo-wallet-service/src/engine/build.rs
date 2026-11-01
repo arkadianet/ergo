@@ -78,11 +78,94 @@ pub(crate) fn build_unsigned_tx(
     )
 }
 
+/// [`build_unsigned_tx`], with caller-named inputs also resolved from a pool
+/// snapshot (see [`resolve_explicit_input`]). Auto-selection is unchanged.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_unsigned_tx_with_pool(
+    requests: &[PaymentRequestDto],
+    override_inputs: Option<&[String]>,
+    override_data_inputs: Option<&[String]>,
+    fee_override: Option<u64>,
+    change_address_override: Option<&str>,
+    state: &RwLock<crate::state::WalletState>,
+    store: &dyn crate::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
+    network: ergo_ser::address::NetworkPrefix,
+    pool: Option<crate::engine::mempool::MempoolBoxSnapshot>,
+) -> Result<BuiltTx, WalletAdminError> {
+    build_unsigned_tx_with_options(
+        requests,
+        override_inputs,
+        override_data_inputs,
+        fee_override,
+        change_address_override,
+        state,
+        store,
+        chain,
+        network,
+        &NativeBuildOptions {
+            pool,
+            ..NativeBuildOptions::default()
+        },
+    )
+}
+
 #[derive(Default)]
 struct NativeBuildOptions {
     registers: Vec<ergo_ser::register::AdditionalRegisters>,
     burn_tokens: BTreeMap<[u8; 32], u64>,
     available: Option<Vec<crate::box_selector::BoxSummary>>,
+    /// Pool outputs a caller-named input may resolve from (0-conf chaining).
+    pool: Option<crate::engine::mempool::MempoolBoxSnapshot>,
+}
+
+/// Why a caller-named unconfirmed box can't be spent, or `None` if it can: it
+/// must not be spent by a pending transaction, and must pay a tree this wallet
+/// tracks.
+fn pool_input_refusal(
+    id: &[u8; 32],
+    output: &ergo_ser::ergo_box::ErgoBox,
+    pool: &crate::engine::mempool::MempoolBoxSnapshot,
+    state: &crate::state::WalletState,
+) -> Option<WalletAdminError> {
+    let digest = ergo_primitives::digest::Digest32::from_bytes(*id);
+    if pool.spent_box_ids.contains(&digest) {
+        return Some(WalletAdminError::BadRequest(format!(
+            "input {} is already spent by a pending transaction",
+            hex::encode(id)
+        )));
+    }
+    if !state.is_tracked_tree(output.candidate.ergo_tree_bytes()) {
+        return Some(WalletAdminError::BadRequest(format!(
+            "input {} is an unconfirmed output of a script this wallet does not track",
+            hex::encode(id)
+        )));
+    }
+    None
+}
+
+/// A caller-named input: the committed UTXO set first (unchanged), then, only
+/// when the caller supplied a pool snapshot, an unconfirmed output of a
+/// pending transaction that pays a tracked tree and that no pending
+/// transaction spends.
+fn resolve_explicit_input(
+    id: &[u8; 32],
+    chain: &dyn WalletChainAccess,
+    state: &crate::state::WalletState,
+    pool: Option<&crate::engine::mempool::MempoolBoxSnapshot>,
+) -> Result<ergo_ser::ergo_box::ErgoBox, WalletAdminError> {
+    if let Some(confirmed) = chain.lookup_utxo(id).map_err(map_chain_error)? {
+        return Ok(confirmed);
+    }
+    let pool = pool.ok_or(WalletAdminError::BoxNotFound)?;
+    let output = pool
+        .outputs
+        .get(&ergo_primitives::digest::Digest32::from_bytes(*id))
+        .ok_or(WalletAdminError::BoxNotFound)?;
+    match pool_input_refusal(id, output, pool, state) {
+        Some(refusal) => Err(refusal),
+        None => Ok(output.clone()),
+    }
 }
 
 /// Native payment registers are applied before serialization; compat callers
@@ -236,12 +319,10 @@ fn build_unsigned_tx_with_options(
                 )));
             }
 
-            // A caller-named input absent from the UTXO set is a client error, not a
-            // server fault (it may be already spent or never existed).
-            let ergo_box = chain
-                .lookup_utxo(&id)
-                .map_err(map_chain_error)?
-                .ok_or(WalletAdminError::BoxNotFound)?;
+            // A caller-named input absent from the UTXO set (and, when a pool
+            // snapshot is supplied, from the wallet's spendable pool outputs) is
+            // a client error, not a server fault.
+            let ergo_box = resolve_explicit_input(&id, chain, &state, options.pool.as_ref())?;
 
             input_erg_total = input_erg_total
                 .checked_add(ergo_box.candidate.value)
@@ -945,6 +1026,36 @@ fn selection_candidates(
                 "duplicate box id in boxIds input source".into(),
             ));
         }
+        // A named box not among the confirmed candidates may be an output of a
+        // pending transaction (0-conf chaining): spendable when it pays a
+        // tracked tree and no pending transaction spends it. Only for named
+        // ids; auto-selection reaches the pool only with minConfirmations -1.
+        let wallet = state.read();
+        for id in &requested {
+            if summaries.contains_key(id) || reserved.contains(id) {
+                continue;
+            }
+            let Some(output) = overlay.outputs.get(&Digest32::from_bytes(*id)) else {
+                continue;
+            };
+            if let Some(refusal) = pool_input_refusal(id, output, &overlay, &wallet) {
+                return Err(refusal);
+            }
+            summaries.insert(
+                *id,
+                BoxSummary {
+                    box_id: *id,
+                    value: output.candidate.value,
+                    tokens: output
+                        .candidate
+                        .tokens
+                        .iter()
+                        .map(|token| (*token.token_id.as_bytes(), token.amount))
+                        .collect(),
+                },
+            );
+        }
+        drop(wallet);
         if wanted.iter().any(|id| !summaries.contains_key(id)) {
             return Err(WalletAdminError::BoxNotFound);
         }
@@ -1281,7 +1392,10 @@ pub(crate) fn build_transaction_impl_with_snapshot(
             options.available = Some(available);
             None
         }
-        ndto::InputSource::BoxIds { box_ids } => Some(box_ids.clone()),
+        ndto::InputSource::BoxIds { box_ids } => {
+            options.pool = Some(pool_snapshot.clone());
+            Some(box_ids.clone())
+        }
         ndto::InputSource::Boxes { .. } => return Err(WalletAdminError::UnsupportedIntent),
     };
     let override_data_inputs: Option<Vec<String>> = match &intent.data_inputs {
@@ -2406,5 +2520,237 @@ mod tests {
             failed,
             Err(WalletAdminError::Internal(detail)) if detail.contains("injected UTXO read failure")
         ));
+    }
+
+    /// 0-conf chaining: a caller-named input may be an unconfirmed output of a
+    /// pending transaction when it pays a tracked tree and nothing in the pool
+    /// spends it. Confirmed inputs and calls without a pool snapshot are
+    /// unchanged.
+    mod zero_conf {
+        use super::*;
+        use crate::engine::mempool::MempoolBoxSnapshot;
+        use ergo_primitives::digest::Digest32;
+        use std::collections::{HashMap, HashSet};
+
+        const CONFIRMED: [u8; 32] = [0xAA; 32];
+        const CHANGE: [u8; 32] = [0x61; 32];
+        const SPENT: [u8; 32] = [0x62; 32];
+        const FOREIGN: [u8; 32] = [0x63; 32];
+
+        fn boxed(value: u64, tree: ergo_ser::ergo_tree::ErgoTree, tx: u8) -> ErgoBox {
+            ErgoBox::new(
+                ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                    value,
+                    tree,
+                    150,
+                    vec![],
+                    ergo_ser::register::AdditionalRegisters::empty(),
+                )
+                .unwrap(),
+                ergo_primitives::digest::ModifierId::from_bytes([tx; 32]),
+                0,
+            )
+        }
+
+        use ergo_ser::ergo_box::ErgoBox;
+
+        fn untracked_tree() -> ergo_ser::ergo_tree::ErgoTree {
+            ergo_ser::ergo_tree::read_ergo_tree(&mut ergo_primitives::reader::VlqReader::new(&[
+                0, 8, 0xd3, 1,
+            ]))
+            .unwrap()
+        }
+
+        struct Fixture {
+            chain: BurnTestChain,
+            state: RwLock<crate::state::WalletState>,
+            _dir: tempfile::TempDir,
+            db: redb::Database,
+            pool: MempoolBoxSnapshot,
+        }
+
+        fn fixture() -> Fixture {
+            let addr = test_addr();
+            let chain = BurnTestChain {
+                reward_id: CONFIRMED,
+                reward_box: boxed(50_000_000, p2pk_tree(&addr), 0xC0),
+                rules: ergo_validation::ReemissionRuleInputs {
+                    check_rules: false,
+                    emission: None,
+                    activation_height: u32::MAX,
+                    reemission_token_id: REEMISSION_TOKEN,
+                    pay_to_reemission_tree: hex::decode(PAY2R_HEX).unwrap(),
+                },
+                tip: 200,
+            };
+            let mut wallet = crate::state::WalletState::empty(false);
+            let pk = ergo_ser::address::decode_p2pk_address(&addr, NetworkPrefix::Mainnet).unwrap();
+            wallet
+                .insert_tracked_pubkey(0, pk, NetworkPrefix::Mainnet)
+                .unwrap();
+            wallet.set_change_address(addr.clone());
+            let dir = tempfile::tempdir().unwrap();
+            let db = redb::Database::create(dir.path().join("w.redb")).unwrap();
+            let write = db.begin_write().unwrap();
+            write
+                .open_table(crate::wallet::tables::WALLET_BOXES)
+                .unwrap();
+            write.commit().unwrap();
+            let pool = MempoolBoxSnapshot {
+                outputs: std::sync::Arc::new(HashMap::from([
+                    // The change of the wallet's own just-sent transaction.
+                    (
+                        Digest32::from_bytes(CHANGE),
+                        boxed(40_000_000, p2pk_tree(&addr), 0xC1),
+                    ),
+                    // Wallet change that another pending transaction already spends.
+                    (
+                        Digest32::from_bytes(SPENT),
+                        boxed(40_000_000, p2pk_tree(&addr), 0xC2),
+                    ),
+                    // A pending output paying a script the wallet does not track.
+                    (
+                        Digest32::from_bytes(FOREIGN),
+                        boxed(40_000_000, untracked_tree(), 0xC3),
+                    ),
+                ])),
+                spent_box_ids: HashSet::from([Digest32::from_bytes(SPENT)]),
+            };
+            Fixture {
+                chain,
+                state: RwLock::new(wallet),
+                _dir: dir,
+                db,
+                pool,
+            }
+        }
+
+        fn build(
+            f: &Fixture,
+            input: [u8; 32],
+            pool: Option<MempoolBoxSnapshot>,
+        ) -> Result<BuiltTx, WalletAdminError> {
+            let requests = vec![PaymentRequestDto {
+                address: test_addr(),
+                value: 10_000_000,
+                assets: Vec::new(),
+            }];
+            build_unsigned_tx_with_pool(
+                &requests,
+                Some(&[hex::encode(input)]),
+                None,
+                None,
+                None,
+                &f.state,
+                &f.db,
+                &f.chain,
+                NetworkPrefix::Mainnet,
+                pool,
+            )
+        }
+
+        fn input_ids(built: &BuiltTx) -> Vec<[u8; 32]> {
+            let tx = ergo_ser::transaction::read_unsigned_transaction(
+                &mut ergo_primitives::reader::VlqReader::new(&built.bytes),
+            )
+            .unwrap();
+            tx.inputs.iter().map(|i| *i.box_id.as_bytes()).collect()
+        }
+
+        #[test]
+        fn a_named_input_chains_off_the_wallets_own_unconfirmed_change() {
+            let f = fixture();
+            let built = build(&f, CHANGE, Some(f.pool.clone())).unwrap();
+            assert_eq!(input_ids(&built), vec![CHANGE]);
+            // Without a pool snapshot (every other caller) it is not found, as before.
+            assert!(matches!(
+                build(&f, CHANGE, None),
+                Err(WalletAdminError::BoxNotFound)
+            ));
+        }
+
+        #[test]
+        fn an_unconfirmed_box_already_spent_in_the_pool_is_refused() {
+            let f = fixture();
+            assert!(matches!(
+                build(&f, SPENT, Some(f.pool.clone())),
+                Err(WalletAdminError::BadRequest(m)) if m.contains("already spent by a pending transaction")
+            ));
+        }
+
+        #[test]
+        fn an_unconfirmed_box_of_an_untracked_script_is_refused() {
+            let f = fixture();
+            assert!(matches!(
+                build(&f, FOREIGN, Some(f.pool.clone())),
+                Err(WalletAdminError::BadRequest(m)) if m.contains("does not track")
+            ));
+        }
+
+        #[test]
+        fn confirmed_and_unknown_inputs_behave_as_before() {
+            let f = fixture();
+            let with_pool = build(&f, CONFIRMED, Some(f.pool.clone())).unwrap();
+            let without = build(&f, CONFIRMED, None).unwrap();
+            assert_eq!(with_pool.bytes, without.bytes);
+            assert_eq!(input_ids(&with_pool), vec![CONFIRMED]);
+            assert!(matches!(
+                build(&f, [0x99; 32], Some(f.pool.clone())),
+                Err(WalletAdminError::BoxNotFound)
+            ));
+        }
+
+        struct Pool(MempoolBoxSnapshot);
+        impl crate::engine::MempoolOverlay for Pool {
+            fn is_spent_by_pool(&self, id: &Digest32) -> bool {
+                self.0.spent_box_ids.contains(id)
+            }
+            fn pool_spending_tx(&self, _: &Digest32) -> Option<Digest32> {
+                None
+            }
+            fn pool_outputs(&self) -> std::sync::Arc<HashMap<Digest32, ErgoBox>> {
+                self.0.outputs.clone()
+            }
+        }
+
+        #[test]
+        fn native_box_ids_name_unconfirmed_wallet_outputs_but_auto_needs_minus_one() {
+            use ergo_wallet_protocol::native::dto::InputSource;
+            let f = fixture();
+            let pool = Pool(f.pool.clone());
+            let named = |id: [u8; 32]| InputSource::BoxIds {
+                box_ids: vec![hex::encode(id)],
+            };
+            let (selected, _) =
+                selection_candidates(&named(CHANGE), &f.state, &f.db, &f.chain, &pool).unwrap();
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].box_id, CHANGE);
+            assert_eq!(selected[0].value, 40_000_000);
+            assert!(matches!(
+                selection_candidates(&named(SPENT), &f.state, &f.db, &f.chain, &pool),
+                Err(WalletAdminError::BadRequest(m)) if m.contains("already spent")
+            ));
+            assert!(matches!(
+                selection_candidates(&named(FOREIGN), &f.state, &f.db, &f.chain, &pool),
+                Err(WalletAdminError::BadRequest(m)) if m.contains("does not track")
+            ));
+            // Auto-selection is unchanged: pool outputs only with minConfirmations -1.
+            for (depth, includes_change) in [(0, false), (-1, true)] {
+                let auto = InputSource::Auto {
+                    min_confirmations: depth,
+                    exclude_box_ids: vec![],
+                };
+                let (candidates, _) =
+                    selection_candidates(&auto, &f.state, &f.db, &f.chain, &pool).unwrap();
+                assert_eq!(
+                    candidates.iter().any(|c| c.box_id == CHANGE),
+                    includes_change,
+                    "minConfirmations {depth}"
+                );
+                assert!(!candidates
+                    .iter()
+                    .any(|c| c.box_id == SPENT || c.box_id == FOREIGN));
+            }
+        }
     }
 }
