@@ -12,10 +12,10 @@ pub struct OsRngBackend;
 impl ProvingRng for OsRngBackend {
     fn sample_scalar(&mut self) -> Scalar {
         use k256::elliptic_curve::ops::Reduce;
-        use rand::RngCore;
+        use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
         loop {
             let mut bytes = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut bytes);
+            UnwrapErr(SysRng).fill_bytes(&mut bytes);
             let s = <Scalar as Reduce<k256::FieldBytes>>::reduce(&bytes.into());
             if s != Scalar::ZERO {
                 return s;
@@ -24,9 +24,9 @@ impl ProvingRng for OsRngBackend {
     }
 
     fn sample_challenge(&mut self) -> [u8; 24] {
-        use rand::RngCore;
+        use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
         let mut out = [0u8; 24];
-        rand::rngs::OsRng.fill_bytes(&mut out);
+        UnwrapErr(SysRng).fill_bytes(&mut out);
         out
     }
 }

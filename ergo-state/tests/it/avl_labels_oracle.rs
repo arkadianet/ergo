@@ -184,7 +184,7 @@ fn random_mixed_insert_delete_matches_oracle_and_forced_recompute() {
     // After every op: digest matches the reference crate AND matches the
     // forced-full-recompute oracle (stored labels aren't stale).
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
 
     let mut ours = AvlTree::new();
     let mut oracle = oracle_prover();
@@ -195,16 +195,16 @@ fn random_mixed_insert_delete_matches_oracle_and_forced_recompute() {
         let choice: u32 = if known_keys.is_empty() {
             0
         } else {
-            rng.gen_range(0..3)
+            rng.random_range(0..3)
         };
         match choice {
             0 => {
                 // Insert (or upsert on collision).
-                let k = rng.gen_range(1u32..=10_000);
+                let k = rng.random_range(1u32..=10_000);
                 let mut key = [0u8; 32];
                 key[28..].copy_from_slice(&k.to_be_bytes());
-                let vlen = rng.gen_range(1..=32);
-                let value: Vec<u8> = (0..vlen).map(|_| rng.gen::<u8>()).collect();
+                let vlen = rng.random_range(1..=32);
+                let value: Vec<u8> = (0..vlen).map(|_| rng.random::<u8>()).collect();
                 let is_update = known_keys.contains(&key);
                 ours.insert(key, value.clone());
                 let op = if is_update {
@@ -225,10 +225,10 @@ fn random_mixed_insert_delete_matches_oracle_and_forced_recompute() {
             }
             1 => {
                 // Update an existing key.
-                let idx = rng.gen_range(0..known_keys.len());
+                let idx = rng.random_range(0..known_keys.len());
                 let key = known_keys[idx];
-                let vlen = rng.gen_range(1..=32);
-                let value: Vec<u8> = (0..vlen).map(|_| rng.gen::<u8>()).collect();
+                let vlen = rng.random_range(1..=32);
+                let value: Vec<u8> = (0..vlen).map(|_| rng.random::<u8>()).collect();
                 ours.insert(key, value.clone());
                 drive_oracle(
                     &Operation::Update(KeyValue {
@@ -240,7 +240,7 @@ fn random_mixed_insert_delete_matches_oracle_and_forced_recompute() {
             }
             2 => {
                 // Delete an existing key.
-                let idx = rng.gen_range(0..known_keys.len());
+                let idx = rng.random_range(0..known_keys.len());
                 let key = known_keys.swap_remove(idx);
                 ours.remove(&key);
                 drive_oracle(

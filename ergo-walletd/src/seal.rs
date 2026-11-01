@@ -392,8 +392,11 @@ fn watch_data_key(data_dir: &Path, passphrase: &str) -> Result<DataKey, WalletAd
             let params = ergo_wallet::storage::new_keystore_kdf();
             let mut salt = [0u8; 32];
             let mut iv = [0u8; 12];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut salt);
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut iv);
+            rand::Rng::fill_bytes(
+                &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                &mut salt,
+            );
+            rand::Rng::fill_bytes(&mut rand::rand_core::UnwrapErr(rand::rngs::SysRng), &mut iv);
             let kek =
                 ergo_wallet::encryption::derive_key_argon2id(passphrase.as_bytes(), &salt, params)
                     .map_err(|error| internal(error.to_string()))?;

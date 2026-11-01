@@ -227,6 +227,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "chacha20"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.1",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "cipher"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -477,7 +488,7 @@ dependencies = [
  "blake2",
  "byteorder",
  "bytes",
- "rand",
+ "rand 0.8.8",
  "sha2 0.9.9",
 ]
 
@@ -676,7 +687,7 @@ dependencies = [
  "k256",
  "md5",
  "pbkdf2",
- "rand",
+ "rand 0.10.2",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -713,7 +724,7 @@ dependencies = [
  "hmac",
  "k256",
  "parking_lot",
- "rand",
+ "rand 0.10.2",
  "redb 4.3.0",
  "serde",
  "serde_json",
@@ -827,7 +838,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "777e981195aca8a5251c1801fa2f32f1dc0dc63cba8953722ede90a5a3b5517e"
 dependencies = [
  "derive_more",
- "rand",
+ "rand 0.8.8",
  "thiserror 1.0.69",
 ]
 
@@ -1204,6 +1215,17 @@ dependencies = [
  "libc",
  "rand_chacha",
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
+dependencies = [
+ "chacha20",
+ "getrandom 0.4.3",
+ "rand_core 0.10.1",
 ]
 
 [[package]]

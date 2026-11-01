@@ -40,7 +40,7 @@ use ergo_ser::address::{
     decode_address_content_bytes, decode_address_to_tree_bytes, encode_address_from_tree_bytes,
     encode_p2pk_from_pubkey, AddressDecodeError, NetworkPrefix,
 };
-use rand::RngCore;
+use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 use serde_json::{json, Value as JsonValue};
 
 /// Extract the request body as a JSON string, returning the structured
@@ -83,7 +83,7 @@ pub(crate) fn bad_request(detail: impl Into<String>) -> Response {
 
 fn fresh_seed_hex(length: usize) -> String {
     let mut buf = vec![0u8; length];
-    rand::rngs::OsRng.fill_bytes(&mut buf);
+    UnwrapErr(SysRng).fill_bytes(&mut buf);
     hex::encode(&buf)
 }
 

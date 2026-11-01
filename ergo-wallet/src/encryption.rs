@@ -277,11 +277,11 @@ mod tests {
     // ----- helpers -----
 
     fn random_salt_iv() -> ([u8; 16], [u8; 12]) {
-        use rand::RngCore;
+        use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
         let mut salt = [0u8; 16];
         let mut iv = [0u8; 12];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
-        rand::rngs::OsRng.fill_bytes(&mut iv);
+        UnwrapErr(SysRng).fill_bytes(&mut salt);
+        UnwrapErr(SysRng).fill_bytes(&mut iv);
         (salt, iv)
     }
 

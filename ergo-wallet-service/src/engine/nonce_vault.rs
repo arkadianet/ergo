@@ -41,7 +41,10 @@ impl NonceVault {
         now: Instant,
     ) -> String {
         let mut random = [0u8; 16];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut random);
+        rand::Rng::fill_bytes(
+            &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+            &mut random,
+        );
         let handle = format!("{NONCE_HANDLE_PREFIX}{}", hex::encode(random));
         let mut entries = self.entries.lock();
         entries.retain(|_, entry| now.saturating_duration_since(entry.created) < NONCE_TTL);

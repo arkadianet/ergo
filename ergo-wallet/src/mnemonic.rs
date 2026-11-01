@@ -48,7 +48,10 @@ impl Mnemonic {
     pub fn generate(strength: MnemonicStrength) -> Result<Self, WalletError> {
         let entropy_len = strength.entropy_bytes();
         let mut entropy = Zeroizing::new(vec![0u8; entropy_len]);
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut entropy);
+        rand::Rng::fill_bytes(
+            &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+            &mut entropy,
+        );
         let inner = Bip39Mnemonic::from_entropy(&entropy)
             .map_err(|e| WalletError::InvalidMnemonic(e.to_string()))?;
         Ok(Self { inner })
