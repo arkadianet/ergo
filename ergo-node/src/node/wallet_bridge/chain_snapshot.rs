@@ -811,6 +811,170 @@ mod tests {
         );
     }
 
+    /// 0-conf chaining on the compat route: `/wallet/transaction/send` with an
+    /// explicit input that is the wallet's own unconfirmed output builds,
+    /// signs (resolving the parent from the same pool snapshot) and submits.
+    /// The same box already spent by a pending transaction is refused.
+    #[tokio::test]
+    async fn compat_send_chains_off_a_named_unconfirmed_wallet_output() {
+        use ergo_ser::{address::NetworkPrefix, ergo_box::serialize_ergo_box};
+        use ergo_wallet_protocol::scala::sending::{PaymentRequestDto, TransactionSendRequest};
+        use ergo_wallet_protocol::WalletAdminError;
+        use std::{
+            collections::{HashMap, HashSet},
+            sync::{Arc, Mutex},
+        };
+
+        struct Pool(Mutex<ergo_wallet_service::engine::mempool::MempoolBoxSnapshot>);
+        impl ergo_wallet_service::engine::MempoolOverlay for Pool {
+            fn is_spent_by_pool(&self, id: &Digest32) -> bool {
+                self.0.lock().unwrap().spent_box_ids.contains(id)
+            }
+            fn pool_spending_tx(&self, _: &Digest32) -> Option<Digest32> {
+                None
+            }
+            fn pool_outputs(&self) -> Arc<HashMap<Digest32, ErgoBox>> {
+                self.0.lock().unwrap().outputs.clone()
+            }
+            fn box_snapshot(
+                &self,
+                _: &[Digest32],
+            ) -> ergo_wallet_service::engine::mempool::MempoolBoxSnapshot {
+                self.0.lock().unwrap().clone()
+            }
+        }
+
+        #[derive(Default)]
+        struct RecordingSubmitter(Mutex<Vec<Vec<u8>>>);
+        #[async_trait::async_trait]
+        impl ergo_wallet_service::engine::TxSubmitter for RecordingSubmitter {
+            async fn submit_transaction(
+                &self,
+                bytes: Vec<u8>,
+            ) -> Result<String, ergo_wallet_service::engine::TxSubmitError> {
+                let transaction =
+                    ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap();
+                let id = ergo_ser::transaction::transaction_id(&transaction).unwrap();
+                self.0.lock().unwrap().push(bytes);
+                Ok(hex::encode(id.as_bytes()))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&directory.path().join("state.redb")).unwrap();
+        let db = store.db_arc();
+        let mut storage =
+            ergo_wallet::storage::SecretStorage::open(directory.path().join("wallet"));
+        storage
+            .restore(
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+                "",
+                "test",
+                false,
+            )
+            .unwrap();
+        let mut wallet = ergo_wallet_service::state::WalletState::empty(false);
+        ergo_wallet_service::engine::WalletBootService::unlock_and_sync(
+            &mut storage,
+            &mut wallet,
+            &ergo_wallet_service::RedbWalletStore::new(db.clone()),
+            NetworkPrefix::Mainnet,
+            "test",
+        )
+        .unwrap();
+        let address = wallet.change_address().unwrap().to_owned();
+        let pubkey =
+            ergo_ser::address::decode_p2pk_address(&address, NetworkPrefix::Mainnet).unwrap();
+        let tree_bytes = ergo_ser::address::build_p2pk_tree_bytes(&pubkey).unwrap();
+        let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(&tree_bytes)).unwrap();
+        // The change output of a transaction the wallet just sent: in the pool,
+        // not in the UTXO set.
+        let change = ErgoBox {
+            candidate: ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                10_000_000,
+                tree,
+                1,
+                vec![],
+                Default::default(),
+            )
+            .unwrap(),
+            transaction_id: ModifierId::from_bytes([0x44; 32]),
+            index: 1,
+        };
+        let change_id = change.box_id().unwrap();
+        let mut unrelated = change.clone();
+        unrelated.transaction_id = ModifierId::from_bytes([0x45; 32]);
+        let unrelated_id = unrelated.box_id().unwrap();
+        store
+            .initialize_genesis(&[(
+                *unrelated_id.as_bytes(),
+                serialize_ergo_box(&unrelated).unwrap(),
+            )])
+            .unwrap();
+        apply_headers(&mut store, 5);
+        let accessor = super::super::ChainStateAccessorImpl::chain_only(
+            ergo_state::reader::ChainStoreReader::new_from_db(db.clone()),
+            false,
+            None,
+        );
+        assert!(accessor
+            .chain_snapshot()
+            .unwrap()
+            .lookup_utxo(change_id.as_bytes())
+            .unwrap()
+            .is_none());
+        let pool = Arc::new(Pool(Mutex::new(
+            ergo_wallet_service::engine::mempool::MempoolBoxSnapshot {
+                outputs: Arc::new(HashMap::from([(change_id, change)])),
+                spent_box_ids: HashSet::new(),
+            },
+        )));
+        let submitter = Arc::new(RecordingSubmitter::default());
+        let engine = pool_test_engine(
+            Arc::new(parking_lot::RwLock::new(storage)),
+            Arc::new(parking_lot::RwLock::new(wallet)),
+            db,
+            Arc::new(accessor),
+            pool.clone(),
+            submitter.clone(),
+        );
+        let request = || TransactionSendRequest {
+            requests: vec![PaymentRequestDto {
+                address: address.clone(),
+                value: 2_000_000,
+                assets: vec![],
+            }],
+            inputs: Some(vec![hex::encode(change_id.as_bytes())]),
+            data_inputs: None,
+            fee: None,
+        };
+
+        let tx_id = engine.transaction_send(request()).await.unwrap();
+        let submitted = submitter.0.lock().unwrap().clone();
+        assert_eq!(submitted.len(), 1);
+        let transaction =
+            ergo_ser::transaction::read_transaction(&mut VlqReader::new(&submitted[0])).unwrap();
+        assert_eq!(transaction.inputs.len(), 1);
+        assert_eq!(transaction.inputs[0].box_id, change_id);
+        assert!(!transaction.inputs[0].spending_proof.proof.is_empty());
+        assert_eq!(
+            hex::encode(
+                ergo_ser::transaction::transaction_id(&transaction)
+                    .unwrap()
+                    .as_bytes()
+            ),
+            tx_id
+        );
+
+        // Once a pending transaction spends it, naming it again is a double spend.
+        pool.0.lock().unwrap().spent_box_ids.insert(change_id);
+        assert!(matches!(
+            engine.transaction_send(request()).await,
+            Err(WalletAdminError::BadRequest(m)) if m.contains("already spent by a pending transaction")
+        ));
+        assert_eq!(submitter.0.lock().unwrap().len(), 1);
+    }
+
     /// #684: walletd signs a contract input against the context this node's
     /// mempool admits with. The contract is
     /// `sigmaProp(CONTEXT.preHeader.minerPk == groupGenerator) && proveDlog(groupGenerator)`:
