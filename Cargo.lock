@@ -1070,6 +1070,7 @@ dependencies = [
  "ergo-primitives",
  "ergo-ser",
  "hex",
+ "proptest",
  "redb 4.3.0",
  "tempfile",
  "thiserror 2.0.21",

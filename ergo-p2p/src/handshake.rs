@@ -102,14 +102,26 @@ fn serialize_feature_body(feature: &PeerFeature) -> (u8, Vec<u8>) {
         PeerFeature::LocalAddress { addr, port } => {
             let mut w = VlqWriter::new();
             w.put_bytes(addr);
-            w.put_u32(*port);
+            // Cap at i32::MAX: the parse side enforces that bound
+            // (`get_u32_exact`, mirroring Scala's `getUInt().toIntExact` in
+            // `LocalAddressPeerFeatureSerializer.parse`,
+            // LocalAddressPeerFeature.scala:33), and emitting a value it
+            // rejects would make serialization non-idempotent. Real socket
+            // ports are <= 65535, so like the >255-byte name truncation and
+            // the 127-feature cap this never fires in production.
+            w.put_u32((*port).min(i32::MAX as u32));
             (FEATURE_LOCAL_ADDRESS, w.result())
         }
         PeerFeature::SessionId { magic, session_id } => {
-            let mut buf = Vec::with_capacity(12);
-            buf.extend_from_slice(magic);
-            buf.extend_from_slice(&session_id.to_be_bytes());
-            (FEATURE_SESSION_ID, buf)
+            // Scala: `putBytes(magic)` + `putLong(sessionId)`
+            // (SessionIdPeerFeature.scala:33-39). scorex's `putLong` is
+            // VLQ+ZigZag (scorex-util 0.2.2 `VLQWriter.putLong`), not a
+            // fixed-width write — the body is 4 magic bytes plus a
+            // 1..=10-byte zigzag VLQ.
+            let mut w = VlqWriter::new();
+            w.put_bytes(magic);
+            w.put_i64(*session_id);
+            (FEATURE_SESSION_ID, w.result())
         }
         PeerFeature::RestApiUrl { url } => {
             let url_bytes = truncate_to_u8(url.as_bytes());
@@ -155,54 +167,88 @@ fn has_url_scheme(s: &str) -> bool {
     }
 }
 
+/// Deserialize a single peer feature from its raw body bytes.
+///
+/// A known feature id is accepted only when the body is exactly the
+/// canonical serialization of that feature (in-range fields, fully
+/// consumed). Anything else — truncation, trailing bytes, out-of-range
+/// values — is preserved as `Unknown { feature_id, data }`:
+///
+/// * this is a documented superset over Scala, which *drops* a feature
+///   that fails `parseTry` (PeerSpec.scala:94-101: "we ignore a feature
+///   found in the PeersData if we do not know how to parse it or failed
+///   to do that");
+/// * it keeps `serialize(deserialize(x)) == x` byte-stable for every body
+///   this codec can emit, which matters because preserved `PeerSpec`s are
+///   re-emitted in `Peers` replies.
+///
+/// Note that Scala silently ignores trailing bytes in a feature chunk
+/// (the chunk reader is not checked for exhaustion); we deliberately do
+/// not mirror that, since re-emitting the typed feature would rewrite the
+/// peer's bytes.
 fn deserialize_feature(feature_id: u8, data: &[u8]) -> PeerFeature {
+    let unknown = || {
+        tracing::debug!(
+            feature_id,
+            len = data.len(),
+            "handshake: feature body not canonical; preserving as Unknown"
+        );
+        PeerFeature::Unknown {
+            feature_id,
+            data: data.to_vec(),
+        }
+    };
     match feature_id {
+        // Scala: `getBytes(4)` + `getUInt().toIntExact` — the port is
+        // bounded by i32::MAX (LocalAddressPeerFeature.scala:31-35,
+        // scorex-util `VLQReader.getUIntExact`).
         FEATURE_LOCAL_ADDRESS => {
             if data.len() < 5 {
-                return PeerFeature::Unknown {
-                    feature_id,
-                    data: data.to_vec(),
-                };
+                return unknown();
             }
             let mut addr = [0u8; 4];
             addr.copy_from_slice(&data[..4]);
             let mut r = VlqReader::new(&data[4..]);
-            // Malformed port VLQ keeps the existing coercion to 0 (Scala
-            // parity) but is no longer silent.
-            let port = match r.get_u32_exact() {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::debug!(error = ?e, feature = "LocalAddress.port", "handshake: malformed feature field; coercing to 0");
-                    0
-                }
-            };
-            PeerFeature::LocalAddress { addr, port }
+            // Scala parity on well-formed input: `getBytes(4)` +
+            // `getUInt().toIntExact` (LocalAddressPeerFeature.scala:31-35).
+            // `toIntExact` rejects port values above i32::MAX, in which case
+            // `PeerSpecSerializer.parse` drops the whole feature
+            // (`parseTry(...).toOption`, PeerSpec.scala:99-101). We preserve
+            // the raw feature bytes as Unknown instead of fabricating a port
+            // (documented superset stance for malformed feature data), which
+            // also keeps serialize->deserialize byte-idempotent.
+            // The port VLQ must end exactly at the end of the body (see the
+            // function doc for why trailing bytes are preserved).
+            match (r.get_u32_exact(), r.remaining()) {
+                (Ok(port), 0) => PeerFeature::LocalAddress { addr, port },
+                _ => unknown(),
+            }
         }
+        // Scala: `getBytes(MagicLength=4)` + `getLong()` — `getLong` is
+        // VLQ+ZigZag, so the body is 4 magic bytes plus a 1..=10-byte
+        // zigzag VLQ (SessionIdPeerFeature.scala:36-40, scorex-util
+        // `VLQReader.getLong`), not a fixed-width 8-byte write.
         FEATURE_SESSION_ID => {
-            if data.len() < 12 {
-                return PeerFeature::Unknown {
-                    feature_id,
-                    data: data.to_vec(),
-                };
+            if data.len() < 5 {
+                return unknown();
             }
             let mut magic = [0u8; 4];
             magic.copy_from_slice(&data[..4]);
-            let session_id = i64::from_be_bytes(data[4..12].try_into().unwrap());
-            PeerFeature::SessionId { magic, session_id }
+            let mut r = VlqReader::new(&data[4..]);
+            match (r.get_i64(), r.remaining()) {
+                (Ok(session_id), 0) => PeerFeature::SessionId { magic, session_id },
+                _ => unknown(),
+            }
         }
         FEATURE_REST_API_URL => {
             if data.is_empty() {
-                return PeerFeature::Unknown {
-                    feature_id,
-                    data: data.to_vec(),
-                };
+                return unknown();
             }
             let url_len = data[0] as usize;
-            if data.len() < 1 + url_len {
-                return PeerFeature::Unknown {
-                    feature_id,
-                    data: data.to_vec(),
-                };
+            // The body is exactly 1+len bytes (Scala: `getUByte()` +
+            // `getBytes(len)`); trailing bytes are preserved, not ignored.
+            if data.len() != 1 + url_len {
+                return unknown();
             }
             let url_bytes = &data[1..1 + url_len];
             // Validate UTF-8 strictly, then check URL syntax.
@@ -210,53 +256,43 @@ fn deserialize_feature(feature_id: u8, data: &[u8]) -> PeerFeature {
             // scheme://... structure. We approximate by requiring "scheme://"
             // where scheme is at least one ASCII letter.
             let url_str = match std::str::from_utf8(url_bytes) {
-                Ok(s) if !s.is_empty() => s,
-                _ => {
-                    return PeerFeature::Unknown {
-                        feature_id,
-                        data: data.to_vec(),
-                    }
-                }
+                Ok(s) if !s.is_empty() && has_url_scheme(s) => s,
+                _ => return unknown(),
             };
-            if !has_url_scheme(url_str) {
-                return PeerFeature::Unknown {
-                    feature_id,
-                    data: data.to_vec(),
-                };
-            }
             PeerFeature::RestApiUrl {
                 url: url_str.to_string(),
             }
         }
+        // Scala: `getByte` stateType (unknown code throws, feature dropped)
+        // + `getByte` verify (>0 = true) + `getOption(getInt)` + `getInt`
+        // (`ModeFeatureSerializer.parse`, ModePeerFeature.scala). We are
+        // lenient where Scala throws on the stateType code (superset: any
+        // u8 is kept), but strict on the option flag (the serializer emits
+        // only 0|1) and on full consumption — see the function doc.
         FEATURE_MODE => {
             let mut r = VlqReader::new(data);
-            // Truncated/malformed Mode fields keep their existing default
-            // coercions (Scala parity) but are no longer silently swallowed.
             let state_type = match r.get_u8() {
                 Ok(b) => b,
-                Err(e) => {
-                    tracing::debug!(error = ?e, feature = "Mode.state_type", "handshake: malformed feature field; coercing to 0");
-                    0
-                }
+                Err(_) => return unknown(),
             };
+            // Scala's `byteToBoolean` compares the *signed* byte
+            // (`if (byte > 0) true else false`, ModePeerFeature.scala:109),
+            // so 0x80..=0xFF parse as `false`.
             let verify_tx = match r.get_u8() {
-                Ok(b) => b > 0,
-                Err(e) => {
-                    tracing::debug!(error = ?e, feature = "Mode.verify_tx", "handshake: malformed feature field; coercing to false");
-                    false
-                }
+                Ok(b) => (b as i8) > 0,
+                Err(_) => return unknown(),
             };
-            // Read option: byte(0|1) + value
             let nipopow = match r.get_u8() {
-                Ok(1) => r.get_i32().ok(),
-                _ => None,
+                Ok(0) => None,
+                Ok(1) => match r.get_i32() {
+                    Ok(v) => Some(v),
+                    Err(_) => return unknown(),
+                },
+                _ => return unknown(),
             };
             let blocks_to_keep = match r.get_i32() {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::debug!(error = ?e, feature = "Mode.blocks_to_keep", "handshake: malformed feature field; coercing to archive default (-1)");
-                    -1
-                }
+                Ok(v) if r.remaining() == 0 => v,
+                _ => return unknown(),
             };
             PeerFeature::Mode {
                 state_type,
@@ -265,10 +301,7 @@ fn deserialize_feature(feature_id: u8, data: &[u8]) -> PeerFeature {
                 blocks_to_keep,
             }
         }
-        _ => PeerFeature::Unknown {
-            feature_id,
-            data: data.to_vec(),
-        },
+        _ => unknown(),
     }
 }
 
@@ -325,9 +358,15 @@ pub fn serialize_peer_spec_to(spec: &PeerSpec, w: &mut VlqWriter) {
     match &spec.declared_address {
         Some(addr) => {
             w.put_u8(1); // option present
-            w.put_u8((addr.addr.len() + 4) as u8); // length hint
+                         // Length hint: Scala writes `put((addr.size + 4).toByteExact)`
+                         // (PeerSpec.scala:58) — the fixed 4 is an offset, not a port
+                         // width (the port is VLQ after the address bytes).
+            w.put_u8((addr.addr.len() + 4) as u8);
             w.put_bytes(&addr.addr);
-            w.put_u32(addr.port);
+            // Same i32::MAX cap as the LocalAddress feature port: the parse
+            // side (and Scala's `getUInt().toIntExact`, PeerSpec.scala:84)
+            // rejects larger values. Real declared ports are <= 65535.
+            w.put_u32(addr.port.min(i32::MAX as u32));
         }
         None => {
             w.put_u8(0); // option absent
@@ -377,7 +416,13 @@ pub fn deserialize_peer_spec_from(r: &mut VlqReader) -> Result<PeerSpec, Handsha
     let addr_present = r.get_u8()?;
     let declared_address = if addr_present == 1 {
         let total_len = r.get_u8()? as usize;
-        let addr_len = total_len.saturating_sub(4);
+        // Scala: `r.getBytes(fas - 4)` (PeerSpec.scala:83) throws for
+        // `fas < 4` (negative length), failing the whole handshake —
+        // mirror that instead of saturating to a zero-length address.
+        if total_len < 4 {
+            return Err(HandshakeError::MalformedDeclaredAddress(total_len));
+        }
+        let addr_len = total_len - 4;
         let addr = r.get_bytes(addr_len)?.to_vec();
         let port = r.get_u32_exact()?;
         Some(DeclaredAddress { addr, port })
@@ -427,6 +472,8 @@ pub enum HandshakeError {
     Read(#[from] ReadError),
     #[error("negative feature count: {0}")]
     NegativeFeatureCount(i8),
+    #[error("malformed declared address length byte {0}: must be >= 4 (address bytes + 4 offset)")]
+    MalformedDeclaredAddress(usize),
 }
 
 pub fn serialize_handshake(hs: &Handshake) -> Vec<u8> {
@@ -522,6 +569,67 @@ mod tests {
         assert_eq!(addr.addr, vec![127, 0, 0, 1]);
         assert_eq!(addr.port, 9030);
         assert_eq!(parsed.peer_spec.features.len(), 2);
+    }
+
+    /// Golden vector: a real mainnet node handshake captured by the Scala
+    /// test suite (`ergo-core/src/test/scala/org/ergoplatform/network/
+    /// HandshakeSpecification.scala:13`, v6.0.7). Byte layout, verified
+    /// against `PeerSpecSerializer.scala` / `ModeFeatureSerializer.scala` /
+    /// `LocalAddressPeerFeature.scala`:
+    ///
+    /// `bcd2919cee2e`  time VLQ = 1610134874428 (Fri, 8 Jan 2021 19:41:14 UTC)
+    /// `07` + `ergoref`            agent name
+    /// `03 03 06`                  protocol version 3.3.6
+    /// `12` + `ergo-mainnet-3.3.6` node name
+    /// `00`                        declared address: absent
+    /// `02`                        feature count (signed byte)
+    /// `10` `04` `00 01 00 01`     mode: Utxo, verify-tx, no nipopow, blocks-to-keep -1
+    /// `02` `06` `7f000001` `ae46` local address 127.0.0.1:9006 (port VLQ)
+    #[test]
+    fn real_node_handshake_fixture() {
+        const HEX: &str =
+            "bcd2919cee2e076572676f726566030306126572676f2d6d61696e6e65742d332e332e36000210040001000102067f000001ae46";
+        let bytes = hex::decode(HEX).unwrap();
+        assert_eq!(bytes.len(), 52);
+
+        let (hs, consumed) = deserialize_handshake_with_consumed(&bytes).unwrap();
+        assert_eq!(consumed, bytes.len(), "fixture must be fully consumed");
+
+        assert_eq!(hs.time, 1610134874428);
+        let spec = &hs.peer_spec;
+        assert_eq!(spec.agent_name, "ergoref");
+        assert_eq!(
+            spec.version,
+            Version {
+                major: 3,
+                minor: 3,
+                patch: 6
+            }
+        );
+        assert_eq!(spec.node_name, "ergo-mainnet-3.3.6");
+        assert!(spec.declared_address.is_none());
+        assert_eq!(spec.features.len(), 2);
+        match &spec.features[0] {
+            PeerFeature::Mode {
+                state_type,
+                verify_tx,
+                nipopow,
+                blocks_to_keep,
+            } => {
+                assert_eq!(*state_type, 0); // StateType.Utxo
+                assert!(*verify_tx);
+                assert!(nipopow.is_none());
+                assert_eq!(*blocks_to_keep, -1); // AllBlocksKept
+            }
+            other => panic!("expected Mode feature, got {other:?}"),
+        }
+        match &spec.features[1] {
+            PeerFeature::LocalAddress { addr, port } => {
+                assert_eq!(addr, &[127, 0, 0, 1]);
+                assert_eq!(*port, 9006);
+            }
+            other => panic!("expected LocalAddress feature, got {other:?}"),
+        }
     }
 
     #[test]
@@ -967,5 +1075,157 @@ mod tests {
         let bytes = serialize_handshake(&hs);
         let (parsed, _) = deserialize_handshake_with_consumed(&bytes).unwrap();
         assert_eq!(parsed.peer_spec.features.len(), (u8::MAX as usize) / 2);
+    }
+
+    /// Golden vectors for the `SessionId` feature body, computed
+    /// independently in Python from the pinned layout
+    /// `putBytes(magic)` + `putLong(sessionId)` (scorex `putLong` =
+    /// VLQ+ZigZag, scorex-util 0.2.2 `VLQWriter.putLong` /
+    /// `VLQReader.getLong`):
+    ///
+    /// | session_id | body hex |
+    /// |---|---|
+    /// | 42 | `0100020454` |
+    /// | -12345678 | `010002049b85e30b` |
+    /// | -1 | `0100020401` |
+    /// | 0 | `0100020400` |
+    /// | i64::MAX | `01000204feffffffffffffffff01` |
+    /// | i64::MIN | `01000204ffffffffffffffffff01` |
+    ///
+    /// These pin the wire format against the pre-fix bug where the
+    /// serializer wrote the id as a fixed 8-byte big-endian (and the
+    /// parser read one back), which silently misread Scala peers'
+    /// variable-length zigzag bodies in both directions.
+    #[test]
+    fn session_id_feature_wire_format_golden_vectors() {
+        let magic = [1, 0, 2, 4];
+        let cases = [
+            (42i64, "0100020454"),
+            (-12345678i64, "010002049b85e30b"),
+            (-1i64, "0100020401"),
+            (0i64, "0100020400"),
+            (i64::MAX, "01000204feffffffffffffffff01"),
+            (i64::MIN, "01000204ffffffffffffffffff01"),
+        ];
+        for (sid, expected) in cases {
+            let (id, body) = serialize_feature_body(&PeerFeature::SessionId {
+                magic,
+                session_id: sid,
+            });
+            assert_eq!(id, FEATURE_SESSION_ID, "sid={sid}");
+            assert_eq!(
+                hex::encode(&body),
+                expected,
+                "wire drift for session_id={sid}"
+            );
+            // And the parser must invert it exactly.
+            match deserialize_feature(FEATURE_SESSION_ID, &body) {
+                PeerFeature::SessionId {
+                    magic: m,
+                    session_id: s,
+                } => {
+                    assert_eq!(m, magic);
+                    assert_eq!(s, sid);
+                }
+                other => panic!("roundtrip failed for sid={sid}: {other:?}"),
+            }
+        }
+    }
+
+    /// Ports above `i32::MAX` are unrepresentable on the parse side
+    /// (`get_u32_exact` mirrors Scala's `getUInt().toIntExact`), so the
+    /// serializer caps them instead of emitting bytes it would reject.
+    /// Pinned at the exact boundary 2^31 = i32::MAX + 1 (the case the
+    /// offline fuzz suite first found).
+    #[test]
+    fn local_address_port_capped_at_i32_max() {
+        let over = serialize_feature_body(&PeerFeature::LocalAddress {
+            addr: [0, 0, 0, 0],
+            port: 2u32.pow(31),
+        });
+        let maxed = serialize_feature_body(&PeerFeature::LocalAddress {
+            addr: [0, 0, 0, 0],
+            port: i32::MAX as u32,
+        });
+        assert_eq!(over.0, maxed.0);
+        assert_eq!(
+            hex::encode(&over.1),
+            "00000000ffffffff07", // 4 zero addr bytes + VLQ(0x7FFFFFFF)
+        );
+        match deserialize_feature(over.0, &over.1) {
+            PeerFeature::LocalAddress { port, .. } => {
+                assert_eq!(port, i32::MAX as u32);
+            }
+            other => panic!("expected LocalAddress, got {other:?}"),
+        }
+    }
+
+    /// A known feature id with a non-canonical body (trailing bytes,
+    /// truncated fields, out-of-range values) is preserved verbatim as
+    /// `Unknown`, never coerced into a typed feature with fabricated
+    /// fields. Preserved specs are re-emitted in `Peers` replies, so
+    /// `serialize(deserialize(x)) == x` must hold for these bodies.
+    #[test]
+    fn non_canonical_feature_bodies_preserved_as_unknown() {
+        // feature id 2 = LocalAddress; 6 bytes = 4 addr + port VLQ(1
+        // byte) + one trailing byte.
+        let body: [u8; 6] = [0, 0, 0, 0, 0, 0];
+        match deserialize_feature(FEATURE_LOCAL_ADDRESS, &body) {
+            PeerFeature::Unknown { feature_id, data } => {
+                assert_eq!(feature_id, FEATURE_LOCAL_ADDRESS);
+                assert_eq!(data, body.to_vec());
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+        // The canonical 5-byte form of the same prefix still parses.
+        match deserialize_feature(FEATURE_LOCAL_ADDRESS, &body[..5]) {
+            PeerFeature::LocalAddress { addr, port } => {
+                assert_eq!(addr, [0, 0, 0, 0]);
+                assert_eq!(port, 0);
+            }
+            other => panic!("expected LocalAddress, got {other:?}"),
+        }
+        // Trailing bytes after a valid Mode body are preserved too.
+        let (id, mode_body) = serialize_feature_body(&PeerFeature::Mode {
+            state_type: 0,
+            verify_tx: true,
+            nipopow: None,
+            blocks_to_keep: -1,
+        });
+        assert_eq!(id, FEATURE_MODE);
+        let mut padded = mode_body.clone();
+        padded.push(0);
+        match deserialize_feature(id, &padded) {
+            PeerFeature::Unknown { feature_id, data } => {
+                assert_eq!(feature_id, FEATURE_MODE);
+                assert_eq!(data, padded);
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    /// A declared-address length hint below 4 cannot hold the fixed 4
+    /// offset (Scala `getBytes(fas - 4)` throws, failing the whole
+    /// handshake — PeerSpec.scala:83); mirror that rejection instead of
+    /// saturating to a zero-length address.
+    #[test]
+    fn declared_address_length_below_4_rejects_spec() {
+        let mut w = VlqWriter::new();
+        w.put_u8(1);
+        w.put_bytes(b"a"); // agent
+        w.put_u8(3);
+        w.put_u8(3);
+        w.put_u8(6); // version
+        w.put_u8(1);
+        w.put_bytes(b"n"); // node name
+        w.put_u8(1); // declared present
+        w.put_u8(3); // length hint < 4
+        let bytes = w.result();
+        let mut r = VlqReader::new(&bytes);
+        let err = deserialize_peer_spec_from(&mut r).unwrap_err();
+        assert!(
+            matches!(err, HandshakeError::MalformedDeclaredAddress(3)),
+            "unexpected error: {err:?}"
+        );
     }
 }

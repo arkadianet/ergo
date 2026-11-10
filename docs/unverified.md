@@ -8,14 +8,29 @@ Reference pin: `ergoplatform/ergo` **v6.0.7**
 (`~/Coding/remote/ergo-scala`). Wire-facing files are unchanged from
 v6.0.5; see [`survey.md`](survey.md).
 
+## Wire bytes: verified against an external oracle
+
+These rows were on the "no imported oracle" list and are now pinned by
+imported or independently computed byte vectors (all in `ergo-p2p`,
+committed with the codec/fuzz work):
+
+| Item | Evidence |
+|---|---|
+| Handshake full frame | Real-node 52-byte hex fixture imported from `ergo-core/src/test/.../network/HandshakeSpecification.scala:13` (`real_node_handshake_fixture` in `ergo-p2p/src/handshake.rs`): agent `ergoref`, v3.3.6, `LocalAddress` 127.0.0.1:9006. The fixture also pins the `LocalAddress` **port wire encoding as VLQ** — port 9006 is parsed as a 2-byte VLQ from the real bytes. |
+| GetPeers (code 1) | Full-frame golden vector `010002040100000000` (`get_peers_full_frame_vector`, `ergo-p2p/src/message/tests.rs`), computed independently in Python per `MessageSerializer.scala:22-34` (blake2b256[:4] checksum). |
+| Peers (code 2) | Full-frame golden vector with a fixed `PeerSpec` (`peers_full_frame_vector`, same file), computed independently in Python. |
+| SyncInfo V2 full frame | Full-frame golden vector `0100020441000000e1437c8549{225 B payload}` (`sync_info_v2_full_frame_vector`, same file); payload prefix `00ff01dc01` = VLQ `putUShort(0)` + marker `0xff` + count 1 + VLQ length. |
+
+**Key codec pin:** scorex `Writer.putUShort` / `putUInt` / `putLong` are
+**VLQ** (plus zigzag for signed), not fixed-width big-endian —
+`VLQWriter.scala`, scorex-util 0.2.2. Corroborated by live traffic:
+the Rust VLQ decoder parsed real mainnet 4-header V2 syncs and the
+real-node handshake fixture without modification.
+
 ## Wire bytes without an imported external oracle
 
 | Item | Current evidence | How it will be verified |
 |---|---|---|
-| Handshake full frame | Codec implemented from `HandshakeSerializer.scala` / `PeerSpec.scala`; only a synthetic code-75 exchange in `wire_tcp_pair.rs`. | Import the real-node hex fixture already present in `ergo-core/src/test/.../HandshakeSpecification.scala` (`bcd2919c…`). |
-| GetPeers (code 1) | Empty-payload requirement follows `BasicMessagesRepo.scala:18-29`; round-trip unit test only. | Add a full-frame vector generated from the Scala `MessageSerializer` (empty payload, so deterministic). |
-| Peers (code 2) | PeerSpec reuse, count limit, round-trip unit tests. | Add a deterministic Scala-serialized vector with a fixed `PeerSpec`. |
-| SyncInfo V2 full frame | Repo vector is **payload only**, transcribed from `ErgoSyncInfo.scala`; not an upstream byte assertion. | Generate a full frame with the Scala serializer using fixed header bytes. |
 | SnapshotsInfo / GetSnapshotsInfo | Byte-layout unit tests derived from `BasicMessagesRepo.scala`. | **Deferred by decision** (Phase 0 keeps parse-level parity only). |
 | Manifest / GetManifest | Same. | **Deferred by decision.** |
 | UtxoChunk / GetUtxoChunk | Same. | **Deferred by decision.** |
@@ -35,6 +50,16 @@ must either be fixed, tested as intentional, or listed in the report.
    `PeerSpec` we relay through `Peers` can carry features Scala would have
    discarded. Harmless for parsing, observable in a byte differential.
    Status: open; decide whether to keep (round-trip fidelity) and document.
+   Since the codec/fuzz fix, the preservation also applies to *known*
+   feature ids whose body is not the canonical serialization (trailing
+   bytes, truncated fields, out-of-range values) — `deserialize_feature`
+   requires exact field bounds and full consumption, and preserves
+   otherwise. This is a deliberate superset over Scala: Scala's `parseTry`
+   (`Serializer.scala`, scorex-util 0.2.2) is a plain `Try(parse(r))` and
+   its chunk reader is not checked for exhaustion, so Scala silently
+   ignores trailing bytes in a feature chunk. The stricter parse keeps
+   `serialize(deserialize(x)) == x` byte-stable for preserved specs, which
+   matters because they are re-emitted in `Peers` replies.
 
 2. **SyncInfo V2 header length boundary (fixed in this change).**
    Scala requires `headerBytesCount < 1000`; the Rust decoder previously
@@ -74,6 +99,35 @@ must either be fixed, tested as intentional, or listed in the report.
    tip−128, tip−512, `pop-os-mainnet` stream). Status: open — decide
    whether to match the 4-header form for closer parity or document the
    superset as intentional.
+
+7. **`SessionId` feature wire format (found by the offline fuzz suite,
+   fixed in this change).** The Rust codec serialized the 64-bit session id
+   as a fixed 8-byte big-endian and parsed it the same way. Scala writes
+   `putBytes(magic)` + `putLong(sessionId)`
+   (`SessionIdPeerFeature.scala:36-40`), and scorex's `putLong`/`getLong`
+   are **VLQ + zigzag** (scorex-util 0.2.2 `VLQWriter.putLong` /
+   `VLQReader.getLong`) — a variable-length 1..=10-byte body. The old
+   codec therefore misread every Scala peer's session id (and Scala
+   misreads ours) in both directions, silently breaking self-connection
+   detection (`ergo-node/src/node/events.rs` extracts the id from the
+   peer's feature). Fixed to VLQ+zigzag on both sides; six golden body
+   vectors pin the format (`session_id_feature_wire_format_golden_vectors`,
+   `ergo-p2p/src/handshake.rs`).
+
+8. **Feature/declared-address port bounds and declared-address length
+   byte (found by the offline fuzz suite, fixed in this change).**
+   (a) `LocalAddress` and declared-address ports were serialized up to
+   `u32::MAX` while the parser capped at `i32::MAX`
+   (`get_u32_exact` mirrors Scala `getUInt().toIntExact`,
+   `LocalAddressPeerFeature.scala:31-35`), so port 2^31 (the fuzz
+   regression case) failed the round-trip byte-identity property. The
+   serializer now caps at `i32::MAX`; real ports are ≤ 65535 so this never
+   fires in production. (b) A declared-address length hint below 4
+   previously saturated to a zero-length address; Scala
+   `getBytes(fas - 4)` (`PeerSpec.scala:83`) throws instead, failing the
+   whole handshake — mirrored with `HandshakeError::MalformedDeclaredAddress`.
+   Both pinned by unit tests and by the saved proptest regression cases in
+   `ergo-p2p/tests/proptest-regressions/fuzz_offline.txt`.
 
 ## Network / measurement assumptions that need data
 
