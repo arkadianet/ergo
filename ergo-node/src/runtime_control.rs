@@ -370,6 +370,25 @@ fn merge<T: serde::Serialize + serde::de::DeserializeOwned>(
     serde_json::from_value(value).map_err(|e| OperatorControlError::Invalid(e.to_string()))
 }
 
+/// Serializes the tests that observe or mutate the process-global
+/// storage-fault state (`ergo_state::storage_observability`), which has no
+/// per-test isolation: a fault recorded by one test carries a real
+/// wall-clock timestamp and stays "active" for probes for a minute.
+#[cfg(test)]
+pub(crate) static STORAGE_FAULT_TESTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire the storage-fault test lock and clear the global fault state, so
+/// a fault recorded by a concurrent test cannot leak into this test's
+/// readiness probes. Hold the returned guard for the whole test body.
+#[cfg(test)]
+pub(crate) fn clean_storage_faults() -> std::sync::MutexGuard<'static, ()> {
+    let guard = STORAGE_FAULT_TESTS_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    ergo_state::storage_observability::clear_storage_faults_for_tests();
+    guard
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,6 +462,7 @@ mod tests {
 
     #[test]
     fn sync_is_live_but_unready_and_stale_heartbeat_fails_liveness() {
+        let _clean_faults = clean_storage_faults();
         let control = RuntimeControl::new(&config()).unwrap();
         let now = Instant::now();
         let mut snapshot = crate::snapshot::NodeSnapshot::empty(
@@ -516,6 +536,7 @@ mod tests {
 
     #[test]
     fn readiness_tolerates_at_tip_gap_and_long_network_block_interval() {
+        let _clean_faults = clean_storage_faults();
         let control = RuntimeControl::new(&config()).unwrap();
         control.beat();
         let mut snapshot = probe_snapshot();
@@ -550,6 +571,7 @@ mod tests {
 
     #[test]
     fn readiness_accepts_consensus_future_timestamp_drift() {
+        let _clean_faults = clean_storage_faults();
         let control = RuntimeControl::new(&config()).unwrap();
         control.beat();
         let mut snapshot = probe_snapshot();
@@ -626,6 +648,7 @@ mod tests {
 
     #[test]
     fn required_dependencies_and_tip_freshness_gate_readiness() {
+        let _clean_faults = clean_storage_faults();
         let mut config = config();
         config.api_readiness.require_indexer = true;
         config.api_readiness.require_wallet = true;
