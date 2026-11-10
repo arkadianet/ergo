@@ -20,6 +20,7 @@ v6.0.5; see [`survey.md`](survey.md).
 | Manifest / GetManifest | Same. | **Deferred by decision.** |
 | UtxoChunk / GetUtxoChunk | Same. | **Deferred by decision.** |
 | NipopowProof / GetNipopowProof | Same. | **Deferred by decision.** |
+| Early-mainnet header extension content | Captured live: mainnet headers at heights 1–400 arrive as 278/279 B (vs 220 B for tip headers) — the extra bytes are the variable-length header extension; content not yet identified (2026-11-10, `pop-os-mainnet` stream). Irrelevant to wire parity (the parser handles the extension generically; both sizes parse and id-match). | Identify by fetching one such block (e.g. id `55ee5b282051993f…`, height 60) from a full-node/explorer block view and reading the extension payload; only needed if the report cites early-header sizes. |
 
 ## Behavioural differences observed in code review
 
@@ -95,14 +96,17 @@ The `[observer]` node hook is implemented (see
 [`phase0-observer.md`](phase0-observer.md)) and passes unit and config
 tests.
 
-- Testnet run: **DONE** (2026-11-10, `testnet-hook` vantage). Verified
-  live: `observer_start`, `announce` (`syncinfo_v2` with heights and
-  `inv` tx), `request_sent`, `section_received` (solicited, with bytes),
-  `tx_outcome` (`admitted` with fee, size, and `input_ids`), and
-  `block_applied`. `header_validated` did **not** appear live because
-  this node is the only active miner on testnet — every applied block is
-  locally mined and never transits the peer header pipeline. The
-  executor → observer wiring it needs is unit-tested:
+- Testnet run: **LIVE** (2026-11-10 13:36 local, `testnet-hook` vantage).
+  Verified live: `observer_start`, `announce` (`syncinfo_v2` with heights
+  and `inv` tx), `request_sent`, `section_received` (solicited, with
+  bytes), `tx_outcome` (`admitted` with fee, size, and `input_ids`),
+  `block_applied`, and — once peer blocks started flowing —
+  `header_validated` (58 records by 17:12). Note the node is an active
+  testnet miner: locally mined blocks fire `block_applied` (340 in 3.6 h)
+  but never `header_validated` (the local path bypasses the peer header
+  pipeline) and carry no `since_first_announce` — the 58 peer blocks match
+  the 58 `header_validated` records 1:1. The executor → observer wiring is
+  also unit-tested:
   `ergo-sync` `executor::tests::validation_observer_fires_for_each_installed_header`
   (real mainnet header fixtures, single and batch paths, asserts the
   callback fires exactly once per installed header with the installed id
@@ -111,10 +115,15 @@ tests.
   The mainnet node was restarted on a binary built from its current PR #694
   base (`f70bd07b`, nonP2pk API preserved) plus this branch's change set —
   the only delta is the Phase 0 work (observer hook + codec parity fixes).
-  Verified: `observer_start`, `announce` flowing, peer ids join with the
-  standalone observer and crawler (shared pseudonym key). `tx_outcome`,
-  `block_applied`, and `header_validated` are expected to appear as mainnet
-  blocks/txs flow. The standalone observer is running the minimum-48h
+  Verified live by 17:12: `observer_start`, `announce` flowing, peer ids
+  join with the standalone observer and crawler (shared pseudonym key),
+  and all three outcome events flowing — `tx_outcome` (440+, rejection
+  mix analysed in the parity section of
+  [`phase0-observer.md`](phase0-observer.md)), `block_applied` (49, all
+  peer-announced — the node mined none in the window), `header_validated`
+  (49). See the partial-data analysis there for the missing-`duration_us`
+  finding and fix (commit `cd701a8c`, not yet deployed to the live nodes).
+  The standalone observer is running the minimum-48h
   deployment (started 2026-11-10 14:02 local; restarted 15:01 with the
   refactored build after the crawler landed — same behaviour, new
   `run_session` signature).

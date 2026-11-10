@@ -235,6 +235,32 @@ consensus behaviour. Every emit is a non-blocking `try_send`; a full queue
 drops the record and counts it, and the writer turns the count into a `gap`
 line so the dataset says how much was lost.
 
+### Hook overhead (measured 2026-11-10)
+
+No hook work runs *during* header or transaction validation:
+`header_received`/`tx_received` fire on the message path before validation
+is queued, `on_header_validated` fires after install, and `tx_outcome`
+fires after the admission decision. The inline cost of each emit,
+micro-benchmarked in release against the real `NodeObserver` + sink
+(`ergo-node` `hook_cost_tests::hook_inline_cost_benchmark`, n = 20 000,
+sink writer excluded — it runs on its own task):
+
+| Inline path | mean | p50 | p99 |
+|---|---|---|---|
+| `header_validated` (mutex map lookup + `try_emit`) | 0.87 µs | 0.44 µs | 5.4 µs |
+| `tx_outcome` (full tx re-parse for input ids + `try_emit`, 302 B tx) | 18.3 µs | 15.5 µs | 44.9 µs |
+| `inv` announce (4 ids) | 2.9 µs | 1.9 µs | 9.9 µs |
+| `try_emit` worst case (queue full → drop path) | 0.15 µs | 0.15 µs | 0.18 µs |
+
+Against the live mainnet stream with the hook enabled (2026-11-10 15:29
+onwards), `header_validated` durations — which *include* the hook's own
+callback, the measurement window being receipt → callback completion —
+ran p50 15.5 ms / p99 28.2 ms (n = 22) and `block_applied
+since_first_announce` p50 586 ms (n = 26). The hook's p99 (5.4 µs) is
+≈ 0.03 % of the median validation duration, and the sink's drop path
+(0.18 µs) bounds the cost even when the queue is saturated. With the hook
+disabled the only added work is one `Option` check per site.
+
 ### `[observer]` configuration
 
 Off by default; enable it in `ergo-node.toml`:
@@ -281,3 +307,207 @@ See [`unverified.md`](unverified.md) for the hook's live-test status.
 
 Minimum mainnet observation window is 48 h; the run is extended until the
 key interval estimates are tight.
+
+## Tx-outcome rejection parity vs Scala v6.0.7
+
+Every `tx_outcome` rejection reason seen in the mainnet hook stream as of
+2026-11-10, checked against the pinned reference
+(`/home/arkadias/Coding/reference/ergo-scala-v6.0.7`, tag `v6.0.7`):
+
+| Rust reason (count) | Scala v6.0.7 behaviour | Verdict |
+|---|---|---|
+| `StorageRentPolicy` (23) | `ErgoMemPool.process` declines before validation: `rejectStorageRentTxs && containsStorageRentClaim(tx)` (`ErgoMemPool.scala:305`); `mainnet.conf:83` sets `rejectStorageRentTxs = true`. Predicate: any input with empty proof carrying extension variable `Constants.StorageIndexVarId` = `Byte.MaxValue` = 127 (`ErgoMemPool.scala:257-261`; `ergo-core/.../settings/Constants.scala:37`). No peer penalty; pool records the id. | **Parity.** Rust mirrors it exactly: same predicate (`ergo-mempool/src/validator.rs:68-71`), same pre-validation position (`admission/mod.rs:339-348`), no penalty, `InvalidationReason::RelayPolicy` record. Reference node also rejects. |
+| `UnresolvedInput` (12) | Inputs resolved against `utxo.withUnconfirmedTransactions(getAll)` — committed UTXO plus pooled outputs; unresolved → `Declined("not all utxos in place yet")`, no penalty, pool unchanged (`ErgoMemPool.scala:300-302`). | **Parity on the verdict** (same resolution view: `PoolUtxoOverlay`, `admission/mod.rs:355`). Rust-only *extensions* on top: (a) with `staging_enabled` (true on the mainnet node) the child is held as an orphan and can be admitted when its parent arrives, without re-announcement (`mempool.rs:398-441`); (b) a replacement that would consume an output of a tx it removes is rejected `UnresolvedInput`/`UnresolvedDataInput` (`admission/mod.rs:483-514`) — Scala would accept it and hold an unresolvable pool entry. |
+| `DoubleSpendLoser` (14) | `acceptIfNoDoubleSpend` (`ErgoMemPool.scala:196-224`): the new tx replaces its conflicts when its weight beats their **average** weight; weight = `fee × 1024 / feeFactor` (`OrderedTxPool.scala:322-341`). Only direct conflicts are removed; no CPFP credit on stored weights. Loser → `ProcessingOutcome.DoubleSpendingLoser` (`ErgoMemPoolUtils.scala:92`), pool unchanged. | **Same concept, Rust is stricter — Rust-only policy in the edge cases.** Rust replaces only when `weight > max_conflict_weight` (max, not average) **and** `fee > removed_fee` over the conflicts' descendant closure, and conflict weights carry CPFP family credit (step 15c) (`admission/mod.rs:515-545`). A tx with `avg < weight ≤ max`, or `weight > max` but `fee ≤ removed fee`, is **rejected by Rust but accepted by Scala**. Which of the 14 observed cases fall in the edge set is not determinable from the stream (the event carries no weights). Note the mainnet node runs `sort_policy = "cost"` (weight `fee×1024/cost` = Scala `byExecutionCost` formula), while the stock Scala mainnet default is `mempoolSorting = "random"` — a per-startup coin-flip between `bySize` and `byExecutionCost` (`application.conf:88`; `NodeConfigurationSettings.scala:104-109`). |
+| `ValidationFailed { kind: ScriptFailed }` (1) | `utxoWithPool.validateWithCost` failure → `ProcessingOutcome.Invalidated` (`ErgoMemPool.scala:331-334`); the node then **penalises the source peer** — `penalizeMisbehavingPeer`, or `penalizeSpammingPeer` for `TooHighCostError` (`ErgoNodeViewSynchronizer.scala:1479-1490`). | **Parity.** `classify` maps `ScriptFailed` → `ValidationFailed` + `Misbehavior` penalty when at tip (`admission/outcome.rs:112-119`). Minor lenient refinement: Rust withholds the penalty while behind tip; Scala penalises regardless. |
+
+### Rust-only admission policies (rejects the reference node would not make)
+
+1. **Stricter RBF gate** — the `DoubleSpendLoser` edge cases above.
+2. **`IbdGated`** — peer txs rejected while `block_gap > ibd_gate_block_lag` (default 10, `ergo-mempool/src/types.rs:365`; mainnet config does not override). Scala in digest state (during IBD) *accepts* txs without validation (`ErgoMemPool.scala:339-341`).
+3. **Cost budgets** — `PeerBudgetExhausted` / `GlobalBudgetExhausted` (admission step 1); no Scala counterpart.
+4. **`RecentlyUnresolved` cache** — fast rejection of recently-seen unresolved bytes (admission step 3); Scala would re-process a re-announced orphan (cheap: parse + resolution).
+5. **Private-mining exclusion** — operator-reserved tx ids decline before the fee gate (Rust-only feature).
+6. **Replacement self-consumption guard** — see `UnresolvedInput` (b) above.
+
+### Scala-only policy (reject the Rust node would not make)
+
+- **`blacklistedTransactions`** — operator-configured tx-id blacklist → `Invalidated` + peer penalty (`ErgoMemPool.scala:276-280`); no Rust equivalent (empty by default in Scala).
+
+Penalty parity: both stacks penalise the source peer for invalid txs; the
+trigger sets match apart from the at-tip refinement. `max_tx_size_bytes`
+defaults to 98,304 in both (Scala `maxTransactionSize`,
+`application.conf:53`).
+
+## Partial-data analysis (2026-11-10, ~3.1–3.6 h into the window)
+
+Analysis script: `scripts/analysis/summarize.py` (stdlib only). Semantics:
+latency joins are computed **per process session** (`mono_ns` resets at
+each `observer_start`); announce→request joins use the **latest announce
+at or before** the request (peers periodically re-announce tip headers —
+joining to first-announce or to any announce produces artifacts); time
+units normalised to ms, section sizes in bytes; `--json OUT` writes the
+machine-readable report.
+
+### Stream status (snapshot 2026-11-10 ~17:12 local)
+
+| Stream | Span | Records | Peers | Restarts | Gap records |
+|---|---|---|---|---|---|
+| `pop-os-mainnet` (standalone) | 11 431 s | 14 119 | 4 | 1 | 0 |
+| `pop-os-mainnet-crawler` | 7 886 s | 8 490 | 65 | 0 | 0 |
+| `pop-os-testnet-crawler` | 7 884 s | 9 683 | 11 | 0 | 0 |
+| `mainnet-hook` | 6 203 s | 41 573 | 65 | 0 | 0 |
+| `testnet-hook` | 12 975 s | 8 707 | 3 | 0 | 0 |
+
+Anomaly counters are clean: no `gap` records, no duplicate lines, no
+wall-clock regressions, no future/stale records, no header-id
+mismatches, no schema-shape issues. The only anomaly anywhere is one
+`mono_ns` regression in the standalone stream (3.55 s backwards) — the
+process restart at 15:01; it is explainable and handled by the
+per-session joins. Peer-id joins succeed across all three mainnet
+vantages (shared pseudonym key) and the testnet pair.
+
+### Header RTT: sample composition matters
+
+Because the observer and crawler present an **empty V2 SyncInfo** (the
+honest "I know no headers" status, `session.rs` `respond_to_sync_info`),
+each `ergoref` 6.0.8 seed re-sends, on roughly every sync exchange
+(≈3 s cadence observed; one id re-announced up to 1 487 times), a V1
+catch-up `Inv` of the first 1 001 header ids (heights 1–1 001). The RTT
+engine requests announced ids, so ~88 % of the standalone's type-101 RTT
+samples are **early-chain headers, not tip headers**:
+
+| Vantage | Tip headers (h > 1000) | Early headers (h ≤ 1000) |
+|---|---|---|
+| `pop-os-mainnet` | n=108, p50 235 ms, p99 299 ms | n=784, p50 257 ms, p99 2 386 ms |
+| `pop-os-mainnet-crawler` | n=70, p50 275 ms, p99 285 ms | n=400, p50 278 ms, p99 481 ms |
+| `pop-os-testnet-crawler` | n=232, p50 41 ms, p99 484 ms | n=400, p50 290 ms, p99 1 756 ms |
+
+The unsplit "p50 257 ms / p99 2 386 ms" figure was dominated by the
+early-header tail (2020-era headers served from disk; tip headers are
+cached — the testnet split, 41 ms vs 290 ms, shows the gap clearly).
+The split was computed offline: `rtt` records carry no modifier id and
+`seq` wraps per connection, so samples were joined to their `request_sent`
+batch per connection segment (0 unmatched, 0 mixed batches). The tip
+rows are the honest header-fetch RTT for the report.
+
+Both sides behave honestly in this exchange (we answer every seed
+SyncInfo with our true empty state; the seed re-sends its continuation).
+It is a measurement-composition effect, not a protocol divergence.
+
+### Section sizes
+
+- Mainnet **tip** headers are a constant **220 B** at every vantage
+  (standalone h > 1000 receipts, node-hook receipts, crawler receipts).
+- Early mainnet headers are **278/279 B** (a variable-length header
+  extension; content not identified — see `unverified.md` if it matters
+  to the report; it does not for wire parity, which is per-format).
+- Testnet headers are **219 B** (max 283).
+- Cross-vantage check: the 47 mainnet header ids received by both the
+  standalone observer and the node hook **agree on size in all 47 cases**
+  (all 220 B) — both vantages measure the modifier content length, so the
+  279 vs 220 difference is real on-wire variation, not a measurement
+  discrepancy.
+
+### Request and block-flow timing
+
+- announce → first request: p50 ≤ 0.1 ms at all three standalone
+  vantages and both node hooks — the request fires immediately on
+  announce; pacing (per-peer interval, ≤64 ids/request, bounded
+  outstanding) shapes the request *rate*, not the decision latency.
+  The standalone issued 105 type-101 requests (91 single-id RTT pings,
+  2×16-id, 12×64-id batches → 891 ids) producing 885 receipts.
+- Chosen modest outbound cap (for the report): **64 KiB/s (65 536 B/s)
+  per session**, token-bucket drop-not-queue at the send path (recorded
+  in every `observer_start`); process-level `CPUQuota=10%` on the
+  standalone service.
+- `mainnet-hook`: `header_validated` p50 **15.2 ms** / p99 29.8 ms
+  (n=41 measurable); `block_applied since_first_announce` p50 **583 ms**
+  / p99 1 046 ms / max 1 132 ms (n=49). All 49 applied blocks were
+  peer-announced first → the node **mined zero blocks** in the window
+  (49 blocks ≈ the expected mainnet 2-min cadence for 1.7 h).
+- `testnet-hook`: `header_validated` p50 **8.5 ms** / p99 15.2 ms
+  (n=48); `block_applied` = 340 in 3.6 h but only 58 carry
+  `since_first_announce` → the node **mines the majority of testnet
+  blocks** (locally mined blocks fire `block_applied` via
+  `block_relay::applied_block_announcements` but are never peer-announced).
+  The 58 peer blocks match the 58 `header_validated` records 1:1.
+- Tx flow (`mainnet-hook`): announce → body p50 **276 ms** (p99 701 ms,
+  one 23 s late delivery); body → outcome p50 **0.8 ms** (p99 11 ms —
+  admission is local and fast); announce → outcome p50 277 ms. Every
+  `tx_outcome` has a prior announce and body receipt in the stream.
+  Outcomes at snapshot: 185 admitted / 255 rejected (reason mix in the
+  parity section above).
+- Crawler, mainnet: 23 dials → 8 `handshaken`, 4 `handshake_fail`,
+  5 `connect_refused`, 6 `connect_timeout` (35 % success — the seed
+  list is mostly dead from this vantage); 65 peers learned (51 via
+  gossip); connect latency p50 290 ms (10 s timeout cap).
+- Clock: configured chrony offset 1.2–1.9 ms at all vantages; seed
+  handshake `peer_time_ms` runs 32–176 ms **behind** local wall. All
+  durations use the monotonic clock, so the skew does not enter the
+  latency figures.
+
+### Missing `header_validated.duration_us` — resolved
+
+7 of the first 40 mainnet records (8/49 and 10/58 testnet at snapshot)
+had no `duration_us`. Ruled out with the stream: locally mined headers
+(all 7 ids are peer-announced via `syncinfo_v2` before validation), map
+eviction (limit 32 768, a few hundred ids in use), and id mismatch
+(the redundant type-101 `section_received` for each id has
+`id_matches=true`).
+
+Root cause: the header bytes reached the validation pipeline **without a
+`Modifiers` message**. The `SyncInfoV2` continuation path
+(`coordinator::on_sync_info`, the `PeerChainStatus::Older` arm) emits
+`Action::ValidateHeader` for the peer's continuation header straight
+from the sync payload (`ergo-sync/src/coordinator/events.rs:205`), while
+the dispatch stamps receipt only for `Modifiers` frames
+(`dispatch.rs:872`) — so the receipt lookup at validation time missed.
+In all 7 cases a redundant `Modifiers` copy of the same header arrived
+*after* validation (its `section_received` record postdates the
+`header_validated` record), which is how the bytes eventually also
+appeared as type-101 receipts.
+
+A second unstamped path existed: the coalesced header-`Modifiers`
+processor (`node/events.rs::process_header_modifier_batch`) accumulates
+header messages across the tick window without the per-message stamp the
+single-event path performs.
+
+Fix (commit `cd701a8c`): stamp at both sites before `execute_all` —
+stamp-only (no `section_received` record; the bytes arrived in a SyncInfo
+frame, so a receipt record would be schema-false) for the continuation
+path, full `header_received` for the coalesced Modifiers path.
+`insert_first` is first-sight-wins, so double-stamping across paths is a
+no-op. Regression test:
+`hook_stamp_tests::stamp_only_makes_duration_measurable_without_section_record`.
+Observation-only change — admission, sync, relay and consensus are
+untouched. **The live nodes run the pre-fix binary**, so
+`duration_us`-missing records continue until the next node redeploy;
+the fix lands with the next build.
+
+### Schema / timing anomalies (task 4 report)
+
+1. **`rtt` records carry no modifier id**, and `seq` wraps per
+   connection — the old/tip split above required an offline
+   per-connection-segment join. Proposed: add `id` to `Event::Rtt`
+   (additive schema change); deferred so the running 48 h window is not
+   reset for it.
+2. **Catch-up `Inv` re-announce storm** — ≈586 k `announce` occurrences
+   for ≈400 early-chain ids from three seeds (≈90 % of standalone
+   announces). Honest on both sides; it shapes the RTT composition (see
+   above) and the request mix, nothing else.
+3. **`mono_ns` resets at process restart** — one occurrence (standalone,
+   15:01); handled by per-session joins.
+4. **Live-file drift** — the JSONL files grow during analysis; counts
+   differ between runs minutes apart (e.g. mainnet `tx_outcome`
+   440 → 525 between the two snapshots in this section). Figures above
+   are the 17:12 snapshot unless marked otherwise.
+5. **Testnet long-tail `block_applied since_first_announce`** (p99
+   27.5 s): quiet testnet — a peer-announced header can sit unapplied
+   for tens of seconds behind the node's own mining; expected, not an
+   anomaly.
+
+The 48 h window for the standalone observer started 2026-11-10 14:02
+local (session 2 from 15:01 after the refactored-build restart); the
+final report is due after 2026-11-12 14:02, extended until the key
+interval estimates are tight.
