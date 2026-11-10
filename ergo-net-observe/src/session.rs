@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -66,6 +67,14 @@ pub struct SessionConfig {
     /// When set, `Peers` replies are also forwarded to the discovery
     /// crawler (bounded channel; a full channel drops the report).
     pub crawl: Option<Arc<crate::crawler::CrawlChannel>>,
+    /// When set, raw handshake bytes are captured as hex on the
+    /// `handshake_ok` / `handshake_fail` records (offline replay
+    /// analysis only; off in the standing dataset streams).
+    pub capture_handshake_hex: bool,
+    /// When set, incremented once per captured handshake byte sequence
+    /// (a completed handshake, or a failure that received at least one
+    /// byte). The crawler's `--capture-max` stop condition polls it.
+    pub capture_counter: Option<Arc<AtomicU64>>,
 }
 
 impl Default for SessionConfig {
@@ -87,6 +96,8 @@ impl Default for SessionConfig {
             request_handshake_timeout: Duration::from_secs(30),
             respond_to_sync_info: true,
             crawl: None,
+            capture_handshake_hex: false,
+            capture_counter: None,
         }
     }
 }
@@ -366,7 +377,7 @@ impl Session {
                 features: Vec::new(),
             },
         };
-        let (peer_hs, conn) = match do_handshake(
+        let (peer_hs, conn, peer_raw) = match do_handshake(
             stream,
             self.cfg.magic,
             &our,
@@ -375,8 +386,21 @@ impl Session {
         .await
         {
             Ok(v) => v,
-            Err(reason) => {
-                self.emit(Event::HandshakeFail { reason });
+            Err((reason, received)) => {
+                let received_hex = if self.cfg.capture_handshake_hex && !received.is_empty() {
+                    Some(hex::encode(&received))
+                } else {
+                    None
+                };
+                self.emit(Event::HandshakeFail {
+                    reason,
+                    received_hex: received_hex.clone(),
+                });
+                if received_hex.is_some() {
+                    if let Some(counter) = &self.cfg.capture_counter {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
                 if let Some(tx) = self.handshake_result.take() {
                     let _ = tx.send(false);
                 }
@@ -387,6 +411,16 @@ impl Session {
         self.version = Some(peer_hs.peer_spec.version.to_string());
         self.node_name = Some(peer_hs.peer_spec.node_name.clone());
         self.conn = Some(conn);
+        let peer_handshake_hex = if self.cfg.capture_handshake_hex {
+            Some(hex::encode(&peer_raw))
+        } else {
+            None
+        };
+        if peer_handshake_hex.is_some() {
+            if let Some(counter) = &self.cfg.capture_counter {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         self.emit(Event::HandshakeOk {
             agent: peer_hs.peer_spec.agent_name.clone(),
             version: peer_hs.peer_spec.version.to_string(),
@@ -398,6 +432,7 @@ impl Session {
                 .map(feature_label)
                 .collect(),
             peer_time_ms: peer_hs.time,
+            peer_handshake_hex,
         });
         self.handshaken = true;
         if let Some(tx) = self.handshake_result.take() {
@@ -936,45 +971,60 @@ fn header_meta(bytes: &[u8]) -> (String, Option<u32>) {
     (id, height)
 }
 
+/// Performs the unframed handshake. On success returns the parsed
+/// handshake, the connection (with any bytes already received past the
+/// handshake prefix), and the peer's raw handshake bytes (for capture).
+/// On failure returns the reason plus whatever bytes the peer sent, so
+/// a capture run can replay rejected handshakes offline.
 async fn do_handshake(
     mut stream: TcpStream,
     magic: [u8; 4],
     our: &Handshake,
     deadline: Duration,
-) -> Result<(Handshake, Connection), String> {
-    tokio::time::timeout(deadline, async move {
+) -> Result<(Handshake, Connection, Vec<u8>), (String, Vec<u8>)> {
+    let inner = async {
         let bytes = serialize_handshake(our);
         stream
             .write_all(&bytes)
             .await
-            .map_err(|e| format!("send handshake: {e}"))?;
+            .map_err(|e| (format!("send handshake: {e}"), Vec::new()))?;
 
         let mut buf = vec![0u8; 16_384];
         let mut total = 0usize;
         loop {
             if total == buf.len() {
-                return Err("handshake exceeded read buffer".to_string());
+                return Err(("handshake exceeded read buffer".to_string(), buf.to_vec()));
             }
             let n = stream
                 .read(&mut buf[total..])
                 .await
-                .map_err(|e| format!("read handshake: {e}"))?;
+                .map_err(|e| (format!("read handshake: {e}"), buf[..total].to_vec()))?;
             if n == 0 {
-                return Err("connection closed during handshake".to_string());
+                return Err((
+                    "connection closed during handshake".to_string(),
+                    buf[..total].to_vec(),
+                ));
             }
             total += n;
             match deserialize_handshake_with_consumed(&buf[..total]) {
                 Ok((hs, consumed)) => {
                     let leftover = buf[consumed..total].to_vec();
-                    return Ok((hs, Connection::new_with_buffer(stream, magic, leftover)));
+                    let peer_raw = buf[..consumed].to_vec();
+                    return Ok((
+                        hs,
+                        Connection::new_with_buffer(stream, magic, leftover),
+                        peer_raw,
+                    ));
                 }
                 Err(_) if total < 8096 => continue,
-                Err(e) => return Err(format!("parse handshake: {e}")),
+                Err(e) => return Err((format!("parse handshake: {e}"), buf[..total].to_vec())),
             }
         }
-    })
-    .await
-    .map_err(|_| "handshake deadline exceeded".to_string())?
+    };
+    match tokio::time::timeout(deadline, inner).await {
+        Ok(r) => r,
+        Err(_) => Err(("handshake deadline exceeded".to_string(), Vec::new())),
+    }
 }
 
 /// Helper used by the node hook and tests: type id 101/2/etc.

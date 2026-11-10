@@ -8,24 +8,43 @@ Reference pin: `ergoplatform/ergo` **v6.0.7**
 (`~/Coding/remote/ergo-scala`). Wire-facing files are unchanged from
 v6.0.5; see [`survey.md`](survey.md).
 
-## Wire bytes: verified against an external oracle
+## Wire bytes: verified against source
 
-These rows were on the "no imported oracle" list and are now pinned by
-imported or independently computed byte vectors (all in `ergo-p2p`,
-committed with the codec/fuzz work):
+Pinned by the v6.0.7 reference source (Scala citation), imported test
+vectors, or byte vectors independently computed from that source (all in
+`ergo-p2p`, committed with the codec/fuzz work):
 
-| Item | Evidence |
+| Item | Source evidence |
 |---|---|
-| Handshake full frame | Real-node 52-byte hex fixture imported from `ergo-core/src/test/.../network/HandshakeSpecification.scala:13` (`real_node_handshake_fixture` in `ergo-p2p/src/handshake.rs`): agent `ergoref`, v3.3.6, `LocalAddress` 127.0.0.1:9006. The fixture also pins the `LocalAddress` **port wire encoding as VLQ** — port 9006 is parsed as a 2-byte VLQ from the real bytes. |
+| Handshake full frame | Real-node 52-byte hex fixture imported from `ergo-core/src/test/.../network/HandshakeSpecification.scala:13` (`real_node_handshake_fixture` in `ergo-p2p/src/handshake.rs`): agent `ergoref`, v3.3.6, `LocalAddress` 127.0.0.1:9006. The fixture also pins the `LocalAddress` **port wire encoding as VLQ** — port 9006 is parsed as a 2-byte VLQ from the fixture bytes. |
 | GetPeers (code 1) | Full-frame golden vector `010002040100000000` (`get_peers_full_frame_vector`, `ergo-p2p/src/message/tests.rs`), computed independently in Python per `MessageSerializer.scala:22-34` (blake2b256[:4] checksum). |
 | Peers (code 2) | Full-frame golden vector with a fixed `PeerSpec` (`peers_full_frame_vector`, same file), computed independently in Python. |
 | SyncInfo V2 full frame | Full-frame golden vector `0100020441000000e1437c8549{225 B payload}` (`sync_info_v2_full_frame_vector`, same file); payload prefix `00ff01dc01` = VLQ `putUShort(0)` + marker `0xff` + count 1 + VLQ length. |
+| `SessionId` feature body | `putBytes(magic)` + `putLong(sessionId)` (`SessionIdPeerFeature.scala:36-40`) with scorex `putLong`/`getLong` = **VLQ + zigzag**, variable-length 1..=10-byte body (scorex-util 0.2.2 `VLQWriter`/`VLQReader`); six golden body vectors computed independently in Python (`session_id_feature_wire_format_golden_vectors`, `ergo-p2p/src/handshake.rs`). |
+| `Mode` feature `verify_tx` byte | Signed-byte boolean per `byteToBoolean` (`ModePeerFeature.scala:109`). |
+| Declared address layout | Length byte = address bytes + 4, then port via `getUInt().toIntExact` (`PeerSpec.scala:79-85`); a hint below 4 throws in Scala — mirrored by `HandshakeError::MalformedDeclaredAddress` (the *only* item-4 fix that changed accept/reject behaviour). |
+| Feature id registry | 2 `LocalAddress`, 3 `SessionId`, 4 `RestApiUrl`, 16 `Mode` (`PeerFeatureDescriptors.scala`). |
+| Feature parse-failure semantics | Unknown id **or** failed body parse drops the single feature and the handshake still succeeds (`PeerSpec.scala:86-99`: `parseTry(...).toOption`, with the comment "we ignore a feature … if we do not know how to parse it or failed to do that"); only a *structural* `PeerSpec` failure (empty agent name, negative feature count, truncated chunk, port > `Int.MaxValue`) fails the whole handshake, which `PeerConnectionHandler` answers with `banPeer()` = permanent penalty + `CloseConnection` (`PeerConnectionHandler.scala:100-115`). This is why our pre-fix malformed `SessionId` bodies were tolerated by Scala peers: dropped, not rejected. |
+| SyncInfo V2 header bound | `headerBytesCount < 1000` — reject `>= 1000` (`SyncInfoMessageSpec.scala`). |
+| `Peers` count bound | `maxPeerSpecObjects` default 64; over-limit is a parse rejection (scorex network config). |
 
-**Key codec pin:** scorex `Writer.putUShort` / `putUInt` / `putLong` are
-**VLQ** (plus zigzag for signed), not fixed-width big-endian —
-`VLQWriter.scala`, scorex-util 0.2.2. Corroborated by live traffic:
-the Rust VLQ decoder parsed real mainnet 4-header V2 syncs and the
-real-node handshake fixture without modification.
+**Key codec pin (source, corroborated live):** scorex `Writer.putUShort` /
+`putUInt` / `putLong` are **VLQ** (plus zigzag for signed), not
+fixed-width big-endian — `VLQWriter.scala`, scorex-util 0.2.2.
+
+## Wire bytes: verified against live bytes
+
+Pinned by captured mainnet/testnet traffic (the 48 h dataset streams) or
+the 2026-11-10 A/B run, not by the reference source alone:
+
+| Item | Live evidence |
+|---|---|
+| VLQ encoding on the wire | The Rust VLQ decoder parsed real mainnet 4-header V2 syncs and real peer handshakes without modification (`pop-os-mainnet` stream, from 2026-11-10 14:02). |
+| 6.0.8 seed V2 sync form | Live seeds send the 4-header form at offsets 0/16/128/512 behind the tip (observed heights, `pop-os-mainnet` stream) — matches `FullV2SyncOffsets` in the v6.0.7 source, but the 6.0.8 binary itself was not inspected. |
+| 400-id catch-up extension | Empty-V2 reply → seed re-sends `Inv` of the first 400 header ids; per-seed re-send gaps 0.9 s, then 60.1–62.4 s (A/B run 2026-11-10, `/home/arkadias/observation/syncinfo-ab-2026-11-10/`); each of the 400 ids re-announced 3 006 times by 20:35. |
+| Tip-presentation fix behaviour | Old binary (empty V2): seed sends **6** extensions in ~4.5 min. New binary (tip V2): **1** extension, then a tip reply, seed goes silent (same A/B run). |
+| Header sizes on the wire | Mainnet tip headers constant 220 B; early-chain headers (h ≤ 400) 278/279 B — extension content still unidentified (row in the next section). |
+| `SessionId` decode against live peers | Pending the 2026-11-11 capture run: N real peer handshakes captured raw (`--capture-handshake-hex`), replayed through the fixed codec; strict-parse / Unknown-preservation percentages and the old-vs-new accept delta will be recorded here and in the final report. |
 
 ## Wire bytes without an imported external oracle
 

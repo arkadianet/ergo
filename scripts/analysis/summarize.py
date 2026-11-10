@@ -178,7 +178,7 @@ class File:
             self.network = rec.get("network", self.network)
             self.clock_offset = rec.get("clock_offset_ms")
             self.clock_source = rec.get("clock_source")
-        elif ev == "gap":
+        elif ev in ("observer_gap", "gap"):  # "gap" predates the 2026-11-11 rename; no such records exist in the dataset
             self.gap_records += 1
             self.gap_dropped += int(rec.get("dropped", 0))
         elif ev == "handshake_ok" and isinstance(rec.get("peer_time_ms"), int):

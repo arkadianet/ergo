@@ -85,9 +85,20 @@ pub enum Event {
         features: Vec<String>,
         /// Peer clock field from the handshake, Unix ms.
         peer_time_ms: u64,
+        /// Raw bytes the peer sent (hex), when capture is enabled
+        /// (`--capture-handshake-hex`). Present only in capture runs;
+        /// never in the standing dataset streams.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        peer_handshake_hex: Option<String>,
     },
     /// Handshake send/parse/connect failure.
-    HandshakeFail { reason: String },
+    HandshakeFail {
+        reason: String,
+        /// Raw bytes received before the failure (hex), when capture is
+        /// enabled and the peer sent at least one byte.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        received_hex: Option<String>,
+    },
     /// Session ended.
     Disconnect { reason: String, lifetime_ms: u64 },
     /// A peer announced ids via `Inv` or `SyncInfo`.
@@ -210,6 +221,12 @@ pub enum Event {
     /// Penalty/ban observed in the local node.
     Penalty { kind: String, banned: bool },
     /// Records were dropped because the bounded sink was full.
+    ///
+    /// Serialized as `observer_gap` (renamed from `gap` on 2026-11-11;
+    /// no `gap`-named records exist in the dataset, so the rename is
+    /// lossless). The structured event is the sole gap indicator —
+    /// do not infer gaps from log text.
+    #[serde(rename = "observer_gap")]
     Gap { dropped: u64 },
     /// Free-form note (startup, unsupported message, parse warning).
     Note { message: String },
@@ -254,7 +271,7 @@ impl Event {
             Event::GetPeersReceived { .. } => "get_peers_received",
             Event::RequestReceived { .. } => "request_received",
             Event::Penalty { .. } => "penalty",
-            Event::Gap { .. } => "gap",
+            Event::Gap { .. } => "observer_gap",
             Event::Note { .. } => "note",
         }
     }

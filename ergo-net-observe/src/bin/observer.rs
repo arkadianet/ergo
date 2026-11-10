@@ -138,6 +138,11 @@ struct Cli {
     #[arg(long)]
     allow_local: bool,
 
+    /// Capture raw handshake bytes as hex on the handshake records.
+    /// Offline replay analysis only; off in the standing dataset streams.
+    #[arg(long, default_value_t = false)]
+    capture_handshake_hex: bool,
+
     /// Log filter for the observer process itself (not the dataset).
     #[arg(long, default_value = "info")]
     log: String,
@@ -187,6 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_ids_per_request: cli.max_ids_per_request.max(1),
         request_handshake_timeout: Duration::from_secs(cli.handshake_timeout_secs),
         respond_to_sync_info: true,
+        capture_handshake_hex: cli.capture_handshake_hex,
         ..SessionConfig::default()
     };
 

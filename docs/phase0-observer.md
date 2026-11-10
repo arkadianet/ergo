@@ -128,7 +128,7 @@ Events:
 |---|---|
 | `observer_start` | Effective network, identity, peer count, request flags, outbound cap. |
 | `conn_open` | TCP connect succeeded, handshake not yet complete. |
-| `handshake_ok` / `handshake_fail` | Handshake parse result; `handshake_ok` carries the peer's claimed version, agent, node name, feature labels, and handshake time. |
+| `handshake_ok` / `handshake_fail` | Handshake parse result; `handshake_ok` carries the peer's claimed version, agent, node name, feature labels, and handshake time. Feature **labels only** — feature values are never recorded (see [Dataset notes](#dataset-notes)). Capture runs only: `handshake_ok` may carry `peer_handshake_hex` and `handshake_fail` may carry `received_hex` (raw peer bytes, for offline replay). |
 | `announce` | Peer sent `Inv` (`via: inv`) or `SyncInfo` (`syncinfo_v1` / `syncinfo_v2`). `first_global` counts ids never seen by this observer; `first_for_peer` counts ids new from this peer. V2 announces include header bytes, so `heights` is populated. |
 | `request_sent` | We sent `RequestModifier` with sequence `seq`. |
 | `section_received` | A `Modifiers` entry arrived. For headers, `height`, `computed_id`, and `id_matches` compare `Blake2b256(bytes)` with the claimed id. |
@@ -140,7 +140,7 @@ Events:
 | `get_peers_received` | A peer asked us for peers; we answered honestly with an empty list. |
 | `request_received` | A peer asked us for modifiers. We cannot serve them and do not pretend to. |
 | `disconnect` | Session ended, with reason and lifetime. |
-| `gap` | The bounded sink dropped records; `dropped` is the count since the previous successful line. |
+| `observer_gap` | The bounded sink dropped records; `dropped` is the count since the previous successful line. Renamed from `gap` on 2026-11-11 — no records named `gap` exist in the dataset, so the rename is lossless. This structured event is the **sole gap indicator**; do not infer gaps from log text. |
 | `note` | Parse warning or unsupported message. |
 
 The node-only events `header_validated` and `block_applied` are defined in
@@ -198,6 +198,20 @@ addresses: it is operator-local and must never be published**, like the
 pseudonymisation key. For dataset joinability, the crawler deployment
 reuses the same pseudonymisation key as the standalone observer of the
 same network.
+
+### Handshake capture (offline analysis only)
+
+`--capture-handshake-hex` additionally records the peer's raw handshake
+bytes as hex on the handshake records (`peer_handshake_hex` on
+`handshake_ok`, `received_hex` on `handshake_fail` when at least one
+byte arrived), and `--capture-max N` stops the crawl after N captured
+byte sequences (completed handshakes plus failures that received
+bytes; in-flight sessions wind down on their own idle timeout). The
+bytes feed the offline `replay-captures` tool, which re-parses them
+through the current codec to quantify strict-parse versus
+Unknown-preservation rates and accept/reject deltas. Capture runs must
+use a separate output file and state file — these fields are never
+present in the standing dataset streams.
 
 ```sh
 target/debug/crawler \
@@ -307,6 +321,53 @@ See [`unverified.md`](unverified.md) for the hook's live-test status.
 
 Minimum mainnet observation window is 48 h; the run is extended until the
 key interval estimates are tight.
+
+## Dataset notes
+
+- **Gap detection is the structured `observer_gap` event, not log
+  text.** The sink-drop event was renamed from `gap` to `observer_gap`
+  on 2026-11-11 (no `gap`-named records exist in the dataset, so the
+  rename is lossless). Counting gaps is
+  `grep -c '"event": *"observer_gap"'` over the JSONL — never a grep of
+  process logs: log lines contain unrelated substrings (the mainnet
+  seed's node name `mainnet-seed-node-singapore` contains `gap`, which
+  produced 816 false hits in the 2026-11-11 check), and the log is a
+  lossy, unbounded stream while the JSONL is the record.
+- **SessionId values are not recorded; pre-fix self-detection was
+  inoperative.** Handshake feature *presence* is recorded as labels
+  (e.g. `session_id` in `handshake_ok.features`); feature *values* are
+  never recorded, in the observer/crawler streams or the node hook
+  stream. So there are no recorded SessionId values to invalidate from
+  the codec fix `85c1b052` (the body is VLQ+zigzag, not fixed 8-byte
+  BE), and the `session_id` presence labels remain valid. Behavioural
+  caveat: in every binary prior to that commit the session id was
+  misdecoded, so the node's self-connection check (peer session id ==
+  our own, `ergo-p2p/src/peer_manager/mod.rs`) never matched: any
+  self-connection (the node dialing its own gossiped address) would
+  appear in pre-redeploy streams as an ordinary peer. The
+  observer/crawler never used session ids, so their measurements are
+  unaffected. The fix lands with the window-close redeploy.
+- **Capture fields are capture-run only.** `peer_handshake_hex` /
+  `received_hex` appear only in runs started with
+  `--capture-handshake-hex` (see [Handshake capture](#handshake-capture-offline-analysis-only));
+  the standing streams above never contain them.
+
+## Window-close redeploy (staged 2026-11-11)
+
+The 48 h window closes **2026-11-12 14:02 local**. All five running
+binaries predate the SyncInfo tip fix (`06b44bdd`) and the SessionId
+codec fix (`85c1b052`); both take effect only at this redeploy.
+
+| Step | When | What |
+|---|---|---|
+| 1. Testnet node (canary) | 2026-11-11, executed | Replace the testnet node binary with the current branch build; restart; observe for several hours: handshake outcomes, disconnect reasons, peer-count stability, and the self-connection check (`handshake not admitted` / `SelfConnection` in the node log). |
+| 2. Mainnet node | 2026-11-12 14:02 local | Stop `ergo-rust-archival`, swap in the same build (keeps the `[observer]` hook), start; mark the restart time in this table and in the dataset (the `mono_ns` session boundary). Rollback: `ergo-node.pre-phase0-20261110` + `ergo-node.toml.bak-pre-observer`. |
+| 3. Observer + crawlers | 2026-11-12 14:02 local, after step 2 | Restart `ergo-phase0-observer`, `ergo-phase0-crawler`, `ergo-phase0-crawler-testnet` with the new build (capture flags stay off); mark restart times. From this boundary the observer/crawler present the real tip SyncInfo: expect one 400-id catch-up per connection, then tip-region announces only; early-header RTT rows shrink to the first 64 ids/connection and RTT composition becomes tip-dominated. |
+
+Post-redeploy, re-run `scripts/analysis/summarize.py` on the final data
+and write the 48 h report (key interval estimates, chosen outbound cap,
+the missing-`duration_us` fractions already reported, and the
+empty-V2-era artifacts above).
 
 ## Tx-outcome rejection parity vs Scala v6.0.7
 

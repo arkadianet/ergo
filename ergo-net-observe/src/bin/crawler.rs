@@ -102,6 +102,17 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     reveal_peer_addresses: bool,
 
+    /// Capture raw handshake bytes as hex on the handshake records.
+    /// Offline replay analysis only; off in the standing dataset streams.
+    #[arg(long, default_value_t = false)]
+    capture_handshake_hex: bool,
+
+    /// With `--capture-handshake-hex`: stop after this many captured
+    /// handshake byte sequences (completed handshakes plus failures
+    /// that received at least one byte).
+    #[arg(long)]
+    capture_max: Option<u32>,
+
     /// Agent name advertised in the handshake. Must be truthful.
     #[arg(long, default_value = "ergo-rust-crawler")]
     agent_name: String,
@@ -150,6 +161,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if seeds.is_empty() {
         return Err("no seed peers: pass --peers/--peers-file or use a network with seeds".into());
     }
+    if cli.capture_max.is_some() && !cli.capture_handshake_hex {
+        return Err("--capture-max requires --capture-handshake-hex".into());
+    }
     if !cli.allow_local {
         if let Some(local) = seeds.iter().find(|p| is_local(p.ip())) {
             return Err(format!(
@@ -166,6 +180,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (crawl, mut gossip_rx) = CrawlChannel::new(256);
     let crawl = Arc::new(crawl);
+    let capture_counter = cli
+        .capture_handshake_hex
+        .then(|| Arc::new(std::sync::atomic::AtomicU64::new(0)));
     let session_cfg = Arc::new(SessionConfig {
         magic: chain.network_params.magic,
         network: network.to_string(),
@@ -177,6 +194,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         request_bodies: false,
         request_txs: false,
         crawl: Some(crawl),
+        capture_handshake_hex: cli.capture_handshake_hex,
+        capture_counter: capture_counter.clone(),
         ..SessionConfig::default()
     });
 
@@ -249,6 +268,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Capture stop condition: once the target number of handshake byte
+    // sequences is captured, request shutdown (sessions wind down on
+    // their own idle timeout).
+    if let (Some(counter), Some(max)) = (capture_counter.clone(), cli.capture_max) {
+        let cap_shutdown = shutdown_tx.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(5));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                if counter.load(std::sync::atomic::Ordering::Relaxed) >= u64::from(max) {
+                    info!(target = max, "capture target reached; requesting stop");
+                    let _ = cap_shutdown.send(true);
+                    break;
+                }
+            }
+        });
+    }
+
     // Dial slots.
     let mut slots = JoinSet::new();
     for _ in 0..cli.max_peers.max(1) {
@@ -260,16 +298,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         slots.spawn(slot_worker(state, cfg, sink, shared, slot_shutdown));
     }
 
+    let mut wait_shutdown = shutdown.clone();
     if cli.duration_secs > 0 {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => info!("interrupted"),
+            _ = wait_shutdown.changed() => info!("stop requested in-process"),
             _ = tokio::time::sleep(Duration::from_secs(cli.duration_secs)) => {
                 info!(seconds = cli.duration_secs, "duration reached")
             }
         }
     } else {
-        let _ = tokio::signal::ctrl_c().await;
-        info!("interrupted");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => info!("interrupted"),
+            _ = wait_shutdown.changed() => info!("stop requested in-process"),
+        }
     }
 
     let _ = shutdown_tx.send(true);
