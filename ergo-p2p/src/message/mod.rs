@@ -307,7 +307,9 @@ pub fn serialize_sync_info(info: &SyncInfo) -> Result<Vec<u8>, MessageError> {
             w.put_u8(SYNC_V2_MARKER as u8);
             w.put_u8(headers.len() as u8);
             for header_bytes in headers {
-                if header_bytes.len() > MAX_HEADER_SIZE {
+                // Match Scala's strict `< MaxHeaderSize` acceptance bound so
+                // this encoder never emits a V2 header the reference rejects.
+                if header_bytes.len() >= MAX_HEADER_SIZE {
                     return Err(MessageError::PayloadTooLarge(header_bytes.len()));
                 }
                 w.put_u16(header_bytes.len() as u16);
@@ -366,7 +368,9 @@ pub fn deserialize_sync_info(payload: &[u8]) -> Result<SyncInfo, MessageError> {
         let mut headers = Vec::with_capacity(count);
         for _ in 0..count {
             let header_len = r.get_u16()? as usize;
-            if header_len > MAX_HEADER_SIZE {
+            // Scala `ErgoSyncInfoSerializer.parse` uses `require(headerBytesCount <
+            // MaxHeaderSize)`, so exactly `MAX_HEADER_SIZE` is rejected too.
+            if header_len >= MAX_HEADER_SIZE {
                 return Err(MessageError::PayloadTooLarge(header_len));
             }
             let bytes = r.get_bytes(header_len)?;
