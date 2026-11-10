@@ -61,6 +61,20 @@ must either be fixed, tested as intentional, or listed in the report.
    Honest peers stay far below the limit, so this is a malformed-input
    edge case. Status: UNVERIFIED.
 
+6. **Rust-node SyncInfo V2 content differs from Scala (observed 2026-11-10).**
+   Our Rust node presents its 50 most recent *consecutive* headers in a V2
+   SyncInfo (`build_sync_info_payload`,
+   `ergo-sync/src/coordinator/events.rs:881-892`), while the Scala
+   reference presents 4 headers at offsets 0/16/128/512 behind the tip
+   (`ErgoHistoryReader.syncInfoV2`, `ErgoHistoryReader.scala:393-409`;
+   `FullV2SyncOffsets`, `ErgoHistoryReader.scala:601`). The wire format is
+   the same; the extra headers are a strict superset of candidate common
+   points for `compareV2`/`commonPoint`. Live data confirms the ergoref
+   6.0.8 seeds send the 4-header form (observed heights tip, tip−16,
+   tip−128, tip−512, `pop-os-mainnet` stream). Status: open — decide
+   whether to match the 4-header form for closer parity or document the
+   superset as intentional.
+
 ## Network / measurement assumptions that need data
 
 These are not protocol unknowns; they are measurement-validity questions
@@ -82,6 +96,23 @@ that the Phase 0 report must state honestly.
 - **Crawler reachability is dial-based.** "Reachable" means a completed
   handshake from this vantage within the dial timeout; it does not prove
   the peer is reachable from elsewhere.
+- **Seed catch-up re-send cadence (6.0.8 seeds).** The v6.0.7 reference
+  explains the mechanism (the 400-id extension is sent inside
+  `processSyncV2`, i.e. per processed reply; 60 s `SyncThreshold` at
+  `ErgoSyncTracker.scala:21`) and the 60 s cycle was reproduced live in
+  the 2026-11-10 A/B run (extension gaps 0.9 s, then 60.1–62.4 s). In
+  v6.0.7 the `SendLocalSyncInfo` scheduler ticks at `syncInterval`
+  (`application.conf:553`, 5 s) unconditionally
+  (`ErgoNodeViewSynchronizer.scala:278-279`); each tick re-includes
+  peers per `peersToSyncWith` gating (`ErgoSyncTracker.scala:174-199`).
+  Notably, `syncIntervalStable` (`application.conf:556`, 15 s) is
+  *defined but unused* in the v6.0.7 sources — the 6.0.8 seeds may
+  switch to it once synchronized, which would fit the per-seed p50s
+  measured in the 48 h window (5.0 s / 23.6 s / 60.2 s). The exact
+  6.0.8 constants/logic are not pinned by the v6.0.7 reference. The
+  cadence does not affect the correctness of the tip-presentation fix:
+  the comparison result (`Equal` vs `Younger`), not the cadence, controls
+  whether an extension is sent.
 
 ## Deferred by explicit decision
 

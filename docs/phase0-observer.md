@@ -371,17 +371,38 @@ vantages (shared pseudonym key) and the testnet pair.
 
 Because the observer and crawler present an **empty V2 SyncInfo** (the
 honest "I know no headers" status, `session.rs` `respond_to_sync_info`),
-each `ergoref` 6.0.8 seed re-sends, on roughly every sync exchange
-(≈3 s cadence observed; one id re-announced up to 1 487 times), a V1
-catch-up `Inv` of the first 1 001 header ids (heights 1–1 001). The RTT
-engine requests announced ids, so ~88 % of the standalone's type-101 RTT
-samples are **early-chain headers, not tip headers**:
+each `ergoref` 6.0.8 seed re-sends a catch-up `Inv` of the first 400
+header ids (heights 1–400) whenever one of our sync replies is processed.
+The mechanism, derived from the pinned reference: an empty V2 compares as
+`Younger` (`ErgoHistoryReader.compareV2`,
+`ErgoHistoryReader.scala:164-165`), and
+`ErgoNodeViewSynchronizer.processSyncV2` answers every `Younger` with
+`hr.continuationIds(syncInfo, size = 400)` sent as `Inv` by
+`sendExtension` (`ErgoNodeViewSynchronizer.scala:466-471, 375-381`); for
+an empty peer `continuationIdsV2` is heights `1..=min(tip, 400)`
+(`ErgoHistoryReader.scala:274-291`, with `GenesisHeight = 1` /
+`EmptyHistoryHeight = 0`, `ErgoHistoryUtils.scala:24-25`). The extension
+is sent inside `processSyncV2` itself — per processed reply, not on the
+seed's own sync timer — and when the reply also triggers
+`syncSendNeeded` the seed sends its own 4-header sync in the same burst
+(`ErgoNodeViewSynchronizer.scala:490-494`). How often we get another
+chance to reply depends on the seed's cadence (5 s `syncInterval` tick,
+`ErgoNodeViewSynchronizer.scala:279`, `application.conf:553`; 60 s
+`SyncThreshold`, `ErgoSyncTracker.scala:21`); the measured per-seed
+re-send p50 in this window is 5.0 s / 23.6 s / 60.2 s (see
+`unverified.md` for the 6.0.8-cadence caveat), and each of the 400 ids
+had been re-announced 3 006 times by 20:35. The RTT engine requests
+announced ids, so ~88 % of the standalone's type-101 RTT samples are
+**early-chain headers, not tip headers**:
 
-| Vantage | Tip headers (h > 1000) | Early headers (h ≤ 1000) |
+| Vantage | Tip headers (h > 400) | Early headers (h ≤ 400) |
 |---|---|---|
 | `pop-os-mainnet` | n=108, p50 235 ms, p99 299 ms | n=784, p50 257 ms, p99 2 386 ms |
 | `pop-os-mainnet-crawler` | n=70, p50 275 ms, p99 285 ms | n=400, p50 278 ms, p99 481 ms |
 | `pop-os-testnet-crawler` | n=232, p50 41 ms, p99 484 ms | n=400, p50 290 ms, p99 1 756 ms |
+
+(Split at 400, not 1000: the catch-up extension covers exactly heights
+1–400 and no receipts exist in 401–1000, so the rows are unchanged.)
 
 The unsplit "p50 257 ms / p99 2 386 ms" figure was dominated by the
 early-header tail (2020-era headers served from disk; tip headers are
@@ -395,10 +416,68 @@ Both sides behave honestly in this exchange (we answer every seed
 SyncInfo with our true empty state; the seed re-sends its continuation).
 It is a measurement-composition effect, not a protocol divergence.
 
+### SyncInfo fix: present the observed tip (applied at the window-close boundary)
+
+**Artifact in all pre-fix data.** Every record collected before the fix
+was gathered while the observer and crawler presented the empty V2
+SyncInfo above. By 20:35 the catch-up storm accounted for 3 006
+extension messages carrying 1 202 400 ids = **97.2 % of all announced
+ids** in the standalone stream; the early-header RTT rows in the table
+exist only because of this re-send. Tip-header RTT is unaffected: tip
+headers arrive via the seed's periodic 4-header V2 syncs (offsets
+0/16/128/512 behind the tip, `ErgoHistoryReader.scala:400-405, 601` —
+confirmed live in the A/B below: the seed's sync carried heights tip,
+tip−16, tip−128, tip−512), which happen regardless of what we present.
+
+**The fix.** The observer now tracks the highest fully-seen header —
+from V2 sync entries and type-101 receipts
+(`SharedSeen::observe_header`, `session.rs`) — in a process-wide
+`ObservedTip`, and presents it newest-first as a single entry in every
+SyncInfo reply (the initial post-handshake reply and the 30 s re-send),
+falling back to the honest empty V2 before any header has been seen in
+full, or when the header bytes are ≥ 1 000 (the codec's V2 cap). The
+peer then compares `Equal` and sends nothing, or — after a tip move —
+`Younger` with an extension of only the ids after the common point
+(`ErgoHistoryReader.scala:274-291`). The crawler shares the session code
+and `SharedSeen`, so the same change covers it.
+
+**Verification (2026-11-10, A/B against a mainnet ergoref 6.0.8 seed).**
+Same seed (`159.89.116.15:9030`), same host, 300 s each, minutes apart:
+
+| Binary | 400-id extensions in 300 s | Steady state |
+|---|---|---|
+| deployed (15:01 build, empty V2) | **6** (gaps 0.9 s, then 62.4 / 60.1 / 60.2 / 60.2 s) | one every ~60 s |
+| fixed (20:30 build, tip V2) | **1** (t ≈ 0, answering the honest empty initial reply) | none |
+
+The fixed run's debug log shows the wire content of each reply: first
+`V2 empty`, then the tip header `6b81b21c…11d3@Some(1913657)` — the
+header the seed itself sent as the first entry of its 4-header sync
+(id match verified) — after which the seed stops sending extensions
+(`Equal`). The seed's own periodic 4-header syncs continue (6 in 300 s),
+as they do for any synced peer. The ~60 s steady-state gap of the old
+binary matches the reference `SyncThreshold` (60 s) + 5 s tick derived
+above. The local nodes could not host the A/B: the testnet node's
+`per_ip_limit = 1` slot on `127.0.0.1` is held by the testnet crawler
+(dialing it reset 12/12 handshakes), and the mainnet node is a Rust
+node whose sync behaviour is not the side being fixed.
+
+**Consequence for the report.** Post-fix, a connection receives the
+400-id catch-up exactly once (answering the initial empty reply) and
+then only tip-region announces; with the observer's drop-not-queue
+request pacing, the early-header RTT rows shrink to the first 64 ids per
+connection and the RTT sample composition becomes tip-dominated — the
+honest composition the report wants.
+
+**Boundary.** Per the window-close plan, the running standalone binary
+keeps the empty-V2 behaviour until the window closes (2026-11-12 14:02
+local); the observer and crawler restart with the fixed binary at that
+boundary, and the restart times are marked in the dataset for warm-up
+exclusion. All records before that boundary contain the artifact above.
+
 ### Section sizes
 
 - Mainnet **tip** headers are a constant **220 B** at every vantage
-  (standalone h > 1000 receipts, node-hook receipts, crawler receipts).
+  (standalone h > 400 receipts, node-hook receipts, crawler receipts).
 - Early mainnet headers are **278/279 B** (a variable-length header
   extension; content not identified — see `unverified.md` if it matters
   to the report; it does not for wire parity, which is per-format).
@@ -494,8 +573,10 @@ the fix lands with the next build.
    reset for it.
 2. **Catch-up `Inv` re-announce storm** — ≈586 k `announce` occurrences
    for ≈400 early-chain ids from three seeds (≈90 % of standalone
-   announces). Honest on both sides; it shapes the RTT composition (see
-   above) and the request mix, nothing else.
+   announces at the 17:12 snapshot; 97.2 % of announced ids by 20:35).
+   Honest on both sides; it shapes the RTT composition and the request
+   mix, nothing else. Being fixed — see the "SyncInfo fix" subsection
+   above (artifact, fix, A/B verification, restart boundary).
 3. **`mono_ns` resets at process restart** — one occurrence (standalone,
    15:01); handled by per-session joins.
 4. **Live-file drift** — the JSONL files grow during analysis; counts

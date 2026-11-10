@@ -127,6 +127,17 @@ impl BoundedSet {
     }
 }
 
+/// The newest header this observer has seen in full (V2 announce or
+/// type-101 receipt): the highest height for which it holds the bytes.
+/// Shared across sessions so a newly connected session can present the
+/// tip it observed before that session itself saw anything.
+#[derive(Debug, Clone)]
+pub struct ObservedTip {
+    pub height: u32,
+    pub id: [u8; 32],
+    pub bytes: Vec<u8>,
+}
+
 /// State shared by all peer sessions.
 #[derive(Debug, Default)]
 pub struct SharedSeen {
@@ -136,6 +147,27 @@ pub struct SharedSeen {
     pub requested: BoundedSet,
     /// First time this observer saw an id announced.
     pub announced: BoundedSet,
+    /// Highest fully-seen header (see [`ObservedTip`]).
+    pub tip: Option<ObservedTip>,
+}
+
+impl SharedSeen {
+    /// Record a fully-seen header as the observed tip when it is ahead of
+    /// the current one, or a same-height different id (a reorg). A lower
+    /// height from a lagging peer never moves the tip backwards.
+    pub fn observe_header(&mut self, height: u32, id: [u8; 32], bytes: &[u8]) {
+        let replace = match &self.tip {
+            None => true,
+            Some(t) => height > t.height || (height == t.height && t.id != id),
+        };
+        if replace {
+            self.tip = Some(ObservedTip {
+                height,
+                id,
+                bytes: bytes.to_vec(),
+            });
+        }
+    }
 }
 
 pub type Shared = Arc<Mutex<SharedSeen>>;
@@ -144,6 +176,49 @@ fn lock_shared(shared: &Shared) -> std::sync::MutexGuard<'_, SharedSeen> {
     match shared.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// The SyncInfo this observer presents to a peer: its observed tip header
+/// (newest-first, one entry), or the honest empty V2 before any header has
+/// been seen in full.
+///
+/// Why the tip instead of empty: an empty V2 compares as `Younger` for a
+/// seeded peer, and `ErgoNodeViewSynchronizer.processSyncV2` answers every
+/// `Younger` with a full continuation extension
+/// (`ErgoHistoryReader.continuationIdsV2`, `size = 400` → ids of heights
+/// 1..=400 for an empty peer, sent as `Inv` by `sendExtension`),
+/// re-triggered on every one of our replies. Presenting the tip compares
+/// as `Equal` (the peer does nothing) or, when the tip moved on, `Younger`
+/// with an extension of only the ids after our common point.
+/// `ergo-p2p::message` caps a V2 header at 1000 bytes, so a larger
+/// (unparseable-scale) header falls back to the empty V2.
+fn sync_reply_for(tip: Option<&ObservedTip>) -> SyncInfo {
+    match tip {
+        Some(t) if t.bytes.len() < 1000 => SyncInfo::V2 {
+            headers: vec![t.bytes.clone()],
+        },
+        _ => SyncInfo::V2 {
+            headers: Vec::new(),
+        },
+    }
+}
+
+/// Human-readable summary of a SyncInfo reply for debug logs: the header
+/// ids and heights it presents, so a reply's wire content can be audited
+/// without capturing the connection.
+fn sync_reply_log(info: &SyncInfo) -> String {
+    match info {
+        SyncInfo::V1 { header_ids } => format!("V1 ids={}", header_ids.len()),
+        SyncInfo::V2 { headers } if headers.is_empty() => "V2 empty".to_string(),
+        SyncInfo::V2 { headers } => headers
+            .iter()
+            .map(|b| {
+                let (id, height) = header_meta(b);
+                format!("{id}@{:?}", height)
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
     }
 }
 
@@ -332,11 +407,18 @@ impl Session {
         if self.send(CODE_GET_PEERS, Vec::new()).await.is_err() {
             return SessionEnd::Closed("send GetPeers failed".to_string());
         }
-        // An empty V2 SyncInfo is the honest "I know no headers" status.
+        // Present the tip observed by this process (or the honest empty V2
+        // before any header has been seen), so the peer does not treat us
+        // as a genesis-height peer and re-send its catch-up extension on
+        // every exchange — see `sync_reply_for`.
         if self.cfg.respond_to_sync_info {
-            let payload = match message::serialize_sync_info(&SyncInfo::V2 {
-                headers: Vec::new(),
-            }) {
+            let reply = self.sync_reply();
+            debug!(
+                peer = %self.addr,
+                reply = %sync_reply_log(&reply),
+                "observer sent SyncInfo reply"
+            );
+            let payload = match message::serialize_sync_info(&reply) {
                 Ok(p) => p,
                 Err(e) => return SessionEnd::Closed(format!("serialize SyncInfo: {e}")),
             };
@@ -495,10 +577,14 @@ impl Session {
                     first_global,
                     first_for_peer,
                 });
-                // V2 carries the header bytes themselves; mark them received.
+                // V2 carries the header bytes themselves; mark them received
+                // and track the observed tip from them.
                 let mut shared = lock_shared(&self.shared);
-                for id in raws {
-                    shared.received.insert(id);
+                for (id, bytes) in raws.iter().zip(headers.iter()) {
+                    shared.received.insert(*id);
+                    if let Some(h) = header_meta(bytes).1 {
+                        shared.observe_header(h, *id, bytes);
+                    }
                 }
             }
         }
@@ -511,11 +597,22 @@ impl Session {
             return;
         }
         self.next_sync_reply_at = Instant::now() + Duration::from_secs(30);
-        if let Ok(payload) = message::serialize_sync_info(&SyncInfo::V2 {
-            headers: Vec::new(),
-        }) {
+        let reply = self.sync_reply();
+        debug!(
+            peer = %self.addr,
+            reply = %sync_reply_log(&reply),
+            "observer sent SyncInfo reply"
+        );
+        if let Ok(payload) = message::serialize_sync_info(&reply) {
             let _ = self.send(CODE_SYNC_INFO, payload).await;
         }
+    }
+
+    /// Build the SyncInfo to present to the current peer from the
+    /// process-wide observed tip (see [`sync_reply_for`]).
+    fn sync_reply(&self) -> SyncInfo {
+        let shared = lock_shared(&self.shared);
+        sync_reply_for(shared.tip.as_ref())
     }
 
     async fn on_inv(&mut self, payload: &[u8]) -> Result<(), String> {
@@ -649,6 +746,12 @@ impl Session {
             {
                 let mut shared = lock_shared(&self.shared);
                 shared.received.insert(id);
+                // A type-101 receipt is a fully-seen header too.
+                if data.type_id == 101 {
+                    if let Some(h) = header_meta(&bytes).1 {
+                        shared.observe_header(h, id, &bytes);
+                    }
+                }
             }
             let (claimed, height, computed, matches) = if data.type_id == 101 {
                 let (computed, height) = header_meta(&bytes);
@@ -915,5 +1018,68 @@ mod tests {
         let (id, height) = header_meta(b"not a header");
         assert_eq!(id.len(), 64);
         assert!(height.is_none());
+    }
+
+    #[test]
+    fn observed_tip_tracks_highest_and_reorgs() {
+        let mut seen = SharedSeen::default();
+        assert!(seen.tip.is_none());
+        seen.observe_header(10, [1u8; 32], b"hdr10");
+        assert_eq!(seen.tip.as_ref().unwrap().height, 10);
+        // A lagging peer never moves the tip backwards.
+        seen.observe_header(9, [2u8; 32], b"hdr9");
+        assert_eq!(seen.tip.as_ref().unwrap().id, [1u8; 32]);
+        seen.observe_header(11, [3u8; 32], b"hdr11");
+        assert_eq!(seen.tip.as_ref().unwrap().height, 11);
+        // A same-height different id is a reorg: replace.
+        seen.observe_header(11, [4u8; 32], b"hdr11b");
+        let tip = seen.tip.as_ref().unwrap();
+        assert_eq!(tip.id, [4u8; 32]);
+        assert_eq!(tip.bytes, b"hdr11b");
+    }
+
+    #[test]
+    fn sync_reply_presents_observed_tip_or_empty() {
+        let empty = sync_reply_for(None);
+        assert!(matches!(
+            empty,
+            SyncInfo::V2 { ref headers } if headers.is_empty()
+        ));
+        let tip = ObservedTip {
+            height: 5,
+            id: [7u8; 32],
+            bytes: vec![9u8; 220],
+        };
+        match sync_reply_for(Some(&tip)) {
+            SyncInfo::V2 { headers } => {
+                assert_eq!(headers.len(), 1);
+                assert_eq!(headers[0], vec![9u8; 220]);
+            }
+            other => panic!("expected V2, got {other:?}"),
+        }
+        // At/above the codec's V2 header size cap: fall back to empty.
+        let big = ObservedTip {
+            height: 5,
+            id: [7u8; 32],
+            bytes: vec![0u8; 1000],
+        };
+        assert!(matches!(
+            sync_reply_for(Some(&big)),
+            SyncInfo::V2 { ref headers } if headers.is_empty()
+        ));
+    }
+
+    #[test]
+    fn sync_reply_frame_round_trips() {
+        let tip = ObservedTip {
+            height: 5,
+            id: [7u8; 32],
+            bytes: vec![9u8; 220],
+        };
+        let payload = message::serialize_sync_info(&sync_reply_for(Some(&tip))).unwrap();
+        match message::deserialize_sync_info(&payload).unwrap() {
+            SyncInfo::V2 { headers } => assert_eq!(headers, vec![vec![9u8; 220]]),
+            other => panic!("expected V2, got {other:?}"),
+        }
     }
 }
