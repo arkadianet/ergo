@@ -75,6 +75,13 @@ pub struct SessionConfig {
     /// (a completed handshake, or a failure that received at least one
     /// byte). The crawler's `--capture-max` stop condition polls it.
     pub capture_counter: Option<Arc<AtomicU64>>,
+    /// When set, a session that completes its handshake closes the
+    /// connection immediately instead of entering the read loop, so a
+    /// crawler dial slot cycles to the next address right away. Capture
+    /// runs only: the handshake bytes are already recorded, and holding
+    /// the session open would pin the slot while the peer keeps the
+    /// connection alive with traffic.
+    pub capture_only: bool,
 }
 
 impl Default for SessionConfig {
@@ -98,6 +105,7 @@ impl Default for SessionConfig {
             crawl: None,
             capture_handshake_hex: false,
             capture_counter: None,
+            capture_only: false,
         }
     }
 }
@@ -437,6 +445,13 @@ impl Session {
         self.handshaken = true;
         if let Some(tx) = self.handshake_result.take() {
             let _ = tx.send(true);
+        }
+
+        if self.cfg.capture_only {
+            // Capture run: the peer's bytes are recorded above; close
+            // without any further traffic so the dial slot is free for
+            // the next address.
+            return SessionEnd::Closed("capture only".to_string());
         }
 
         if self.send(CODE_GET_PEERS, Vec::new()).await.is_err() {

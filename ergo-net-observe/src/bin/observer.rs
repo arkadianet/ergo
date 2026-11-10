@@ -193,6 +193,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         request_handshake_timeout: Duration::from_secs(cli.handshake_timeout_secs),
         respond_to_sync_info: true,
         capture_handshake_hex: cli.capture_handshake_hex,
+        // See the crawler: capture runs close right after the handshake.
+        capture_only: cli.capture_handshake_hex,
         ..SessionConfig::default()
     };
 

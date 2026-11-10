@@ -204,14 +204,16 @@ same network.
 `--capture-handshake-hex` additionally records the peer's raw handshake
 bytes as hex on the handshake records (`peer_handshake_hex` on
 `handshake_ok`, `received_hex` on `handshake_fail` when at least one
-byte arrived), and `--capture-max N` stops the crawl after N captured
-byte sequences (completed handshakes plus failures that received
-bytes; in-flight sessions wind down on their own idle timeout). The
-bytes feed the offline `replay-captures` tool, which re-parses them
-through the current codec to quantify strict-parse versus
-Unknown-preservation rates and accept/reject deltas. Capture runs must
-use a separate output file and state file — these fields are never
-present in the standing dataset streams.
+byte arrived), closes each session immediately after the handshake
+(capture-only mode — otherwise a chatty peer would pin its dial slot
+for the whole idle timeout), and, with `--capture-max N`, stops the
+crawl after N captured byte sequences (completed handshakes plus
+failures that received bytes). The bytes feed the offline
+`replay-captures` tool, which re-parses them through the current codec
+to quantify strict-parse versus Unknown-preservation rates and
+accept/reject deltas. Capture runs must use a separate output file and
+state file — these fields are never present in the standing dataset
+streams.
 
 ```sh
 target/debug/crawler \
@@ -328,11 +330,11 @@ key interval estimates are tight.
   text.** The sink-drop event was renamed from `gap` to `observer_gap`
   on 2026-11-11 (no `gap`-named records exist in the dataset, so the
   rename is lossless). Counting gaps is
-  `grep -c '"event": *"observer_gap"'` over the JSONL — never a grep of
-  process logs: log lines contain unrelated substrings (the mainnet
-  seed's node name `mainnet-seed-node-singapore` contains `gap`, which
-  produced 816 false hits in the 2026-11-11 check), and the log is a
-  lossy, unbounded stream while the JSONL is the record.
+  `grep -c '"event": *"observer_gap"'` over the JSONL — never a raw
+  `grep gap` of the JSONL or of process logs: the mainnet seed's node
+  name `mainnet-seed-node-singapore` contains `gap` (thousands of
+  substring hits in `mainnet-crawler/crawl.jsonl` alone, 17 026 by
+  2026-11-11 07:30), and a raw count would report them as drops.
 - **SessionId values are not recorded; pre-fix self-detection was
   inoperative.** Handshake feature *presence* is recorded as labels
   (e.g. `session_id` in `handshake_ok.features`); feature *values* are

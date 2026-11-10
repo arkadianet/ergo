@@ -103,7 +103,9 @@ struct Cli {
     reveal_peer_addresses: bool,
 
     /// Capture raw handshake bytes as hex on the handshake records.
-    /// Offline replay analysis only; off in the standing dataset streams.
+    /// Offline replay analysis only; off in the standing dataset
+    /// streams. Also makes each session close right after the handshake
+    /// so dial slots cycle quickly (a capture run, not an observation).
     #[arg(long, default_value_t = false)]
     capture_handshake_hex: bool,
 
@@ -196,6 +198,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         crawl: Some(crawl),
         capture_handshake_hex: cli.capture_handshake_hex,
         capture_counter: capture_counter.clone(),
+        // Capture runs close right after the handshake so each dial slot
+        // cycles to the next address instead of pinning on a live peer.
+        capture_only: cli.capture_handshake_hex,
         ..SessionConfig::default()
     });
 
