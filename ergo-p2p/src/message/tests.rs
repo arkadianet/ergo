@@ -104,6 +104,33 @@ fn serialize_sync_info_rejects_oversize_inputs() {
         serialize_sync_info(&oversize_header),
         Err(MessageError::PayloadTooLarge(_))
     ));
+
+    // V2: exactly MAX_HEADER_SIZE is also rejected — Scala uses a strict
+    // `headerBytesCount < MaxHeaderSize` require.
+    let boundary_header = SyncInfo::V2 {
+        headers: vec![vec![0u8; MAX_HEADER_SIZE]],
+    };
+    assert!(matches!(
+        serialize_sync_info(&boundary_header),
+        Err(MessageError::PayloadTooLarge(_))
+    ));
+}
+
+#[test]
+fn deserialize_sync_info_v2_rejects_header_at_exact_max_size() {
+    // Hand-build the V2 payload: ushort 0, marker 0xFF, count 1, then a
+    // ushort length of exactly MAX_HEADER_SIZE. Scala rejects this.
+    let mut w = VlqWriter::new();
+    w.put_u16(0);
+    w.put_u8(SYNC_V2_MARKER as u8);
+    w.put_u8(1);
+    w.put_u16(MAX_HEADER_SIZE as u16);
+    w.put_bytes(&vec![0u8; MAX_HEADER_SIZE]);
+    let err = deserialize_sync_info(&w.result()).expect_err("exact max must be rejected");
+    assert!(matches!(
+        err,
+        MessageError::PayloadTooLarge(MAX_HEADER_SIZE)
+    ));
 }
 
 #[test]
