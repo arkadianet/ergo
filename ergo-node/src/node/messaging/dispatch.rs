@@ -200,6 +200,23 @@ pub(in crate::node) fn handle_message(
                     state
                         .coordinator
                         .on_sync_info(peer, sv, &sync_info, &state.store, now);
+                // The V2 continuation path (`PeerChainStatus::Older`)
+                // validates the peer's continuation header straight from
+                // the SyncInfo payload: no `Modifiers` message ever
+                // carries the bytes, so `header_received` (and its
+                // `section_received` record) never fires for it. Stamp
+                // receipt here so `header_validated.duration_us` stays
+                // measurable for those headers. Stamp-only by design —
+                // the bytes arrived in a SyncInfo frame, not a Modifiers
+                // entry, and the sync_info announce above already
+                // recorded the payload's ids.
+                if let Some(observer) = state.observer.clone() {
+                    for action in &actions {
+                        if let Action::ValidateHeader { modifier_id, .. } = action {
+                            observer.header_stamped(*modifier_id);
+                        }
+                    }
+                }
                 state
                     .executor
                     .execute_all(actions, &mut state.store, &mut state.coordinator, now)

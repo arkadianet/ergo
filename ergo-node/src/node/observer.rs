@@ -265,8 +265,9 @@ impl NodeObserver {
         );
     }
 
-    /// A block header arrived. Records receipt time for validation latency
-    /// and emits the parsed height plus the id-hash cross-check.
+    /// A block header arrived in a `Modifiers` message. Records receipt
+    /// time for validation latency and emits the parsed height plus the
+    /// id-hash cross-check.
     pub(crate) fn header_received(&self, peer: SocketAddr, claimed: [u8; 32], bytes: &[u8]) {
         let now = Instant::now();
         Self::lock(&self.received_headers).insert_first(claimed, now);
@@ -284,6 +285,18 @@ impl NodeObserver {
                 computed_id,
             },
         );
+    }
+
+    /// Record a header receipt WITHOUT emitting a `section_received`
+    /// record. For headers that reach the validation pipeline without a
+    /// `Modifiers` message — the `SyncInfoV2` continuation path installs
+    /// the peer's continuation header straight from the sync payload —
+    /// there is no Modifiers entry to report; emitting one would be
+    /// schema-false. Stamping still makes `header_validated.duration_us`
+    /// measurable (first sight in the sync payload → validated). First
+    /// sight wins, so double-stamping from both paths is a no-op.
+    pub(crate) fn header_stamped(&self, claimed: [u8; 32]) {
+        Self::lock(&self.received_headers).insert_first(claimed, Instant::now());
     }
 
     /// Mempool outcome for a peer-sourced transaction.
@@ -382,5 +395,350 @@ impl std::fmt::Debug for NodeObserver {
         f.debug_struct("NodeObserver")
             .field("dropped", &self.dropped())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod hook_cost_tests {
+    //! Micro-benchmark of the hook's INLINE cost on the validation and
+    //! admission paths — the work the node pays per header/tx with
+    //! `[observer] enabled = true`. The sink writer's I/O runs on its own
+    //! task and is not part of these numbers.
+    //!
+    //! Run (release, so the figures represent the deployed profile):
+    //! ```sh
+    //! cargo test -p ergo-node --lib --release hook_cost \
+    //!   -- --nocapture --test-threads=1
+    //! ```
+
+    use super::*;
+    use crate::config::ObserverConfig;
+    use ergo_primitives::writer::VlqWriter;
+    use ergo_ser::{
+        ergo_box::ErgoBoxCandidate,
+        ergo_tree::read_ergo_tree,
+        input::{ContextExtension, Input, SpendingProof},
+        register::AdditionalRegisters,
+        sigma_type::SigmaType,
+        sigma_value::SigmaValue,
+        transaction::{write_transaction, Transaction},
+    };
+    use ergo_validation::fee::MAINNET_FEE_PROPOSITION_BYTES;
+
+    /// A realistic peer tx: two inputs (one with a context extension,
+    /// as most mainnet txs carry at least a small one), two outputs
+    /// (one the canonical fee output). ~350 bytes on the wire.
+    fn realistic_tx_bytes() -> Vec<u8> {
+        let fee_tree = read_ergo_tree(&mut VlqReader::new(MAINNET_FEE_PROPOSITION_BYTES)).unwrap();
+        let out_tree = read_ergo_tree(&mut VlqReader::new(MAINNET_FEE_PROPOSITION_BYTES)).unwrap();
+        let ext = {
+            let mut e = ContextExtension::empty();
+            e.values.insert(0, (SigmaType::SInt, SigmaValue::Int(42)));
+            e
+        };
+        let tx = Transaction {
+            inputs: vec![
+                Input {
+                    box_id: [1u8; 32].into(),
+                    spending_proof: SpendingProof::new(vec![7, 9], ext).unwrap(),
+                },
+                Input {
+                    box_id: [2u8; 32].into(),
+                    spending_proof: SpendingProof::new(vec![7, 9], ContextExtension::empty())
+                        .unwrap(),
+                },
+            ],
+            data_inputs: vec![],
+            output_candidates: vec![
+                ErgoBoxCandidate::from_trusted_raw_parts(
+                    1_000_000,
+                    fee_tree,
+                    MAINNET_FEE_PROPOSITION_BYTES.to_vec(),
+                    0,
+                    vec![],
+                    AdditionalRegisters::empty(),
+                    vec![0],
+                ),
+                ErgoBoxCandidate::from_trusted_raw_parts(
+                    40_000_000,
+                    out_tree,
+                    MAINNET_FEE_PROPOSITION_BYTES.to_vec(),
+                    0,
+                    vec![],
+                    AdditionalRegisters::empty(),
+                    vec![0],
+                ),
+            ],
+        };
+        let mut w = VlqWriter::new();
+        write_transaction(&mut w, &tx).unwrap();
+        w.result()
+    }
+
+    fn cfg(dir: &std::path::Path, queue: usize) -> ObserverConfig {
+        ObserverConfig {
+            enabled: true,
+            path: dir.join("observer.jsonl"),
+            vantage: "bench".into(),
+            clock_offset_ms: 0.0,
+            clock_source: "unset".into(),
+            queue,
+            pseudonym_key: dir.join("key.hex"),
+            reveal_peer_addresses: false,
+        }
+    }
+
+    fn percentiles(ns: &[u64]) -> (f64, f64, f64) {
+        let mut v = ns.to_vec();
+        v.sort_unstable();
+        let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
+        let p50 = v[v.len() / 2] as f64;
+        let p99 = v[(v.len() as f64 * 0.99) as usize] as f64;
+        (mean, p50, p99)
+    }
+
+    #[test]
+    fn hook_inline_cost_benchmark() {
+        let dir = tempfile::tempdir().unwrap();
+        // Current-thread runtime: the sink's writer task cannot run while
+        // a synchronous measurement loop occupies the executor, so queue
+        // overflow (and the drop path) is deterministic.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let obs = NodeObserver::from_config(&cfg(dir.path(), 100_000), "mainnet", "bench-agent", "bench")
+                .unwrap()
+                .unwrap();
+            let peer: SocketAddr = "10.0.0.1:9030".parse().unwrap();
+            let n = 20_000usize;
+
+            // ── header_validated: stamp n unique ids, then time the
+            //    callback (mutex map lookup + elapsed + hex + try_emit)
+            //    for each of them.
+            let ids: Vec<[u8; 32]> = (0..n as u32)
+                .map(|i| {
+                    let mut b = [0u8; 32];
+                    b[..4].copy_from_slice(&i.to_be_bytes());
+                    b
+                })
+                .collect();
+            {
+                let mut stamped = NodeObserver::lock(&obs.received_headers);
+                for id in &ids {
+                    stamped.insert_first(*id, Instant::now());
+                }
+            }
+            let mut header_ns = Vec::with_capacity(n);
+            for id in &ids {
+                let t = Instant::now();
+                obs.on_header_validated(*id, 1);
+                header_ns.push(t.elapsed().as_nanos() as u64);
+            }
+            let (hm, hp50, hp99) = percentiles(&header_ns);
+
+            // ── tx_outcome: the heaviest inline path — full tx parse
+            //    (`tx_inputs`) + id hex-encodes + try_emit.
+            let tx = realistic_tx_bytes();
+            let mut tx_ns = Vec::with_capacity(n);
+            for i in 0..n {
+                let t = Instant::now();
+                obs.tx_outcome(
+                    peer,
+                    TxOutcome {
+                        tx_id: [i as u8; 32],
+                        bytes: &tx,
+                        result: "rejected",
+                        reason: Some("UnresolvedInput".to_string()),
+                        fee: None,
+                        size: Some(tx.len() as u32),
+                    },
+                );
+                tx_ns.push(t.elapsed().as_nanos() as u64);
+            }
+            let (tm, tp50, tp99) = percentiles(&tx_ns);
+
+            // ── inv: the announce hot path (per Inv message).
+            let inv_batch = |i: u32| -> Vec<[u8; 32]> {
+                (0..4u8)
+                    .map(|k| {
+                        let mut b = [k; 32];
+                        b[28..32].copy_from_slice(&i.to_be_bytes());
+                        b
+                    })
+                    .collect()
+            };
+            let mut inv_ns = Vec::with_capacity(n);
+            for i in 0..n as u32 {
+                let batch = inv_batch(i);
+                let t = Instant::now();
+                obs.inv(peer, 2, &batch);
+                inv_ns.push(t.elapsed().as_nanos() as u64);
+            }
+            let (im, ip50, ip99) = percentiles(&inv_ns);
+
+            // ── worst case: queue full, emits take the drop path.
+            // The writer task drains fast, so flood until drops are
+            // guaranteed before measuring the window.
+            let dir2 = tempfile::tempdir().unwrap();
+            let small = NodeObserver::from_config(&cfg(dir2.path(), 64), "mainnet", "bench-agent", "bench")
+                .unwrap()
+                .unwrap();
+            for _ in 0..10_000_000 {
+                let _ = small.sink.try_emit(Event::ObserverStart {
+                    network: "mainnet".into(),
+                    agent: "a".into(),
+                    node_name: "b".into(),
+                    version: "6.0.7".into(),
+                    peer_count: 0,
+                    request_headers: true,
+                    request_bodies: true,
+                    request_txs: true,
+                    outbound_bytes_per_sec: 0,
+                });
+                if small.dropped() >= 1_000 {
+                    break;
+                }
+            }
+            let dropped_before = small.dropped();
+            let mut drop_ns = Vec::with_capacity(n);
+            for _ in 0..n {
+                let t = Instant::now();
+                let _ = small.sink.try_emit(Event::ObserverStart {
+                    network: "mainnet".into(),
+                    agent: "a".into(),
+                    node_name: "b".into(),
+                    version: "6.0.7".into(),
+                    peer_count: 0,
+                    request_headers: true,
+                    request_bodies: true,
+                    request_txs: true,
+                    outbound_bytes_per_sec: 0,
+                });
+                drop_ns.push(t.elapsed().as_nanos() as u64);
+            }
+            let (dm, dp50, dp99) = percentiles(&drop_ns);
+            let dropped = small.dropped();
+
+            println!(
+                "hook inline cost (release, n={}):",
+                n
+            );
+            println!(
+                "  header_validated (mutex lookup + try_emit): mean {hm:.0} ns, p50 {hp50:.0} ns, p99 {hp99:.0} ns"
+            );
+            println!(
+                "  tx_outcome (full tx parse + try_emit, {} B tx): mean {tm:.0} ns, p50 {tp50:.0} ns, p99 {tp99:.0} ns",
+                tx.len()
+            );
+            println!(
+                "  inv (4 ids, announce hot path): mean {im:.0} ns, p50 {ip50:.0} ns, p99 {ip99:.0} ns"
+            );
+            println!(
+                "  try_emit worst case (queue full, drop path): mean {dm:.0} ns, p50 {dp50:.0} ns, p99 {dp99:.0} ns ({} records dropped)",
+                dropped
+            );
+            assert!(
+                dropped.saturating_sub(dropped_before) > 0,
+                "the measurement window must have exercised the drop path"
+            );
+            // Sanity upper bounds: the hook must stay far below a single
+            // mainnet header validation (~10s of ms) and below the
+            // per-tx validation cost.
+            assert!(hp99 < 20_000.0, "header_validated p99 ({hp99} ns) unexpectedly high");
+            assert!(tp99 < 200_000.0, "tx_outcome p99 ({tp99} ns) unexpectedly high");
+            assert!(ip99 < 20_000.0, "inv p99 ({ip99} ns) unexpectedly high");
+        });
+    }
+}
+
+#[cfg(test)]
+mod hook_stamp_tests {
+    //! Receipt-stamp semantics: which paths make
+    //! `header_validated.duration_us` measurable, and what they (do not)
+    //! record. Regression coverage for the `SyncInfoV2` continuation
+    //! path, where header bytes reach the validation pipeline without a
+    //! `Modifiers` message (7 of the first 40 live mainnet
+    //! `header_validated` records had no `duration_us` before the
+    //! stamp-only call was added to the SyncInfo dispatch arm).
+
+    use super::*;
+    use crate::config::ObserverConfig;
+
+    fn cfg(dir: &std::path::Path) -> ObserverConfig {
+        ObserverConfig {
+            enabled: true,
+            path: dir.join("observer.jsonl"),
+            vantage: "stamp-test".into(),
+            clock_offset_ms: 0.0,
+            clock_source: "unset".into(),
+            queue: 1024,
+            pseudonym_key: dir.join("key.hex"),
+            reveal_peer_addresses: false,
+        }
+    }
+
+    #[test]
+    fn stamp_only_makes_duration_measurable_without_section_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let obs = NodeObserver::from_config(&cfg(dir.path()), "mainnet", "a", "b")
+                .unwrap()
+                .unwrap();
+            let id = [7u8; 32];
+
+            // Unstamped: the callback still fires, with no duration.
+            obs.on_header_validated(id, 1);
+            // Stamp-only path (what the SyncInfo dispatch arm now does):
+            // records receipt, emits nothing.
+            obs.header_stamped(id);
+            // Stamped: duration is now measurable.
+            obs.on_header_validated(id, 1);
+            // The full receipt path emits a `section_received` record.
+            obs.header_received("10.0.0.9:9030".parse().unwrap(), id, &[42u8]);
+
+            // Let the writer task drain + idle-flush (250 ms interval).
+            tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+
+            let out =
+                std::fs::read_to_string(dir.path().join("observer.jsonl")).expect("sink file");
+            let events: Vec<String> = out
+                .lines()
+                .filter_map(|l| {
+                    serde_json::from_str(l)
+                        .ok()
+                        .map(|v: serde_json::Value| v["event"].as_str().unwrap().to_string())
+                })
+                .collect();
+            let hv: Vec<serde_json::Value> = out
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|v| {
+                    v["event"] == "header_validated"
+                        && v["header_id"] == format!("{:02x}", 7u8).repeat(32)
+                })
+                .collect();
+            assert_eq!(hv.len(), 2, "two callback events: {events:?}");
+            assert!(
+                hv[0].get("duration_us").is_none(),
+                "first callback unstamped: {hv:?}"
+            );
+            assert!(
+                hv[1].get("duration_us").is_some(),
+                "stamp-only must make it measurable: {hv:?}"
+            );
+            // The stamp-only call emitted NO section_received record;
+            // exactly one exists, from `header_received`.
+            let sr = events.iter().filter(|e| **e == "section_received").count();
+            assert_eq!(
+                sr, 1,
+                "one section_received (header_received only): {events:?}"
+            );
+        });
     }
 }
