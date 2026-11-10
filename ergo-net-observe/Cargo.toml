@@ -1,0 +1,30 @@
+[package]
+name        = "ergo-net-observe"
+description = "Phase 0 network observer and crawler for the Ergo Rust node: honest legacy-protocol peer sessions, structured JSONL records, bounded telemetry sink."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish     = false
+
+[dependencies]
+ergo-p2p         = { workspace = true }
+ergo-primitives  = { workspace = true }
+ergo-ser         = { workspace = true }
+ergo-chain-spec  = { workspace = true }
+serde            = { workspace = true, features = ["derive"] }
+serde_json       = { workspace = true }
+thiserror        = { workspace = true }
+tokio            = { workspace = true, features = ["net", "io-util", "sync", "time", "macros", "rt-multi-thread", "signal"] }
+tracing          = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+clap             = { workspace = true, features = ["derive"] }
+hex              = { workspace = true }
+rand             = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

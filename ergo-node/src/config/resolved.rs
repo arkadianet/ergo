@@ -275,6 +275,42 @@ pub struct NodeConfig {
     /// Resolved logging configuration. `default_level` always set;
     /// `file` is `Some(_)` only when `[logging.file]` is configured.
     pub logging: LoggingConfig,
+    /// `[observer]` — Phase 0 JSONL telemetry. Off by default.
+    pub observer: ObserverConfig,
+}
+
+/// Resolved `[observer]` configuration. Paths are absolute by the time
+/// they reach the runtime. The hook is a passive observer: enabling it
+/// never changes admission, sync, or relay behaviour.
+#[derive(Debug, Clone)]
+pub struct ObserverConfig {
+    pub enabled: bool,
+    pub path: PathBuf,
+    pub vantage: String,
+    pub clock_offset_ms: f64,
+    /// `unset`, `operator`, or `chrony`.
+    pub clock_source: String,
+    /// Bounded channel depth.
+    pub queue: usize,
+    pub pseudonym_key: PathBuf,
+    pub reveal_peer_addresses: bool,
+}
+
+impl ObserverConfig {
+    /// Disabled defaults. Used when `[observer]` is absent or
+    /// `enabled = false`.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            path: PathBuf::from("observer.jsonl"),
+            vantage: "node".to_string(),
+            clock_offset_ms: 0.0,
+            clock_source: "unset".to_string(),
+            queue: 8192,
+            pseudonym_key: PathBuf::from("observer-pseudonym.key"),
+            reveal_peer_addresses: false,
+        }
+    }
 }
 
 /// Resolved tracing subscriber configuration. Built from

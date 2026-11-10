@@ -16,7 +16,7 @@ use tracing_subscriber::EnvFilter;
 use super::toml_sections::*;
 use super::{
     validate_supported, Cli, LoggingConfig, LoggingFileConfig, LoggingFormat, Network, NodeConfig,
-    StateType, MAX_DOWNLOAD_WINDOW,
+    ObserverConfig, StateType, MAX_DOWNLOAD_WINDOW,
 };
 
 impl NodeConfig {
@@ -1247,6 +1247,65 @@ impl NodeConfig {
             }
         };
 
+        // [observer] — Phase 0 JSONL telemetry. Off by default. A dormant
+        // section resolves paths but skips value validation, so a disabled
+        // hook cannot brick boot; enabling it requires a sane queue and
+        // clock-source label.
+        let observer = {
+            let def = ObserverConfig::disabled();
+            let to = &toml_cfg.observer;
+            let resolve = |raw: Option<&str>, fallback: &std::path::Path| match raw {
+                None => data_dir.join(fallback),
+                Some(d) => {
+                    let p = PathBuf::from(d);
+                    if p.is_absolute() {
+                        p
+                    } else {
+                        data_dir.join(p)
+                    }
+                }
+            };
+            let path = resolve(to.path.as_deref(), &def.path);
+            let pseudonym_key = resolve(to.pseudonym_key.as_deref(), &def.pseudonym_key);
+            let vantage = to
+                .vantage
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .unwrap_or(&def.vantage)
+                .to_string();
+            let clock_source = to
+                .clock_source
+                .as_deref()
+                .unwrap_or(&def.clock_source)
+                .to_string();
+            let queue = to.queue.unwrap_or(def.queue);
+            let enabled = to.enabled.unwrap_or(def.enabled);
+            if enabled {
+                if !matches!(clock_source.as_str(), "unset" | "operator" | "chrony") {
+                    return Err(format!(
+                        "[observer] clock_source {clock_source:?} must be one of \
+                         \"unset\" | \"operator\" | \"chrony\""
+                    ));
+                }
+                if !(64..=1_000_000).contains(&queue) {
+                    return Err("[observer] queue must be between 64 and 1000000".into());
+                }
+            }
+            ObserverConfig {
+                enabled,
+                path,
+                vantage,
+                clock_offset_ms: to.clock_offset_ms.unwrap_or(def.clock_offset_ms),
+                clock_source,
+                queue,
+                pseudonym_key,
+                reveal_peer_addresses: to
+                    .reveal_peer_addresses
+                    .unwrap_or(def.reveal_peer_addresses),
+            }
+        };
+
         Ok(Self {
             // Scala's non-mining default is false; miners apply rule 123.
             // https://github.com/ergoplatform/ergo/blob/v6.0.7/src/main/resources/mainnet.conf#L44
@@ -1303,6 +1362,7 @@ impl NodeConfig {
             shadow_config,
             enable_anchor_scheduler,
             logging,
+            observer,
             mining_config,
             voting_targets,
             wallet_daemon_address,

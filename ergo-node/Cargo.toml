@@ -27,6 +27,7 @@ ergo-wallet-service = { workspace = true }
 ergo-wallet-protocol = { workspace = true }
 ergo-state      = { workspace = true }
 ergo-p2p        = { workspace = true }
+ergo-net-observe = { workspace = true }
 ergo-sync       = { workspace = true }
 ergo-mempool    = { workspace = true }
 ergo-mining     = { workspace = true }

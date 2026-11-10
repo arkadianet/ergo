@@ -25,6 +25,33 @@ pub(super) struct TomlConfig {
     pub(super) mining: ergo_mining::MiningConfig,
     pub(super) voting: TomlVoting,
     pub(super) shadow: TomlShadow,
+    pub(super) observer: TomlObserver,
+}
+
+/// `[observer]` TOML section: Phase 0 JSONL telemetry from a validating
+/// node. Off by default; when enabled the node emits transaction
+/// announce/request/receive/admit-reject records and header/block timing
+/// through a bounded, non-blocking sink.
+///
+/// `deny_unknown_fields` so a typo cannot silently leave the hook off.
+#[derive(serde::Deserialize, Default, Debug)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct TomlObserver {
+    pub(super) enabled: Option<bool>,
+    /// JSONL path. Relative paths resolve against `data_dir`.
+    pub(super) path: Option<String>,
+    /// Operator label copied into every record.
+    pub(super) vantage: Option<String>,
+    /// Wall-clock offset metadata (milliseconds).
+    pub(super) clock_offset_ms: Option<f64>,
+    /// `unset`, `operator`, or `chrony`.
+    pub(super) clock_source: Option<String>,
+    /// Bounded channel depth; records are dropped and counted when full.
+    pub(super) queue: Option<usize>,
+    /// Keyed pseudonymisation key file. Relative to `data_dir`.
+    pub(super) pseudonym_key: Option<String>,
+    /// Emit raw peer addresses. Debugging only.
+    pub(super) reveal_peer_addresses: Option<bool>,
 }
 
 /// `[shadow]` TOML section: shadow validation — live cross-check against a

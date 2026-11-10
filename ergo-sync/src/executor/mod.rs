@@ -32,7 +32,10 @@ use crate::perf::{BlockPerfCounters, HeaderPerfCounters};
 
 mod block_apply;
 mod header_pipeline;
+mod observer;
 mod peer_requests;
+
+pub use observer::{SharedValidationObserver, ValidationObserver};
 mod reorg;
 mod startup;
 
@@ -143,6 +146,9 @@ type OrphanHeaderEntry = (PeerId, header_proc::PreValidatedHeader, Vec<u8>);
 /// The sync executor. Owns the mutable state needed to drive the pipeline.
 pub struct SyncExecutor {
     params: ProtocolParams,
+    /// Optional Phase 0 header-validation callback. `None` in tests and
+    /// whenever `[observer]` is disabled.
+    validation_observer: Option<observer::SharedValidationObserver>,
     chain_config: DifficultyParams,
     /// Recent validated headers + raw bytes (newest first, max 50).
     /// Header-tip aligned. Used for SyncInfo V2 payload cache.
@@ -267,6 +273,7 @@ impl SyncExecutor {
     pub fn new(params: ProtocolParams, chain_config: DifficultyParams) -> Self {
         Self {
             params,
+            validation_observer: None,
             chain_config,
             last_headers: VecDeque::with_capacity(LAST_HEADERS_WINDOW),
             block_context_headers: Vec::with_capacity(10),
@@ -293,6 +300,20 @@ impl SyncExecutor {
             deep_fork_wedge_last_warn: None,
             orphan_root_walk_last: None,
             applied_blocks: VecDeque::new(),
+        }
+    }
+
+    /// Install the Phase 0 validation observer. Off by default; the node
+    /// sets it only when `[observer] enabled = true`.
+    pub fn set_validation_observer(&mut self, observer: observer::SharedValidationObserver) {
+        self.validation_observer = Some(observer);
+    }
+
+    /// Emit one validated-header callback when installed. Inline and
+    /// non-blocking by contract.
+    fn notify_header_validated(&self, header_id: [u8; 32], height: u32) {
+        if let Some(observer) = &self.validation_observer {
+            observer.on_header_validated(header_id, height);
         }
     }
 

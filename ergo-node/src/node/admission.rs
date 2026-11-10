@@ -104,6 +104,7 @@ pub(super) fn admit_transaction(
         None => return Vec::new(),
     };
     let size = tx_bytes.len();
+    let observer = state.observer.clone();
     let actions = {
         let tip_ctx = owned.as_mempool_ctx(
             state
@@ -138,6 +139,19 @@ pub(super) fn admit_transaction(
                     outcome = "admitted",
                     "modifier received",
                 );
+                if let Some(observer) = &observer {
+                    observer.tx_outcome(
+                        peer,
+                        super::observer::TxOutcome {
+                            tx_id: *tx_id.as_bytes(),
+                            bytes: tx_bytes,
+                            result: "admitted",
+                            reason: None,
+                            fee: Some(*fee),
+                            size: Some(size as u32),
+                        },
+                    );
+                }
             }
             AdmissionOutcome::Rejected { reason } => {
                 state.mempool_peer_tx_rejected_total =
@@ -149,6 +163,21 @@ pub(super) fn admit_transaction(
                     reason = ?reason,
                     "modifier received",
                 );
+                if let Some(observer) = &observer {
+                    if let Some(tx_id) = super::observer::tx_id_of(tx_bytes) {
+                        observer.tx_outcome(
+                            peer,
+                            super::observer::TxOutcome {
+                                tx_id,
+                                bytes: tx_bytes,
+                                result: "rejected",
+                                reason: Some(format!("{reason:?}")),
+                                fee: None,
+                                size: Some(size as u32),
+                            },
+                        );
+                    }
+                }
             }
         }
         actions

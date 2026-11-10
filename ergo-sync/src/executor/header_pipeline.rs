@@ -254,6 +254,7 @@ impl SyncExecutor {
                     coordinator.prune_pending_to_best_chain(store);
                 }
                 self.push_validated_header(&processed, header_bytes, store);
+                self.notify_header_validated(processed.header_id, processed.height);
 
                 // Drain orphan buffer — each success may unlock more orphans.
                 followup.extend(self.drain_orphans(store, coordinator, now));
@@ -425,6 +426,7 @@ impl SyncExecutor {
                             );
                             actions.extend(followup);
                             self.push_validated_header(&processed, &bytes, store);
+                            self.notify_header_validated(processed.header_id, processed.height);
                         }
                         Err(HeaderProcessError::AlreadyKnown { .. }) => {}
                         Err(HeaderProcessError::ParentNotFound { .. }) => {
@@ -621,6 +623,7 @@ impl SyncExecutor {
                     );
                     all_actions.extend(followup);
                     self.push_validated_header(&processed, &bytes, store);
+                    self.notify_header_validated(processed.header_id, processed.height);
                 }
                 Err(HeaderProcessError::ParentNotFound { .. }) => {
                     // Defensive — the pre-filter said parent was
