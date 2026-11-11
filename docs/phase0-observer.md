@@ -228,6 +228,16 @@ target/debug/crawler \
   --dial-rate 12
 ```
 
+Run log: `ergo-phase0-hs-capture` 2026-11-11 07:25–11:47 AEST — 2 508
+captured handshakes from 55 unique mainnet peers (14 seeds,
+`--capture-max 2500`, capture-only mode, ~11–12 dials/min dial-rate
+bound). Replay verdicts: 100 % parse-OK, 0 rejections, 0 newly-rejected;
+96.0 % strict SessionId overall, 98.0 % excluding our own pre-fix node —
+the 100 `unknown:3` handshakes are exactly the two pre-fix Rust peers
+(ours + `ergo-rust-mainnet-nbg1`). Dial limits held throughout (≤12/min
+initiation, 60 s per-address failure-backoff floor, no double-dial of an
+in-flight address). Verdict detail: [unverified](unverified.md).
+
 ## Node hook
 
 The same crate provides the bounded `ObserverSink` and record model for a
@@ -365,6 +375,47 @@ codec fix (`85c1b052`); both take effect only at this redeploy.
 | 1. Testnet node (canary) | 2026-11-11, executed | Replace the testnet node binary with the current branch build; restart; observe for several hours: handshake outcomes, disconnect reasons, peer-count stability, and the self-connection check (`handshake not admitted` / `SelfConnection` in the node log). |
 | 2. Mainnet node | 2026-11-12 14:02 local | Stop `ergo-rust-archival`, swap in the same build (keeps the `[observer]` hook), start; mark the restart time in this table and in the dataset (the `mono_ns` session boundary). Rollback: `ergo-node.pre-phase0-20261110` + `ergo-node.toml.bak-pre-observer`. |
 | 3. Observer + crawlers | 2026-11-12 14:02 local, after step 2 | Restart `ergo-phase0-observer`, `ergo-phase0-crawler`, `ergo-phase0-crawler-testnet` with the new build (capture flags stay off); mark restart times. From this boundary the observer/crawler present the real tip SyncInfo: expect one 400-id catch-up per connection, then tip-region announces only; early-header RTT rows shrink to the first 64 ids/connection and RTT composition becomes tip-dominated. |
+
+### Mainnet rollback triggers (step 2, first 10 minutes)
+
+T0 = restart time of `ergo-rust-archival` at step 2. Baseline facts
+(measured, not assumed): the 2026-11-10 15:28 restart recovered to
+`peers≈65` within ~2 min (`node_gauges` journal lines); the node's own
+`/api/v1/info` reports `target_block_interval_ms=120000` (~5 tip
+advances per 10 min, `node_heartbeat` `best_full_block_height`); and the
+pre-redeploy baseline is `bans=0` with zero `handshake not admitted`
+lines across the whole observation window.
+
+| # | Signal | Threshold (T0-relative) | Action |
+|---|---|---|---|
+| 1 | Service state | `systemctl --user status ergo-rust-archival` not `active`, or no `node_gauges` line by T0+3 min | **Roll back** |
+| 2 | Peer recovery | `peers=` gauge < 20 at T0+5 min (baseline ≈65 by T0+2 min) | **Roll back** |
+| 3 | Handshake rejection | Any `handshake not admitted` (warn) whose `error` is not the 30 s `UnknownPeer` timeout — especially `SelfConnection` or a parse error | **Roll back** — this is the codec-change signature; the replay of all 2 508 captured mainnet handshakes predicts zero of these |
+| 4 | Ban wave | `bans=` gauge ≥ 2 in the first 10 min *and* `peers=` < 40 | **Roll back** |
+| 5 | Tip stall | `best_full_block_height` unchanged for 10 min, or persistent `gap > 0` / `storage_health != "healthy"` in heartbeats | **Roll back** if not resolved by T0+10 min |
+| 6 | Churn | `peers=` oscillating ±20 % in any 5-min window after initial recovery | Inspect; roll back if it persists to T0+15 min |
+
+Watch: `journalctl --user -u ergo-rust-archival -f` (gauge and heartbeat
+lines are the structured signals; `handshake not admitted` is the
+signature line, `ergo-node/src/node/events.rs:401-404`). API health:
+`curl -s 127.0.0.1:9063/api/v1/info` (open route — agent/uptime); tip
+from `node_heartbeat` (the REST tip route requires the operator
+`api_key` header from `ergo-node.toml`).
+
+Rollback procedure (restore the pre-phase-0 state):
+
+1. `systemctl --user stop ergo-rust-archival`
+2. `cd /home/arkadias/nodes/rust-mainnet && cp ergo-node.pre-phase0-20261110 ergo-node && cp ergo-node.toml.bak-pre-observer ergo-node.toml`
+3. `systemctl --user start ergo-rust-archival`
+4. Verify: `/api/v1/info` up, `peers=` past 40 within 3 min, tip
+   advancing, `bans=0`, no `handshake not admitted`.
+5. Record T0 and the rollback time in the redeploy table; mark the
+   `mono_ns` session boundary in the dataset note. Keep the new binary
+   build in place for post-hoc debugging (do not delete it).
+
+Step 3 (observer + crawlers) proceeds after a step-2 rollback *unless*
+the rollback trigger was #3 (handshake rejection): in that case hold
+step 3 and investigate before restarting any P2P-facing binary.
 
 Post-redeploy, re-run `scripts/analysis/summarize.py` on the final data
 and write the 48 h report (key interval estimates, chosen outbound cap,
