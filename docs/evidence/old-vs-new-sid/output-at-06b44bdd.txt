@@ -1,0 +1,32 @@
+Command:   cargo test -p ergo-p2p --test old_vs_new_sid -- --nocapture
+Worktree:  detached at 06b44bdd (pre-85c1b052), branch p2p/phase0-observer
+Captured:  2026-11-11 AEST, rustc 1.98.1
+----
+case                                                 old-parser feature outcome                    note
+synthetic id=0 (vlq=1B, body=5B)                     ACCEPT     Unknown fid=3 (5B preserved)       feature dropped, handshake kept
+synthetic id=-1 (vlq=1B, body=5B)                    ACCEPT     Unknown fid=3 (5B preserved)       feature dropped, handshake kept
+synthetic id=63 (vlq=1B, body=5B)                    ACCEPT     Unknown fid=3 (5B preserved)       feature dropped, handshake kept
+synthetic id=64 (vlq=2B, body=6B)                    ACCEPT     Unknown fid=3 (6B preserved)       feature dropped, handshake kept
+synthetic id=8191 (vlq=2B, body=6B)                  ACCEPT     Unknown fid=3 (6B preserved)       feature dropped, handshake kept
+synthetic id=8192 (vlq=3B, body=7B)                  ACCEPT     Unknown fid=3 (7B preserved)       feature dropped, handshake kept
+synthetic id=1048575 (vlq=3B, body=7B)               ACCEPT     Unknown fid=3 (7B preserved)       feature dropped, handshake kept
+synthetic id=1048576 (vlq=4B, body=8B)               ACCEPT     Unknown fid=3 (8B preserved)       feature dropped, handshake kept
+synthetic id=2097151 (vlq=4B, body=8B)               ACCEPT     Unknown fid=3 (8B preserved)       feature dropped, handshake kept
+synthetic id=268435455 (vlq=5B, body=9B)             ACCEPT     Unknown fid=3 (9B preserved)       feature dropped, handshake kept
+synthetic id=34359738367 (vlq=6B, body=10B)          ACCEPT     Unknown fid=3 (10B preserved)      feature dropped, handshake kept
+synthetic id=4398046511103 (vlq=7B, body=11B)        ACCEPT     Unknown fid=3 (11B preserved)      feature dropped, handshake kept
+synthetic id=562949953421311 (vlq=8B, body=12B)      ACCEPT     SessionId magic=[2, 3, 2, 3] id=-72057594037928191 SILENT MISDECODE (true 562949953421311)
+synthetic id=562949953421312 (vlq=8B, body=12B)      ACCEPT     SessionId magic=[2, 3, 2, 3] id=-9187201950435737598 SILENT MISDECODE (true 562949953421312)
+synthetic id=9223372036854775807 (vlq=10B, body=14B) ACCEPT     SessionId magic=[2, 3, 2, 3] id=-72057594037927937 SILENT MISDECODE (true 9223372036854775807)
+synthetic id=8288960606751204270 (vlq=10B, body=14B) ACCEPT     SessionId magic=[2, 3, 2, 3] id=-2553851421809138040 SILENT MISDECODE (true 8288960606751204270)
+live: testnet canary (new rust, 14B body)            ACCEPT     SessionId magic=[2, 3, 2, 3] id=-2553851421809138040 SILENT MISDECODE (true 8288960606751204270)
+live: ergoref 6.0.8 seed (13B body)                  ACCEPT     SessionId magic=[1, 0, 2, 4] id=-7238717270625815588 SILENT MISDECODE (true -2836396338792170126)
+live: ergoref seed toronto (14B body)                ACCEPT     SessionId magic=[1, 0, 2, 4] id=-4833907700629636660 SILENT MISDECODE (true 5678181260072082078)
+live: our pre-fix mainnet node (old 12B body)        ACCEPT     SessionId magic=[1, 0, 2, 4] id=1382444368439740357 correct value
+
+SUMMARY: total=20 accepted_as_SessionId=8 accepted_as_Unknown=12 rejected=0
+        of the SessionId accepts, 7 silently carried a wrong id
+test old_parser_vs_new_format_bodies ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

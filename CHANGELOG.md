@@ -68,6 +68,8 @@ infrastructure.
   - A selection never holds more than 100 boxes. A payment the selector cannot cover within 100 boxes returns `400 bad_request` saying so; consolidate boxes or pass explicit `inputs`. A real shortfall is still `insufficient_funds`, now naming the missing token when a token is short.
   - `POST /wallet/boxes/collect` returns `insufficient_funds` or `bad_request` for a failed selection instead of `500 internal`.
   - walletd logs every 5xx it returns, with the error the response leaves out.
+- **P2P: the `SessionId` handshake feature (feature id 3) was written and read as a fixed 8-byte big-endian id; the reference node writes 4 magic bytes plus a 1–10-byte zigzag-VLQ id (`putLong`, variable-length).** Every Rust node therefore mis-decoded every peer's session id in both directions (and downgraded bodies shorter than 12 bytes to an unknown feature), silently breaking self-connection detection. The codec now writes and parses the variable-length form and preserves a non-canonical body verbatim as an unknown feature instead of mis-decoding it (handshake accepted, no ban). Pinned by golden wire vectors, the cross-generation test `ergo-p2p/tests/it/sid_cross_compat.rs` (evidence: `docs/evidence/old-vs-new-sid/`), and a 2,508-handshake mainnet capture replayed offline: 100 % parse-OK, 0 rejections.
+  - Interop with nodes running the pre-fix codec: they mis-decode this release's session id (or drop it to an unknown feature for short ids), so self-connection detection against this release is unreliable *on their side*; handshakes are still accepted in both directions and no peer is banned.
 
 ## [0.13.1] - 2026-10-19
 

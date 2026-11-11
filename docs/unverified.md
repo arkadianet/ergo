@@ -131,7 +131,11 @@ must either be fixed, tested as intentional, or listed in the report.
    detection (`ergo-node/src/node/events.rs` extracts the id from the
    peer's feature). Fixed to VLQ+zigzag on both sides; six golden body
    vectors pin the format (`session_id_feature_wire_format_golden_vectors`,
-   `ergo-p2p/src/handshake.rs`).
+   `ergo-p2p/src/handshake.rs`). Cross-generation evidence (pre-fix
+   parser on the 20 new/old-format bodies: 0 rejections, 7 of 8
+   ≥12-byte bodies silently mis-decoded; fixed codec: 19 exact
+   `SessionId` + 1 verbatim `Unknown`): `docs/evidence/old-vs-new-sid/`
+   and `ergo-p2p/tests/it/sid_cross_compat.rs`.
 
 8. **Feature/declared-address port bounds and declared-address length
    byte (found by the offline fuzz suite, fixed in this change).**

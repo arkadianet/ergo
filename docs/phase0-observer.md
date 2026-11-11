@@ -238,6 +238,17 @@ the 100 `unknown:3` handshakes are exactly the two pre-fix Rust peers
 initiation, 60 s per-address failure-backoff floor, no double-dial of an
 in-flight address). Verdict detail: [unverified](unverified.md).
 
+Cross-generation check (same day): the pre-`85c1b052` parser
+(commit `06b44bdd`) fed the 20 new/old-format SessionId bodies above
+accepts **all 20** (0 rejections) — bodies <12 B are downgraded to
+`Unknown {3}`, bodies ≥12 B are accepted as `SessionId`, and 7 of the 8
+of those **silently mis-decode** (the old code read the first 8 VLQ
+bytes as big-endian i64). Evidence (test + captured output):
+[`evidence/old-vs-new-sid`](evidence/old-vs-new-sid/); the
+fixed-codec counterpart that compiles at branch head is
+`ergo-p2p/tests/it/sid_cross_compat.rs` (same 20 bodies: 19 exact
+`SessionId`, 1 verbatim `Unknown`, 0 rejections).
+
 ## Node hook
 
 The same crate provides the bounded `ObserverSink` and record model for a
@@ -390,14 +401,18 @@ lines across the whole observation window.
 |---|---|---|---|
 | 1 | Service state | `systemctl --user status ergo-rust-archival` not `active`, or no `node_gauges` line by T0+3 min | **Roll back** |
 | 2 | Peer recovery | `peers=` gauge < 20 at T0+5 min (baseline ≈65 by T0+2 min) | **Roll back** |
-| 3 | Handshake rejection | Any `handshake not admitted` (warn) whose `error` is not the 30 s `UnknownPeer` timeout — especially `SelfConnection` or a parse error | **Roll back** — this is the codec-change signature; the replay of all 2 508 captured mainnet handshakes predicts zero of these |
+| 3 | Handshake rejection (codec/parse-related only) | (a) `handshake not admitted` (warn, `ergo-node/src/node/events.rs:401-404`) with `error` = `self-connection detected via session_id` — the only reason code derived from the decoded session id (predicted zero: we are behind NAT); or (b) a burst of handshake *parse* failures, which log at debug level (`handshake failed … parse handshake: …`, `ergo-node/src/peer_loop.rs:317`) and are visible at info level only through stalled peer recovery (trigger 2) | **Roll back** — the codec-change signature; the replay of all 2 508 captured mainnet handshakes predicts zero of these. The other reason codes on that line — `already connected`, `max connections reached`, `no inbound slots available`, `per-IP limit reached`, `per-subnet limit reached`, `peer is banned`, `peer version … below minimum`, `unknown peer` (the 30 s timeout) — are connection-management, not codec failures: **do not roll back for them** |
 | 4 | Ban wave | `bans=` gauge ≥ 2 in the first 10 min *and* `peers=` < 40 | **Roll back** |
 | 5 | Tip stall | `best_full_block_height` unchanged for 10 min, or persistent `gap > 0` / `storage_health != "healthy"` in heartbeats | **Roll back** if not resolved by T0+10 min |
 | 6 | Churn | `peers=` oscillating ±20 % in any 5-min window after initial recovery | Inspect; roll back if it persists to T0+15 min |
 
 Watch: `journalctl --user -u ergo-rust-archival -f` (gauge and heartbeat
 lines are the structured signals; `handshake not admitted` is the
-signature line, `ergo-node/src/node/events.rs:401-404`). API health:
+signature line, `ergo-node/src/node/events.rs:401-404`). Log **every**
+`handshake not admitted` line to the redeploy log with its `error=`
+reason code (the full code set is `ConnectError`,
+`ergo-p2p/src/peer_manager/limits.rs:81-100`), whether or not it is a
+rollback trigger. API health:
 `curl -s 127.0.0.1:9063/api/v1/info` (open route — agent/uptime); tip
 from `node_heartbeat` (the REST tip route requires the operator
 `api_key` header from `ergo-node.toml`).
@@ -414,8 +429,9 @@ Rollback procedure (restore the pre-phase-0 state):
    build in place for post-hoc debugging (do not delete it).
 
 Step 3 (observer + crawlers) proceeds after a step-2 rollback *unless*
-the rollback trigger was #3 (handshake rejection): in that case hold
-step 3 and investigate before restarting any P2P-facing binary.
+the rollback trigger was #3 (codec/parse-related handshake rejection):
+in that case hold step 3 and investigate before restarting any
+P2P-facing binary.
 
 Post-redeploy, re-run `scripts/analysis/summarize.py` on the final data
 and write the 48 h report (key interval estimates, chosen outbound cap,
