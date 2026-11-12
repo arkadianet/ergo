@@ -845,7 +845,7 @@ dependencies = [
  "bytes",
  "ergo_avltree_rust",
  "rand 0.8.6",
- "sha2 0.9.9",
+ "sha2 0.11.1",
 ]
 
 [[package]]
