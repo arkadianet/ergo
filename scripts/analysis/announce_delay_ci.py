@@ -23,9 +23,11 @@ event and counts as its own resampling unit.
 Sessions / warm-up
 ------------------
 A process session starts at an `observer_start` record or at a mono_ns
-reset (a drop of > 10 min, which after the 2026-11-11 16:41 machine reboot
-is the only marker, because the reboot's torn write destroyed the
-post-reboot `observer_start` records in the node-hook stream). Warm-up:
+reset (a drop of > 10 min). The 2026-11-11 16:41 machine reboot's
+post-reboot `observer_start` in the node-hook stream sits behind a
+leading NUL block (torn write); the NUL block is stripped below, so the
+record — and the true session start — is recovered rather than falling
+back to the mono-reset marker. Warm-up:
 blocks applied within the first WARMUP_S seconds of a session are reported
 both included and excluded; the headline numbers use the excluded set.
 
@@ -104,6 +106,11 @@ def main():
             line = line.strip()
             if not line:
                 continue
+            # torn writes can leave a leading NUL block before an
+            # intact record (2026-11-11 reboot); strip it
+            line = line.lstrip("\x00")
+            if not line:
+                continue
             try:
                 r = json.loads(line)
             except json.JSONDecodeError:
@@ -150,6 +157,9 @@ def main():
     with open(args.file, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
+            if not line:
+                continue
+            line = line.lstrip("\x00")  # torn-write NUL block (see pass 1)
             if not line:
                 continue
             try:

@@ -30,12 +30,25 @@ from collections import Counter, defaultdict
 SCHEMA = "ergo-observer/1"
 ENVELOPE_REQUIRED = ("schema", "vantage", "wall_ms", "mono_ns", "event")
 
+# A mono_ns regression with at least this much wall time across it
+# corroborates real downtime (a machine reboot or long stop) even when
+# the process's observer_start record did not survive the kill boundary
+# (torn write). See the mono_ns rule in main().
+WALL_GAP_CORROBORATE_MS = 60_000
+
 
 def load(path):
     """Yield (line_no, record_or_None, error_or_None, raw)."""
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         for i, line in enumerate(f, 1):
             line = line.strip()
+            if not line:
+                continue
+            # Torn writes at hard-stop boundaries can leave a leading NUL
+            # block in front of an otherwise intact record (2026-11-11
+            # machine reboot: node-hook line 651161, mainnet-crawler line
+            # 98847). Strip it so the record is parsed and counted.
+            line = line.lstrip("\x00")
             if not line:
                 continue
             try:
@@ -91,6 +104,7 @@ class File:
         self.clock_source = None
         self.mono_back = 0
         self.mono_back_max = 0
+        self.mono_back_corroborated = 0
         self.wall_back = 0
         self.wall_back_max = 0
         self.future = 0
@@ -157,10 +171,14 @@ class File:
 
         # timing anomalies
         if self.records:
-            prev_mono, prev_wall = self.records[-1]
+            prev_mono, prev_rec = self.records[-1]
+            prev_wall = prev_rec.get("wall_ms")
             if isinstance(mono, int) and isinstance(prev_mono, int) and mono < prev_mono:
                 self.mono_back += 1
                 self.mono_back_max = max(self.mono_back_max, prev_mono - mono)
+                if (isinstance(wall, int) and isinstance(prev_wall, int)
+                        and wall - prev_wall >= WALL_GAP_CORROBORATE_MS):
+                    self.mono_back_corroborated += 1
             if isinstance(wall, int) and isinstance(prev_wall, int) and wall < prev_wall:
                 self.wall_back += 1
                 self.wall_back_max = max(self.wall_back_max, prev_wall - wall)
@@ -330,6 +348,7 @@ def summarize(files):
         report["anomalies"][f.path] = {
             "mono_ns_regressions": f.mono_back,
             "mono_ns_max_regression_ns": f.mono_back_max,
+            "mono_ns_regressions_corroborated": f.mono_back_corroborated,
             "wall_ms_regressions": f.wall_back,
             "wall_ms_max_regression_ms": f.wall_back_max // 1000,
             "future_records": f.future,
@@ -419,7 +438,21 @@ def main():
         a = report["anomalies"][e["file"]]
         problems = []
         if a["mono_ns_regressions"]:
-            note = "explainable: mono resets at restart" if a["mono_ns_regressions"] <= e["restarts"] else "UNEXPLAINED"
+            # A mono reset is explained if it is covered by a counted
+            # restart (observer_start record) or is corroborated by a
+            # wall gap of >= WALL_GAP_CORROBORATE_MS across it (real
+            # downtime whose observer_start did not survive, e.g. the
+            # 2026-11-11 machine reboot's torn write in the
+            # testnet-crawler stream).
+            uncorroborated = a["mono_ns_regressions"] - a["mono_ns_regressions_corroborated"]
+            if uncorroborated <= e["restarts"]:
+                note = (f"explainable: {a['mono_ns_regressions_corroborated']} reset(s) "
+                        f"corroborated by wall gap >= "
+                        f"{WALL_GAP_CORROBORATE_MS // 1000} s (downtime), "
+                        f"{uncorroborated} uncorroborated (<= "
+                        f"{e['restarts']} counted restarts)")
+            else:
+                note = "UNEXPLAINED"
             problems.append(f"mono_ns regressions={a['mono_ns_regressions']} (max {a['mono_ns_max_regression_ns']} ns, {note})")
         if a["wall_ms_regressions"]:
             problems.append(f"wall_ms regressions={a['wall_ms_regressions']} (max {a['wall_ms_max_regression_ms']} ms)")
