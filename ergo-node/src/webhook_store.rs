@@ -103,9 +103,11 @@ impl RedbWebhookStore {
             // allow a different file to receive signing secrets. Tighten existing
             // permissions only after redb validates and locks this same database.
             let permissions_file = file.try_clone().map_err(|e| e.to_string())?;
+            let backend = redb::backends::FileBackend::new(file)
+                .map_err(|e| e.to_string())?;
             let db = redb::Database::builder()
                 .set_cache_size(CACHE_BYTES)
-                .create_file(file)
+                .create_with_backend(backend)
                 .map_err(|e| e.to_string())?;
             #[cfg(unix)]
             {
