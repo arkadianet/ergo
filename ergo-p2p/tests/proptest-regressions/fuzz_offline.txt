@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 515360250361bf4128e7af01a589f34b5537133b6aedebf9ac3f7633135ffc20 # shrinks to time = 0, agent = " ", major = 0, minor = 0, patch = 0, node_name = "", declared = None, features = [LocalAddress { addr: [0, 0, 0, 0], port: 2147483648 }]
+cc c28f782c1ccac756d6146f32af06457632aa0409f5c243d81450363b18d223a5 # shrinks to time = 0, agent = " ", major = 0, minor = 0, patch = 0, node_name = "", declared = None, features = [Unknown { feature_id: 2, data: [0, 0, 0, 0, 0, 0] }]
