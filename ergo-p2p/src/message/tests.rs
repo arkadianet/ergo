@@ -104,6 +104,33 @@ fn serialize_sync_info_rejects_oversize_inputs() {
         serialize_sync_info(&oversize_header),
         Err(MessageError::PayloadTooLarge(_))
     ));
+
+    // V2: exactly MAX_HEADER_SIZE is also rejected — Scala uses a strict
+    // `headerBytesCount < MaxHeaderSize` require.
+    let boundary_header = SyncInfo::V2 {
+        headers: vec![vec![0u8; MAX_HEADER_SIZE]],
+    };
+    assert!(matches!(
+        serialize_sync_info(&boundary_header),
+        Err(MessageError::PayloadTooLarge(_))
+    ));
+}
+
+#[test]
+fn deserialize_sync_info_v2_rejects_header_at_exact_max_size() {
+    // Hand-build the V2 payload: ushort 0, marker 0xFF, count 1, then a
+    // ushort length of exactly MAX_HEADER_SIZE. Scala rejects this.
+    let mut w = VlqWriter::new();
+    w.put_u16(0);
+    w.put_u8(SYNC_V2_MARKER as u8);
+    w.put_u8(1);
+    w.put_u16(MAX_HEADER_SIZE as u16);
+    w.put_bytes(&vec![0u8; MAX_HEADER_SIZE]);
+    let err = deserialize_sync_info(&w.result()).expect_err("exact max must be rejected");
+    assert!(matches!(
+        err,
+        MessageError::PayloadTooLarge(MAX_HEADER_SIZE)
+    ));
 }
 
 #[test]
@@ -966,4 +993,123 @@ fn modifiers_encoder_matches_count_and_type_decoder_bounds() {
         serialize_modifiers(&data),
         Err(MessageError::UnknownModifierType(0))
     ));
+}
+
+// ---- Full-frame golden vectors ----
+//
+// Expected bytes computed independently (Python, hashlib.blake2b) from the
+// reference layout, `MessageSerializer.scala:22-34` (v6.0.7):
+// `magic[4] || code[1] || BE32 length || (checksum[4] = blake2b256(payload)[:4] || payload)`
+// when the payload is non-empty; 9 header bytes when empty.
+
+#[test]
+fn get_peers_full_frame_vector() {
+    use crate::framing::{deserialize_frame, serialize_frame, MessageFrame, MAINNET_MAGIC};
+
+    let payload = serialize_get_peers();
+    assert!(payload.is_empty());
+    // 9-byte frame, no checksum for empty payloads (MessageSerializer.scala:28-31)
+    assert_eq!(
+        hex::encode(serialize_frame(
+            &MAINNET_MAGIC,
+            &MessageFrame {
+                code: 1,
+                payload: payload.clone()
+            }
+        )),
+        "010002040100000000"
+    );
+    let (frame, consumed) =
+        deserialize_frame(&MAINNET_MAGIC, &hex::decode("010002040100000000").unwrap())
+            .unwrap()
+            .unwrap();
+    assert_eq!(consumed, 9);
+    assert_eq!(frame.code, 1);
+    assert!(frame.payload.is_empty());
+    deserialize_get_peers(&frame.payload).unwrap();
+}
+
+#[test]
+fn peers_full_frame_vector() {
+    use crate::framing::{deserialize_frame, serialize_frame, MessageFrame, MAINNET_MAGIC};
+    use crate::handshake::{PeerFeature, PeerSpec, Version};
+
+    let spec = PeerSpec {
+        agent_name: "test".into(),
+        version: Version {
+            major: 1,
+            minor: 2,
+            patch: 3,
+        },
+        node_name: "node".into(),
+        declared_address: None,
+        features: vec![PeerFeature::Mode {
+            state_type: 0,
+            verify_tx: true,
+            nipopow: None,
+            blocks_to_keep: -1,
+        }],
+    };
+    let payload = serialize_peers(&[spec]);
+    // putUInt(1) [VLQ] + shortString("test") + 3 version bytes + shortString("node")
+    // + option(declaredAddress)=0 + featureCount=1 + mode(id 16, len 4 [VLQ], Utxo|verify|no-nipopow|-1)
+    // (PeersSpec.serialize, BasicMessagesRepo.scala)
+    assert_eq!(
+        hex::encode(&payload),
+        "010474657374010203046e6f64650001100400010001"
+    );
+    let frame = serialize_frame(
+        &MAINNET_MAGIC,
+        &MessageFrame {
+            code: 2,
+            payload: payload.clone(),
+        },
+    );
+    assert_eq!(
+        hex::encode(&frame),
+        "0100020402000000162a357a28010474657374010203046e6f64650001100400010001"
+    );
+    let (parsed, consumed) = deserialize_frame(&MAINNET_MAGIC, &frame).unwrap().unwrap();
+    assert_eq!(consumed, frame.len());
+    assert_eq!(parsed.code, 2);
+    assert_eq!(parsed.payload, payload);
+    let peers = deserialize_peers(&parsed.payload, 64).unwrap();
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].agent_name, "test");
+    assert_eq!(peers[0].node_name, "node");
+}
+
+#[test]
+fn sync_info_v2_full_frame_vector() {
+    use crate::framing::{deserialize_frame, serialize_frame, MessageFrame, MAINNET_MAGIC};
+
+    // One deterministic 220-byte "header" (i*7+3 mod 256).
+    let header: Vec<u8> = (0..220u32).map(|i| ((i * 7 + 3) % 256) as u8).collect();
+    let info = SyncInfo::V2 {
+        headers: vec![header.clone()],
+    };
+    let payload = serialize_sync_info(&info).unwrap();
+    // VLQ putUShort(0)=`00` + marker(-1)=`ff` + count=1 + VLQ putUShort(220)=`dc01` + header
+    assert_eq!(
+        hex::encode(&payload),
+        format!("00ff01dc01{}", hex::encode(&header))
+    );
+    let frame = serialize_frame(
+        &MAINNET_MAGIC,
+        &MessageFrame {
+            code: 65,
+            payload: payload.clone(),
+        },
+    );
+    // length 225=0xe1, blake2b256(payload)[:4]=437c8549 (independent Python compute)
+    let expected = format!("0100020441000000e1437c8549{}", hex::encode(&payload));
+    assert_eq!(hex::encode(&frame), expected);
+    let (parsed, consumed) = deserialize_frame(&MAINNET_MAGIC, &frame).unwrap().unwrap();
+    assert_eq!(consumed, frame.len());
+    assert_eq!(parsed.code, 65);
+    assert_eq!(parsed.payload, payload);
+    match deserialize_sync_info(&parsed.payload).unwrap() {
+        SyncInfo::V2 { headers } => assert_eq!(headers, vec![header]),
+        other => panic!("expected V2, got {other:?}"),
+    }
 }
