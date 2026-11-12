@@ -171,8 +171,11 @@ fn has_url_scheme(s: &str) -> bool {
 ///
 /// A known feature id is accepted only when the body is exactly the
 /// canonical serialization of that feature (in-range fields, fully
-/// consumed). Anything else — truncation, trailing bytes, out-of-range
-/// values — is preserved as `Unknown { feature_id, data }`:
+/// consumed, minimal VLQ encodings — enforced by re-serializing the
+/// parsed feature and requiring byte identity with the input).
+/// Anything else — truncation, trailing bytes, out-of-range values,
+/// overlong VLQs, non-canonical booleans — is preserved as
+/// `Unknown { feature_id, data }`:
 ///
 /// * this is a documented superset over Scala, which *drops* a feature
 ///   that fails `parseTry` (PeerSpec.scala:94-101: "we ignore a feature
@@ -198,30 +201,33 @@ fn deserialize_feature(feature_id: u8, data: &[u8]) -> PeerFeature {
             data: data.to_vec(),
         }
     };
-    match feature_id {
+    // Parse to a typed feature, or `None` when the body is not decodable
+    // (truncation, trailing bytes, out-of-range values).
+    let parsed: Option<PeerFeature> = match feature_id {
         // Scala: `getBytes(4)` + `getUInt().toIntExact` — the port is
         // bounded by i32::MAX (LocalAddressPeerFeature.scala:31-35,
         // scorex-util `VLQReader.getUIntExact`).
         FEATURE_LOCAL_ADDRESS => {
             if data.len() < 5 {
-                return unknown();
-            }
-            let mut addr = [0u8; 4];
-            addr.copy_from_slice(&data[..4]);
-            let mut r = VlqReader::new(&data[4..]);
-            // Scala parity on well-formed input: `getBytes(4)` +
-            // `getUInt().toIntExact` (LocalAddressPeerFeature.scala:31-35).
-            // `toIntExact` rejects port values above i32::MAX, in which case
-            // `PeerSpecSerializer.parse` drops the whole feature
-            // (`parseTry(...).toOption`, PeerSpec.scala:99-101). We preserve
-            // the raw feature bytes as Unknown instead of fabricating a port
-            // (documented superset stance for malformed feature data), which
-            // also keeps serialize->deserialize byte-idempotent.
-            // The port VLQ must end exactly at the end of the body (see the
-            // function doc for why trailing bytes are preserved).
-            match (r.get_u32_exact(), r.remaining()) {
-                (Ok(port), 0) => PeerFeature::LocalAddress { addr, port },
-                _ => unknown(),
+                None
+            } else {
+                let mut addr = [0u8; 4];
+                addr.copy_from_slice(&data[..4]);
+                let mut r = VlqReader::new(&data[4..]);
+                // Scala parity on well-formed input: `getBytes(4)` +
+                // `getUInt().toIntExact` (LocalAddressPeerFeature.scala:31-35).
+                // `toIntExact` rejects port values above i32::MAX, in which case
+                // `PeerSpecSerializer.parse` drops the whole feature
+                // (`parseTry(...).toOption`, PeerSpec.scala:99-101). We preserve
+                // the raw feature bytes as Unknown instead of fabricating a port
+                // (documented superset stance for malformed feature data), which
+                // also keeps serialize->deserialize byte-idempotent.
+                // The port VLQ must end exactly at the end of the body (see the
+                // function doc for why trailing bytes are preserved).
+                match (r.get_u32_exact(), r.remaining()) {
+                    (Ok(port), 0) => Some(PeerFeature::LocalAddress { addr, port }),
+                    _ => None,
+                }
             }
         }
         // Scala: `getBytes(MagicLength=4)` + `getLong()` — `getLong` is
@@ -230,38 +236,37 @@ fn deserialize_feature(feature_id: u8, data: &[u8]) -> PeerFeature {
         // `VLQReader.getLong`), not a fixed-width 8-byte write.
         FEATURE_SESSION_ID => {
             if data.len() < 5 {
-                return unknown();
-            }
-            let mut magic = [0u8; 4];
-            magic.copy_from_slice(&data[..4]);
-            let mut r = VlqReader::new(&data[4..]);
-            match (r.get_i64(), r.remaining()) {
-                (Ok(session_id), 0) => PeerFeature::SessionId { magic, session_id },
-                _ => unknown(),
+                None
+            } else {
+                let mut magic = [0u8; 4];
+                magic.copy_from_slice(&data[..4]);
+                let mut r = VlqReader::new(&data[4..]);
+                match (r.get_i64(), r.remaining()) {
+                    (Ok(session_id), 0) => Some(PeerFeature::SessionId { magic, session_id }),
+                    _ => None,
+                }
             }
         }
         FEATURE_REST_API_URL => {
-            if data.is_empty() {
-                return unknown();
-            }
-            let url_len = data[0] as usize;
             // The body is exactly 1+len bytes (Scala: `getUByte()` +
             // `getBytes(len)`); trailing bytes are preserved, not ignored.
-            if data.len() != 1 + url_len {
-                return unknown();
-            }
-            let url_bytes = &data[1..1 + url_len];
-            // Validate UTF-8 strictly, then check URL syntax.
-            // Scala parses via new java.net.URL(...) which requires a valid
-            // scheme://... structure. We approximate by requiring "scheme://"
-            // where scheme is at least one ASCII letter.
-            let url_str = match std::str::from_utf8(url_bytes) {
-                Ok(s) if !s.is_empty() && has_url_scheme(s) => s,
-                _ => return unknown(),
+            let url_bytes = match data.first() {
+                Some(&url_len) if data.len() == 1 + url_len as usize => {
+                    Some(&data[1..1 + url_len as usize])
+                }
+                _ => None,
             };
-            PeerFeature::RestApiUrl {
-                url: url_str.to_string(),
-            }
+            let url_str = url_bytes.and_then(|bytes| {
+                // Validate UTF-8 strictly, then check URL syntax.
+                // Scala parses via new java.net.URL(...) which requires a valid
+                // scheme://... structure. We approximate by requiring "scheme://"
+                // where scheme is at least one ASCII letter.
+                std::str::from_utf8(bytes)
+                    .ok()
+                    .filter(|s| !s.is_empty() && has_url_scheme(s))
+                    .map(|s| s.to_string())
+            });
+            url_str.map(|url| PeerFeature::RestApiUrl { url })
         }
         // Scala: `getByte` stateType (unknown code throws, feature dropped)
         // + `getByte` verify (>0 = true) + `getOption(getInt)` + `getInt`
@@ -269,39 +274,47 @@ fn deserialize_feature(feature_id: u8, data: &[u8]) -> PeerFeature {
         // lenient where Scala throws on the stateType code (superset: any
         // u8 is kept), but strict on the option flag (the serializer emits
         // only 0|1) and on full consumption — see the function doc.
-        FEATURE_MODE => {
+        FEATURE_MODE => (|| {
             let mut r = VlqReader::new(data);
-            let state_type = match r.get_u8() {
-                Ok(b) => b,
-                Err(_) => return unknown(),
-            };
+            let state_type = r.get_u8().ok()?;
             // Scala's `byteToBoolean` compares the *signed* byte
             // (`if (byte > 0) true else false`, ModePeerFeature.scala:109),
             // so 0x80..=0xFF parse as `false`.
-            let verify_tx = match r.get_u8() {
-                Ok(b) => (b as i8) > 0,
-                Err(_) => return unknown(),
-            };
-            let nipopow = match r.get_u8() {
-                Ok(0) => None,
-                Ok(1) => match r.get_i32() {
-                    Ok(v) => Some(v),
-                    Err(_) => return unknown(),
-                },
-                _ => return unknown(),
+            let verify_tx = (r.get_u8().ok()? as i8) > 0;
+            let nipopow = match r.get_u8().ok()? {
+                0 => None,
+                1 => Some(r.get_i32().ok()?),
+                _ => return None,
             };
             let blocks_to_keep = match r.get_i32() {
                 Ok(v) if r.remaining() == 0 => v,
-                _ => return unknown(),
+                _ => return None,
             };
-            PeerFeature::Mode {
+            Some(PeerFeature::Mode {
                 state_type,
                 verify_tx,
                 nipopow,
                 blocks_to_keep,
+            })
+        })(),
+        _ => None,
+    };
+    match parsed {
+        // Canonical re-serialization check: a body that decodes but does not
+        // re-encode to itself — an overlong VLQ (`80 00` -> id 0), or a Mode
+        // verify byte > 1 that Scala would still call `true` — would change
+        // bytes when the preserved spec is re-emitted in `Peers` replies.
+        // Scala's serializers only ever emit canonical bodies, so this
+        // affects only adversarial input; preserve it as Unknown.
+        Some(feature) => {
+            let (id, body) = serialize_feature_body(&feature);
+            if id == feature_id && body == data {
+                feature
+            } else {
+                unknown()
             }
         }
-        _ => unknown(),
+        None => unknown(),
     }
 }
 
@@ -1199,6 +1212,38 @@ mod tests {
             PeerFeature::Unknown { feature_id, data } => {
                 assert_eq!(feature_id, FEATURE_MODE);
                 assert_eq!(data, padded);
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+        // An overlong VLQ that decodes cleanly but re-encodes differently
+        // (`80 00` -> id 0, canonical form `00`) must not survive as a typed
+        // feature: re-emitting it in a `Peers` reply would rewrite the
+        // peer's bytes.
+        let mut overlong = [1u8, 0, 2, 4].to_vec();
+        overlong.extend_from_slice(&[0x80, 0x00]);
+        match deserialize_feature(FEATURE_SESSION_ID, &overlong) {
+            PeerFeature::Unknown { feature_id, data } => {
+                assert_eq!(feature_id, FEATURE_SESSION_ID);
+                assert_eq!(data, overlong);
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+        // A Mode verify byte > 1 decodes (Scala's byteToBoolean: any
+        // positive signed byte is true) but re-serializes as `00 01` —
+        // also not canonical, also preserved as Unknown. Scala's serializer
+        // only emits 0|1, so such bodies come only from adversarial peers.
+        let (id, mode_body) = serialize_feature_body(&PeerFeature::Mode {
+            state_type: 0,
+            verify_tx: true,
+            nipopow: None,
+            blocks_to_keep: -1,
+        });
+        let mut verify_two = mode_body.clone();
+        verify_two[1] = 2;
+        match deserialize_feature(id, &verify_two) {
+            PeerFeature::Unknown { feature_id, data } => {
+                assert_eq!(feature_id, FEATURE_MODE);
+                assert_eq!(data, verify_two);
             }
             other => panic!("expected Unknown, got {other:?}"),
         }
