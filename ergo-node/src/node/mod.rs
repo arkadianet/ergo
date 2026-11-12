@@ -40,6 +40,7 @@ mod memory_sampler;
 mod messaging;
 mod mining_dispatch;
 mod mining_engine;
+mod observer;
 mod operator_control;
 mod peer_actions;
 mod private_mining;

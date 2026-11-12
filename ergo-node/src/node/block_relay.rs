@@ -62,6 +62,17 @@ pub(super) fn applied_block_announcements_at(
         // child failed; mining on the new tip announces before apply again.
         state.mined_apply_failed_parent = None;
     }
+    if let Some(observer) = state.observer.clone() {
+        for id in &ids {
+            // Height is only for the record; a missing header leaves the
+            // apply event out rather than inventing one.
+            if let Ok(Some(bytes)) = state.store.get_header(id) {
+                if let Ok(header) = read_header(&mut VlqReader::new(&bytes)) {
+                    observer.block_applied(*id, header.height);
+                }
+            }
+        }
+    }
     if state.registry.peers.is_empty() {
         return Vec::new();
     }

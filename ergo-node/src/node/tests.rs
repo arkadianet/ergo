@@ -123,6 +123,7 @@ fn make_state_with_backend(
         last_reorg_enrichment: None,
         coordinator,
         executor,
+        observer: None,
         peer_manager,
         registry: PeerRegistry::new(),
         event_tx,

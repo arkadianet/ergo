@@ -2180,6 +2180,101 @@ fn shadow_disabled_skips_validation() {
     assert!(!cfg.shadow_config.enabled);
 }
 
+// ----- [observer] section (Phase 0 JSONL telemetry) ------------------------
+
+#[test]
+fn observer_section_absent_resolves_disabled_defaults() {
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert!(!cfg.observer.enabled);
+    // Relative defaults resolve against data_dir, like [logging.file].
+    assert_eq!(cfg.observer.path, cfg.data_dir.join("observer.jsonl"));
+    assert_eq!(
+        cfg.observer.pseudonym_key,
+        cfg.data_dir.join("observer-pseudonym.key")
+    );
+    assert_eq!(cfg.observer.vantage, "node");
+    assert_eq!(cfg.observer.clock_offset_ms, 0.0);
+    assert_eq!(cfg.observer.clock_source, "unset");
+    assert_eq!(cfg.observer.queue, 8192);
+    assert!(!cfg.observer.reveal_peer_addresses);
+}
+
+#[test]
+fn observer_enabled_resolves_paths_and_trims_vantage() {
+    let toml = write_toml(
+        "[observer]\n\
+         enabled = true\n\
+         path = \"obs.jsonl\"\n\
+         vantage = \"  main-vantage  \"\n\
+         clock_offset_ms = 42.5\n\
+         clock_source = \"chrony\"\n\
+         queue = 128\n\
+         pseudonym_key = \"key.bin\"\n\
+         reveal_peer_addresses = true\n",
+    );
+    let cli = minimal_cli(Some(&toml));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert!(cfg.observer.enabled);
+    // Relative paths resolve against data_dir.
+    assert_eq!(cfg.observer.path, cfg.data_dir.join("obs.jsonl"));
+    assert_eq!(cfg.observer.pseudonym_key, cfg.data_dir.join("key.bin"));
+    assert_eq!(cfg.observer.vantage, "main-vantage");
+    assert_eq!(cfg.observer.clock_offset_ms, 42.5);
+    assert_eq!(cfg.observer.clock_source, "chrony");
+    assert_eq!(cfg.observer.queue, 128);
+    assert!(cfg.observer.reveal_peer_addresses);
+}
+
+#[test]
+fn observer_enabled_absolute_path_is_not_rebased() {
+    let toml = write_toml("[observer]\nenabled = true\npath = \"/var/log/ergo/obs.jsonl\"\n");
+    let cli = minimal_cli(Some(&toml));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert_eq!(
+        cfg.observer.path,
+        std::path::PathBuf::from("/var/log/ergo/obs.jsonl")
+    );
+}
+
+#[test]
+fn observer_unknown_field_is_a_parse_error() {
+    let toml = write_toml("[observer]\nenabld = true\n");
+    let cli = minimal_cli(Some(&toml));
+    assert!(NodeConfig::load(cli).is_err(), "deny_unknown_fields");
+}
+
+#[test]
+fn observer_enabled_rejects_bad_clock_source_and_out_of_range_queue() {
+    for body in [
+        "[observer]\nenabled = true\nclock_source = \"ntp\"\n",
+        "[observer]\nenabled = true\nqueue = 63\n",
+        "[observer]\nenabled = true\nqueue = 1000001\n",
+    ] {
+        let toml = write_toml(body);
+        let cli = minimal_cli(Some(&toml));
+        assert!(NodeConfig::load(cli).is_err(), "should reject: {body}");
+    }
+    // The error names the section so operators find the fix.
+    let toml = write_toml("[observer]\nenabled = true\nqueue = 63\n");
+    let cli = minimal_cli(Some(&toml));
+    let err = NodeConfig::load(cli).expect_err("queue below floor");
+    assert!(err.contains("[observer]"), "error: {err}");
+}
+
+#[test]
+fn observer_disabled_skips_validation() {
+    // A dormant (disabled) section must never brick boot, even when junk:
+    // a bad clock source and out-of-range queue are both tolerated.
+    let toml = write_toml("[observer]\nclock_source = \"junk\"\nqueue = 1\n");
+    let cli = minimal_cli(Some(&toml));
+    let cfg = NodeConfig::load(cli).expect("dormant section loads");
+    assert!(!cfg.observer.enabled);
+    assert_eq!(cfg.observer.clock_source, "junk");
+    assert_eq!(cfg.observer.queue, 1);
+}
+
 /// `[peers] allow_local` defaults to `false`, matching Scala's
 /// `scorex.network.allowLocal` (`application.conf:492`), and reaches
 /// `NodeConfig` when the operator sets it.

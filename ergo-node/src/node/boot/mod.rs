@@ -694,7 +694,26 @@ async fn run_inner_with_backend(
     // shadow validation, hydrate/recover, NiPoPoW resume classification.
     let sync = sync_setup::setup(&config, &mut store, boot_sentinel)?;
     let coordinator = sync.coordinator;
-    let executor = sync.executor;
+    let mut executor = sync.executor;
+
+    // Phase 0 telemetry hook: disabled unless `[observer] enabled = true`.
+    // Paths were resolved against data_dir at config load.
+    let observer = super::observer::NodeObserver::from_config(
+        &config.observer,
+        config.network.as_str(),
+        &config.agent_name,
+        &config.node_name,
+    )
+    .map_err(|e| std::io::Error::new(e.kind(), format!("[observer]: {e}")))?;
+    if let Some(observer) = &observer {
+        executor.set_validation_observer(observer.clone());
+        info!(
+            path = %config.observer.path.display(),
+            vantage = %config.observer.vantage,
+            queue = config.observer.queue,
+            "observer hook enabled"
+        );
+    }
 
     // 7. Build handshake
     let declared_address = config.declared_addr.map(|sock| {
@@ -972,6 +991,7 @@ async fn run_inner_with_backend(
         store,
         coordinator,
         executor,
+        observer,
         shadow: sync.shadow_state,
         last_reorg_enrichment: None,
         peer_manager,

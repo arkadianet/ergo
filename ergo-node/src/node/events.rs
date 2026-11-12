@@ -145,6 +145,25 @@ fn process_header_modifier_batch(
         return;
     }
 
+    // Receipt observability for the coalesced path. The per-message twin
+    // (`messaging::dispatch::handle_modifier_batch`) stamps via
+    // `observer.header_received` inside its own loop; this batcher
+    // accumulates across messages before executing, so stamp here — the
+    // bytes did arrive in `Modifiers` messages, so the full
+    // `section_received` record is schema-true.
+    if let Some(observer) = state.observer.clone() {
+        for action in &batch_actions {
+            if let Action::ValidateHeader {
+                peer,
+                modifier_id,
+                header_bytes,
+            } = action
+            {
+                observer.header_received(*peer, *modifier_id, header_bytes);
+            }
+        }
+    }
+
     // Accepted header deliveries retain their request owner for validation attribution.
     let requested_headers: Vec<_> = batch_actions
         .iter()

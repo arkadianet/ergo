@@ -1254,6 +1254,14 @@ fn status_overlays_live_telemetry_values() {
 fn status_reflects_live_storage_error_with_no_new_snapshot_published() {
     use ergo_api::NodeReadState;
 
+    // This test is the only deliberate writer to the process-global
+    // storage-fault state: hold the shared lock while it is dirty and clear
+    // it again at the end, so the real-wall-clock fault cannot leak into
+    // concurrent or later readiness probes.
+    let _fault_lock = crate::runtime_control::STORAGE_FAULT_TESTS_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    ergo_state::storage_observability::clear_storage_faults_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let read = read_state_for_host(HostPaths {
         state_db: dir.path().join("s.redb"),
@@ -1294,6 +1302,8 @@ fn status_reflects_live_storage_error_with_no_new_snapshot_published() {
     );
     assert!(last.starts_with("state: "), "unexpected shape: {last}");
     assert!(last.contains("simulated redb write failure"));
+    // Leave the global clean (see the lock note at the top of this test).
+    ergo_state::storage_observability::clear_storage_faults_for_tests();
 }
 
 /// Storage reads stay at the last sample even when the files grow.
@@ -2200,6 +2210,10 @@ fn probes_ignore_historical_storage_errors_but_keep_live_wedge_alarm() {
     use clap::Parser;
     use ergo_api::NodeReadState;
 
+    // Probes at the real wall clock: hold the storage-fault lock with a
+    // cleared global so a fault recorded by a concurrent test cannot add
+    // `runtime_or_storage_fault` to the readiness reasons.
+    let _clean_faults = crate::runtime_control::clean_storage_faults();
     let dir = tempfile::tempdir().unwrap();
     let read = read_state_for_host(HostPaths {
         state_db: dir.path().join("state.redb"),

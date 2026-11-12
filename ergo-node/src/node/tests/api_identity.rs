@@ -70,6 +70,7 @@ pub(super) fn cfg_with_mode(
         mempool_sort_policy: "cost".into(),
         indexer_config: IndexerConfig::default(),
         enable_anchor_scheduler: false,
+        observer: crate::config::ObserverConfig::disabled(),
         logging: LoggingConfig {
             modules: Default::default(),
             default_level: "info".into(),

@@ -392,8 +392,11 @@ fn unsolicited_peers_are_ignored() {
     assert_eq!(state.peer_manager.known_addresses_len(), before + 1);
 }
 
-/// A `Peers` reply is truncated to the protocol's 64-entry limit, duplicate
-/// entries are counted once, and our own declared address is not learned.
+/// A `Peers` reply over the protocol's 64-entry acceptance bound is
+/// rejected at parse (Scala `PeersSpec.parse` requires `length <= 64`,
+/// `BasicMessagesRepo.scala:56`), so nothing from it is learned. A reply
+/// within the bound counts duplicate entries once and does not learn our
+/// own declared address.
 #[test]
 fn peers_reply_is_capped_deduplicated_and_skips_self() {
     let tmp = tempfile::tempdir().unwrap();
@@ -405,17 +408,34 @@ fn peers_reply_is_capped_deduplicated_and_skips_self() {
     let _rx = connect_test_peer(&mut state, peer, now);
     let before = state.peer_manager.known_addresses_len();
 
+    // Over the 64-entry acceptance bound: a parse rejection, not a cap.
+    let mut over = vec![gossip_spec([45, 80, 100, 200], 9030)];
+    over.push(gossip_spec([45, 79, 113, 50], 9030));
+    for i in 0..91u8 {
+        over.push(gossip_spec([45, 33, i, 1], 9030));
+    }
+    assert_eq!(over.len(), 93);
+    let payload = message::serialize_peers(&over);
+    state.peer_manager.note_get_peers_sent(&peer, now);
+    let _ = handle_message(&mut state, peer, message::CODE_PEERS, &payload, now);
+    assert_eq!(
+        state.peer_manager.known_addresses_len(),
+        before,
+        "an over-limit reply is rejected at parse and nothing is learned"
+    );
+
+    // Within the bound: self (skipped), one duplicate pair (one add), and
+    // 61 distinct addresses — 62 of the 64 entries.
     let mut specs = vec![gossip_spec([45, 80, 100, 200], 9030)];
     specs.push(gossip_spec([45, 79, 113, 50], 9030));
     specs.push(gossip_spec([45, 79, 113, 50], 9030));
-    for i in 0..90u8 {
+    for i in 0..61u8 {
         specs.push(gossip_spec([45, 33, i, 1], 9030));
     }
+    assert_eq!(specs.len(), 64);
     let payload = message::serialize_peers(&specs);
     state.peer_manager.note_get_peers_sent(&peer, now);
     let _ = handle_message(&mut state, peer, message::CODE_PEERS, &payload, now);
-    // 64 entries taken: self (skipped), one duplicate pair (one add), and
-    // 61 distinct addresses.
     assert_eq!(state.peer_manager.known_addresses_len(), before + 62);
     assert!(state
         .peer_manager

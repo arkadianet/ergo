@@ -186,6 +186,9 @@ pub(in crate::node) fn handle_message(
                 // have no reason to hold a slot for.
                 if !sync_info.is_empty() {
                     note_progress(state, &peer, now);
+                    if let Some(observer) = state.observer.clone() {
+                        observer.sync_info(peer, &sync_info);
+                    }
                 }
                 let sv = state
                     .registry
@@ -197,6 +200,23 @@ pub(in crate::node) fn handle_message(
                     state
                         .coordinator
                         .on_sync_info(peer, sv, &sync_info, &state.store, now);
+                // The V2 continuation path (`PeerChainStatus::Older`)
+                // validates the peer's continuation header straight from
+                // the SyncInfo payload: no `Modifiers` message ever
+                // carries the bytes, so `header_received` (and its
+                // `section_received` record) never fires for it. Stamp
+                // receipt here so `header_validated.duration_us` stays
+                // measurable for those headers. Stamp-only by design —
+                // the bytes arrived in a SyncInfo frame, not a Modifiers
+                // entry, and the sync_info announce above already
+                // recorded the payload's ids.
+                if let Some(observer) = state.observer.clone() {
+                    for action in &actions {
+                        if let Action::ValidateHeader { modifier_id, .. } = action {
+                            observer.header_stamped(*modifier_id);
+                        }
+                    }
+                }
                 state
                     .executor
                     .execute_all(actions, &mut state.store, &mut state.coordinator, now)
@@ -303,7 +323,10 @@ pub(in crate::node) fn handle_message(
             send_to_peer(state, &peer, message::CODE_PEERS, payload);
             Vec::new()
         }
-        message::CODE_PEERS => match message::deserialize_peers(payload, 100) {
+        // Scala's `PeersSpec(peersLimit)` is constructed from
+        // `scorex.network.maxPeerSpecObjects` (default 64) and rejects a
+        // larger count in `parse`. Use the same acceptance bound.
+        message::CODE_PEERS => match message::deserialize_peers(payload, MAX_ACCEPTED_PEER_SPECS) {
             Ok(peers) => {
                 // Only a reply to a `GetPeers` we sent recently is taken
                 // into the address pool; Scala and Rust nodes send `Peers`
@@ -645,6 +668,11 @@ fn collect_requested_modifiers(
 /// accounting); any other type routes through the coordinator's normal
 /// `on_inv` + hedge-dispatch + executor path.
 fn handle_inv(state: &mut NodeState, peer: PeerId, inv: InvData, now: Instant) -> Vec<Action> {
+    // Phase 0: record the announce before any filtering, so a tx we
+    // already know still contributes to per-peer announce timing.
+    if let Some(observer) = state.observer.clone() {
+        observer.inv(peer, inv.type_id, &inv.ids);
+    }
     if inv.type_id == ModifierTypeId::Transaction.as_byte() {
         if !state.mempool.config().enabled {
             return Vec::new();
@@ -690,6 +718,22 @@ fn handle_inv(state: &mut NodeState, peer: PeerId, inv: InvData, now: Instant) -
             // sent. `request_transactions` returns the real
             // post-dedupe/cap count alongside its actions.
             let (actions, requested) = state.coordinator.request_transactions(peer, &unknown, now);
+            if let Some(observer) = state.observer.clone() {
+                for action in &actions {
+                    if let Action::SendToPeer {
+                        peer: target,
+                        code,
+                        payload,
+                    } = action
+                    {
+                        if *code == ergo_p2p::message::CODE_REQUEST_MODIFIER {
+                            if let Ok(request) = message::deserialize_inv(payload) {
+                                observer.requested(*target, request.type_id, &request.ids);
+                            }
+                        }
+                    }
+                }
+            }
             state.mempool_tx_requested_total = state
                 .mempool_tx_requested_total
                 .saturating_add(requested as u64);
@@ -775,11 +819,17 @@ fn handle_modifier_batch(
                     // touch the body-only download-failure
                     // streak — only block-body sections do
                     // (see coordinator::on_modifier_received).
+                    if let Some(observer) = state.observer.clone() {
+                        observer.tx_received(peer, mod_id, &bytes, true);
+                    }
                     let mut admission_actions = admit_transaction(state, peer, &bytes, now);
                     actions.append(&mut admission_actions);
                 }
                 DA::Ignore => {}
                 DA::RejectSpam => {
+                    if let Some(observer) = state.observer.clone() {
+                        observer.tx_received(peer, mod_id, &bytes, false);
+                    }
                     actions.push(Action::Penalize {
                         peer,
                         penalty: Penalty::Spam,
@@ -832,6 +882,11 @@ fn handle_modifier_batch(
                     penalty: Penalty::Misbehavior,
                 });
                 continue;
+            }
+        }
+        if type_id == ModifierTypeId::Header.as_byte() {
+            if let Some(observer) = state.observer.clone() {
+                observer.header_received(peer, mod_id, &data);
             }
         }
         batch_actions.extend(
@@ -932,7 +987,10 @@ fn handle_peers_response(state: &mut NodeState, peer: PeerId, peers: Vec<PeerSpe
     let mut filtered = 0usize;
     let mut dropped_pool_full = 0usize;
     let mut seen = std::collections::HashSet::new();
-    for spec in peers.into_iter().take(MAX_ACCEPTED_PEER_SPECS) {
+    // The 64-entry acceptance bound is enforced by `deserialize_peers`
+    // (Scala parity: over-limit lists are parse rejections), so the
+    // parsed list is already within it.
+    for spec in peers {
         let Some(declared) = &spec.declared_address else {
             no_declared += 1;
             continue;

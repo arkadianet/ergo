@@ -2061,6 +2061,61 @@ fn sparse_popow_store_accepts_next_header_batch() {
 }
 
 #[test]
+fn validation_observer_fires_for_each_installed_header() {
+    // The Phase 0 node hook installs a `ValidationObserver` on the executor.
+    // It must see exactly one callback per installed header — single and
+    // batch paths alike — carrying the installed id and height.
+    struct RecordingObserver {
+        hits: std::sync::Mutex<Vec<([u8; 32], u32)>>,
+    }
+    impl super::observer::ValidationObserver for RecordingObserver {
+        fn on_header_validated(&self, header_id: [u8; 32], height: u32) {
+            self.hits.lock().unwrap().push((header_id, height));
+        }
+    }
+
+    let headers = mainnet_headers_1_10();
+    let mut store = sparse_popow_store(&headers, &[1, 5], 6..=7);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let rec = std::sync::Arc::new(RecordingObserver {
+        hits: std::sync::Mutex::new(Vec::new()),
+    });
+    executor.set_validation_observer(rec.clone());
+
+    let id8 = *blake2b256(&headers[7].0).as_bytes();
+    let id9 = *blake2b256(&headers[8].0).as_bytes();
+
+    let mut coordinator = SyncCoordinator::new(0);
+    let actions = executor.execute(
+        validate_header_action(&headers, 8),
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+    );
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::Penalize { .. })),
+        "{actions:?}"
+    );
+    assert_eq!(*rec.hits.lock().unwrap(), vec![(id8, 8)]);
+
+    let actions = executor.execute_all(
+        vec![validate_header_action(&headers, 9)],
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+    );
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::Penalize { .. })),
+        "{actions:?}"
+    );
+    assert_eq!(*rec.hits.lock().unwrap(), vec![(id8, 8), (id9, 9)]);
+    assert_eq!(store.chain_state_meta().best_header_height, 9);
+}
+
+#[test]
 fn hydration_ends_below_the_proof_suffix_head_but_not_in_dense_ancestry() {
     // A Scala proof need not carry its suffix head's parent, which can sit at
     // or above `dense_from_height` (suffix head - k + 1, saturating).

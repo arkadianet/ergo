@@ -81,6 +81,21 @@ pub fn active_storage_fault(now_ms: u64, require_indexer: bool) -> bool {
         .active(now_ms, require_indexer)
 }
 
+/// Test builds only: clear the process-global last-storage-fault state so
+/// readiness-probing tests run hermetically against
+/// [`active_storage_fault`] (a fault recorded by another test carries a real
+/// wall-clock timestamp that such probes may or may not treat as active).
+/// Absent from production builds.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn clear_storage_faults_for_tests() {
+    let mut faults = LAST_STORAGE_ERRORS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    faults.state = None;
+    faults.indexer = None;
+    faults.latest_is_indexer = false;
+}
+
 /// Bucket a caller's `subsystem` into the coarse `store` label surfaced on
 /// `ergo_node_storage_errors_*_total` and the `storage_error` event. Every
 /// current chain-state caller uses one of "sync" / "mining" / "node" /

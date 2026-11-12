@@ -77,6 +77,8 @@ pub(crate) struct NodeState {
     pub(super) store: StateBackendKind,
     pub(super) coordinator: SyncCoordinator,
     pub(super) executor: SyncExecutor,
+    /// Phase 0 JSONL telemetry hook. `None` unless `[observer] enabled`.
+    pub(super) observer: Option<std::sync::Arc<super::observer::NodeObserver>>,
     pub(super) peer_manager: PeerManager,
     pub(super) registry: PeerRegistry,
     pub(super) event_tx: mpsc::Sender<PeerEvent>,
