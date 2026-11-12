@@ -375,6 +375,113 @@ key interval estimates are tight.
   `--capture-handshake-hex` (see [Handshake capture](#handshake-capture-offline-analysis-only));
   the standing streams above never contain them.
 
+### 48 h window: dataset boundaries (closes 2026-11-12 14:02 local)
+
+Window: 2026-11-10 14:02 → 2026-11-12 14:02 (AEST). The standalone
+observer covers the full window; the node-hook and crawler streams
+start later on day one (15:29 / 15:01) and run through the boundary.
+Collection does **not** stop at the boundary — the redeployed binaries
+continue logging; the boundary is marked by the restart times in the
+redeploy section below (step timestamps filled in at execution), not
+by a data cut.
+
+**Process sessions (`mono_ns` resets).** All five services were
+restarted in a coordinated restart at 2026-11-11 15:38 (node journal
+and stream `observer_start` records agree), and all five again by the
+machine reboot at 16:41:
+
+| stream | session starts (local) |
+|---|---|
+| `mainnet-hook` | 11-10 15:29:22 · 11-11 15:38:03 · 11-11 16:41:49 (mono reset) |
+| `pop-os-mainnet` (standalone) | 11-10 14:02:04 · 11-10 15:01:18 · 11-11 15:38:02 · 11-11 16:41:42 |
+| `pop-os-mainnet-crawler` | 11-10 15:01:18 · 11-11 15:38:02 · 11-11 16:41:43 (mono reset) |
+| `pop-os-testnet-crawler` | 11-10 15:01:19 · 11-11 15:38:03 · 11-11 16:41:43 (mono reset) |
+
+(The 11-10 15:01:18 standalone restart is the refactored-build swap
+noted in the partial-data section.)
+
+**Machine reboot, 2026-11-11 16:41 — all streams, not a redeploy.** A
+system reboot restarted all five services; no binary changed.
+Evidence: systemd journal `Started` (ergo-rust-testnet 16:41:42,
+ergo-rust-archival 16:41:43) and node API `started_at_unix_ms`
+(mainnet `1794379303365` = 16:41:43.365, testnet `1794379303297` =
+16:41:43.297). Wall gaps across the boundary: 85.7 s (node-hook),
+95.7 s (mainnet-crawler), 90.8 s (testnet-crawler); the standalone's
+post-reboot `observer_start` (16:41:42) survived, so its restart is
+cleanly marked.
+
+**Torn writes at the reboot boundary.** Exactly one bad line per
+stream in three of the four streams, each at the kill boundary:
+
+| stream | line | damage |
+|---|---|---|
+| `mainnet-hook` | 651161 | 512 NUL bytes; the post-reboot `observer_start` is destroyed — session 3 is identified by the mono reset (3,345.8 s drop at the first post-reboot record, wall 16:41:49) |
+| `pop-os-mainnet-crawler` | 98847 | 512 NUL bytes; post-reboot `observer_start` destroyed (session 3 at 16:41:43 by mono reset) |
+| `pop-os-testnet-crawler` | 103503 | truncated record of the new process (wall `1794379303323` = 16:41:43.323) |
+
+Consequence: `summarize.py` counts one restart per affected stream
+(`restarts=1`) and its line-422 rule flags the post-reboot mono reset
+as an "UNEXPLAINED" regression (2 regressions > 1 counted restart).
+Both regressions are fully explained — 86,706.7 s (the 15:38 restart's
+uptime) and 3,345.8 s (the reboot); the flag is a false positive of
+that rule, which assumes every restart leaves an `observer_start`
+record. The rule fix is in the post-14:02 list.
+
+**`mono_ns` vs wall: one suspend interval.** `mono_ns` is
+process-relative CLOCK_MONOTONIC and does not advance while the
+machine is suspended. Sessions 1 and 3: mono tracks wall exactly (no
+suspend). Session 2 (11-11 15:38 → 16:40) lags wall by **388.6 s** in
+all four streams — a ~6.5 min system suspend. Consequence:
+`since_first_announce_us` (Rust `Instant`, monotonic-based) excludes
+suspended time, so a session-2 block whose first announce predates the
+suspend carries a delay understated by up to 388.6 s (session 2 holds
+29 node-hook blocks); wall spans of session 2 overstate active time by
+the same amount.
+
+**Warm-up exclusion.** Steady-state metrics exclude the first 300 s of
+each session (5 starts in the standalone, 3 in each other stream).
+Session 2 is 62 min of wall whose tail is the reboot, so it is mostly
+warm-up plus a short active stretch.
+
+**Locally mined blocks (node-hook).** The mainnet node is an active
+miner (107 accepted blocks since 2026-10-05, `data/mining-history.json`).
+Exactly two in the stream window: h=1913717 (11-10 23:07:33,
+`01005d4c14b36399…`) and h=1913851 (11-11 03:40:44,
+`d296245c2162184c…`). They carry no `since_first_announce_us` — no
+peer announce precedes apply (the node is the origin); the first
+logged announce is the network echo ~0.3 s later.
+`mining-history.json` `block_id`/`at_ms` match the `block_applied`
+`header_id`/`wall_ms` exactly. This supersedes the partial-data note
+("mined zero blocks"), which was as of the 11-10 17:12 snapshot.
+
+**Tip reorg at h=1914516 (11-12 01:53–01:57).** Height 1914516 applied
+twice: `eaef5c73…` at 01:53:27, then `869671e6…` at 01:57:12 after a
+competing branch extended. The second apply carries the window-max
+announce delay (222,445.5 ms). Legitimate tip event; a re-applied
+height is a distinct resampling unit in the bootstrap analysis.
+
+**Stalled-crawler label (testnet-crawler).** 37 `connect_timeout` dials
+between 11-10 22:31 and 11-11 23:50 (plus 6 `connect_refused`) vs 24
+handshakes; p50 `connect_ms` = 10,000 (the timeout cap). Bursts: AEST
+08–09, 20–21, 23–01, 02–03, 07–08. Testnet-crawler reachability/latency
+figures from those hours are stall-tainted; label them so in the
+report.
+
+**Empty-V2-era artifacts.** Every pre-boundary observer/crawler record
+(both networks) was collected while presenting the empty V2 SyncInfo —
+the 400-id catch-up storm and early-header RTT composition documented
+in the SyncInfo-fix subsection below. The 14:02 redeploy is the
+boundary: pre-boundary data contains the artifact; post-boundary data
+presents the real tip (one 400-id catch-up per connection, then
+tip-region announces only).
+
+**Pre-boundary analysis snapshot.** Step-4 metrics were computed on the
+2026-11-12 11:43:59 AEST snapshot of all four streams
+(`/home/arkadias/observation/pre-boundary-20261112/snapshots/`,
+`MANIFEST.txt` with lines/bytes/sha256/tail-wall per file); the
+streams continued to the boundary, so the snapshot covers the window
+minus the final ~2 h 18 min tail.
+
 ## Window-close redeploy (staged 2026-11-11)
 
 The 48 h window closes **2026-11-12 14:02 local**. All five running

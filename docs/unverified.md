@@ -68,7 +68,25 @@ must either be fixed, tested as intentional, or listed in the report.
    the known serializer map and **drops** unknown features. Consequence: a
    `PeerSpec` we relay through `Peers` can carry features Scala would have
    discarded. Harmless for parsing, observable in a byte differential.
-   Status: open; decide whether to keep (round-trip fidelity) and document.
+   Status: **keep — decided 2026-11-12** (round-trip fidelity). Rationale:
+   (a) preserved specs are re-emitted in `Peers` replies, and the
+   byte-stable round-trip `serialize(deserialize(x)) == x` (pinned by the
+   saved proptest regressions) is a testable invariant the drop path
+   cannot offer — Scala's own parse is lossy here (trailing bytes in a
+   feature chunk are silently consumed, so a Scala relay of the same spec
+   would not round-trip either); (b) passing unknown feature ids through
+   unaltered is the standard feature-evolution mechanism — future
+   features can propagate through older nodes without loss; (c) the
+   2 508-handshake capture replay (2026-11-11, live-verified section
+   above) shows preserved specs accepted with 0 rejections, including 50
+   handshakes from one pre-fix Rust peer whose old-format `SessionId`
+   body is preserved verbatim as `Unknown`. Report consequence: our
+   `Peers` payloads may differ byte-for-byte from a Scala relay of the
+   same specs (we keep what Scala would drop); the differential is
+   harmless to parsing because Scala peers drop unknown features and
+   ignore trailing bytes on their side. Revisit only if live traffic
+   shows a Scala peer *rejecting* (not just tolerating) a preserved
+   body — no such rejection exists in the capture data.
    Since the codec/fuzz fix, the preservation also applies to *known*
    feature ids whose body is not the canonical serialization (trailing
    bytes, truncated fields, out-of-range values) — `deserialize_feature`
