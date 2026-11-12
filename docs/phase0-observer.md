@@ -571,6 +571,15 @@ peer then compares `Equal` and sends nothing, or — after a tip move —
 (`ErgoHistoryReader.scala:274-291`). The crawler shares the session code
 and `SharedSeen`, so the same change covers it.
 
+**Tip verification (2026-11-12).** A type-101 receipt's claimed id is
+peer-supplied, so only receipts whose id verifies against the bytes —
+`header_id_from_bytes` is Blake2b256 of the canonically re-serialized
+header — may move the observed tip (`verified_header_tip`, `session.rs`);
+a crafted receipt is recorded with `id_matches: false` but never
+presented. V2 entry ids are derived from the bytes themselves, so the
+same gate is a parse guard on that path. Covered by
+`session::tests::crafted_header_receipt_cannot_move_observed_tip`.
+
 **Verification (2026-11-10, A/B against a mainnet ergoref 6.0.8 seed).**
 Same seed (`159.89.116.15:9030`), same host, 300 s each, minutes apart:
 

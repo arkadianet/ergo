@@ -628,12 +628,14 @@ impl Session {
                     first_for_peer,
                 });
                 // V2 carries the header bytes themselves; mark them received
-                // and track the observed tip from them.
+                // and track the observed tip from them. V2 ids are canonical
+                // (derived from the bytes above), so the verification gate is
+                // a parse guard here, not a trust decision.
                 let mut shared = lock_shared(&self.shared);
                 for (id, bytes) in raws.iter().zip(headers.iter()) {
                     shared.received.insert(*id);
-                    if let Some(h) = header_meta(bytes).1 {
-                        shared.observe_header(h, *id, bytes);
+                    if let Some((h, tip_id)) = verified_header_tip(id, bytes) {
+                        shared.observe_header(h, tip_id, bytes);
                     }
                 }
             }
@@ -796,10 +798,15 @@ impl Session {
             {
                 let mut shared = lock_shared(&self.shared);
                 shared.received.insert(id);
-                // A type-101 receipt is a fully-seen header too.
+                // A type-101 receipt is a fully-seen header too, but its
+                // claimed id is peer-supplied: only a receipt whose id
+                // verifies against the bytes (Blake2b256 of the re-serialized
+                // header == claimed id) may move the observed tip. A crafted
+                // receipt is still recorded (with `id_matches: false`) so the
+                // dataset shows what happened.
                 if data.type_id == 101 {
-                    if let Some(h) = header_meta(&bytes).1 {
-                        shared.observe_header(h, id, &bytes);
+                    if let Some((h, tip_id)) = verified_header_tip(&id, &bytes) {
+                        shared.observe_header(h, tip_id, &bytes);
                     }
                 }
             }
@@ -986,6 +993,20 @@ fn header_meta(bytes: &[u8]) -> (String, Option<u32>) {
     (id, height)
 }
 
+/// Gate for the observed tip: a fully-seen header may move the tip only
+/// when the claimed id verifies against the bytes — `header_id_from_bytes`
+/// is Blake2b256 of the canonically re-serialized header, so this is the
+/// Blake2b256(header) == id check. Returns `(height, id)` when verified and
+/// the height is readable, `None` for unparseable bytes or a claimed id
+/// that does not match (a crafted receipt).
+fn verified_header_tip(id: &[u8; 32], bytes: &[u8]) -> Option<(u32, [u8; 32])> {
+    let (computed, height) = header_meta(bytes);
+    if computed != hex::encode(id) {
+        return None;
+    }
+    height.map(|h| (h, *id))
+}
+
 /// Performs the unframed handshake. On success returns the parsed
 /// handshake, the connection (with any bytes already received past the
 /// handshake prefix), and the peer's raw handshake bytes (for capture).
@@ -1146,5 +1167,111 @@ mod tests {
             SyncInfo::V2 { headers } => assert_eq!(headers, vec![vec![9u8; 220]]),
             other => panic!("expected V2, got {other:?}"),
         }
+    }
+
+    /// End-to-end through `on_modifiers`: a type-101 receipt carrying real
+    /// header bytes under a forged claimed id (id != Blake2b256 of the
+    /// re-serialized header) must not move the observed tip; a genuine
+    /// receipt does. The crafted receipt is still recorded normally (the
+    /// `section_received` record carries `id_matches: false`).
+    #[tokio::test]
+    async fn crafted_header_receipt_cannot_move_observed_tip() {
+        use ergo_p2p::types::ModifiersData;
+        use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
+        use ergo_primitives::group_element::GroupElement;
+        use ergo_ser::autolykos::AutolykosSolution;
+        use ergo_ser::header::{serialize_header, Header};
+
+        let header = Header {
+            version: 2,
+            parent_id: ModifierId::from_bytes([0x11; 32]),
+            ad_proofs_root: Digest32::from_bytes([0x22; 32]),
+            transactions_root: Digest32::from_bytes([0x33; 32]),
+            state_root: ADDigest::from_bytes([0x44; 33]),
+            timestamp: 1_672_531_200_000,
+            extension_root: Digest32::from_bytes([0x55; 32]),
+            n_bits: 0x1a01_7660,
+            height: 1_900_000,
+            votes: [0x00, 0x00, 0x00],
+            unparsed_bytes: vec![],
+            solution: AutolykosSolution::V2 {
+                pk: GroupElement::from_bytes([0x02; 33]),
+                nonce: [0xAA; 8],
+            },
+        };
+        let (bytes, id) = serialize_header(&header).unwrap();
+        let id_arr: [u8; 32] = *id.as_bytes();
+
+        let dir = tempfile::tempdir().unwrap();
+        let sink = ObserverSink::spawn(crate::sink::SinkConfig::new(
+            &dir.path().join("out.jsonl"),
+            "test",
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let _ = client;
+        let shared = Shared::default();
+        let mut session = Session {
+            conn: None,
+            stream: Some(stream),
+            sink,
+            cfg: Arc::new(SessionConfig::default()),
+            addr: "test".to_string(),
+            agent: None,
+            version: None,
+            node_name: None,
+            pending: HashMap::new(),
+            peer_seen: BoundedSet::default(),
+            next_request_at: Instant::now(),
+            next_sync_reply_at: Instant::now(),
+            seq: 0,
+            bucket: ByteBucket::new(OUTBOUND_BYTES_PER_SEC),
+            shared: shared.clone(),
+            unavailable_txs: HashSet::new(),
+            handshaken: true,
+            handshake_result: None,
+        };
+        // Seed the tip at a lower height so movement is observable.
+        {
+            let mut seen = lock_shared(&shared);
+            seen.observe_header(1, [0xEE; 32], b"old-tip");
+        }
+
+        // Crafted: real header bytes, forged claimed id, high height.
+        let mut forged = id_arr;
+        forged[0] ^= 0xff;
+        let crafted = message::serialize_modifiers(&ModifiersData {
+            type_id: 101,
+            modifiers: vec![(forged, bytes.clone())],
+        })
+        .unwrap();
+        session.on_modifiers(&crafted).await.unwrap();
+        {
+            let seen = lock_shared(&shared);
+            let tip = seen.tip.as_ref().unwrap();
+            assert_eq!(
+                tip.height, 1,
+                "crafted receipt (claimed id != Blake2b256(bytes)) must not move the tip"
+            );
+            assert_eq!(tip.bytes, b"old-tip");
+        }
+
+        // Genuine: claimed id is Blake2b256 of the re-serialized header.
+        let genuine = message::serialize_modifiers(&ModifiersData {
+            type_id: 101,
+            modifiers: vec![(id_arr, bytes.clone())],
+        })
+        .unwrap();
+        session.on_modifiers(&genuine).await.unwrap();
+        let seen = lock_shared(&shared);
+        let tip = seen.tip.as_ref().unwrap();
+        assert_eq!(tip.height, 1_900_000);
+        assert_eq!(tip.id, id_arr);
+        assert_eq!(tip.bytes, bytes);
+        drop(seen);
     }
 }
