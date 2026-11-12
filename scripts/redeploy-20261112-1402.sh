@@ -157,7 +157,7 @@ cmd_swap_node() {
   t0=$(systemctl --user show -p ActiveEnterTimestamp --value "$UNIT")
   [ "$(epoch "$t0")" -gt 0 ] || die "cannot read T0 (ActiveEnterTimestamp: $t0)"
   T0=$(epoch "$t0")
-  printf 'T0=%s\nT0_ISO=%s\n' "$T0" "$t0" >"$STATE"
+  printf 'T0=%s\nT0_ISO="%s"\n' "$T0" "$t0" >"$STATE"
   log "T0 = $t0 (epoch $T0) — dataset boundary: mono_ns session break in the node hook stream"
   log "=== SWAP-NODE done; run 'monitor' now ==="
 }
@@ -165,7 +165,8 @@ cmd_swap_node() {
 # --------------------------------------------------------------- monitor ----
 cmd_monitor() {
   [ -f "$STATE" ] || die "no T0 recorded (run swap-node first); or: monitor <epoch>"
-  if [ "${1:-}" ]; then T0=$1; else . "$STATE"; fi
+  if [ "${1:-}" ]; then T0=$1; else . "$STATE" || die "failed to source $STATE"; fi
+  case "${T0:-}" in ''|*[!0-9]*) die "no numeric T0 (state file: $STATE)";; esac
   log "=== MONITOR start (T0=$(date -d "@$T0" '+%Y-%m-%dT%H:%M:%S%z'), epoch $T0) ==="
   local admitted_seen=0 parse_total=0 dropin_removed=0 last_pf=$T0
   # Tip just before the restart (for trigger 5: no advance in 10 min).
@@ -175,6 +176,9 @@ cmd_monitor() {
   log "tip at T0 (pre-restart): ${TIP_T0:-0}"
   local t1=0 t2=0 t4=0 t5=0 t6=0
   local deadline=$((T0 + 960))   # T0+16 min
+  if [ "$(now_s)" -ge "$deadline" ]; then
+    die "monitor window (T0+16m) already passed; run the checkpoint checks manually and log them to redeploy.log"
+  fi
 
   while :; do
     local n; n=$(now_s)
