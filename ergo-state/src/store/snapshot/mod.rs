@@ -57,6 +57,11 @@ use crate::chain::ChainStateMeta;
 /// shared (`!Sync` in practice via the held transaction) — each build
 /// owns its own snapshot.
 pub struct CommittedSnapshot {
+    /// Pins the database handle. redb ≥ 4.5 closes the storage as soon as the
+    /// last `Database` handle drops, even while this snapshot's read
+    /// transaction is still open — so the snapshot must keep its own clone.
+    #[allow(dead_code)]
+    db: Arc<Database>,
     txn: ReadTransaction,
     chain_state: ChainStateMeta,
     state_meta: StateMeta,
@@ -114,6 +119,7 @@ impl CommittedSnapshot {
                     })?;
                 let state_meta = StateMeta::deserialize(&sm)?;
                 Ok(Some(Self {
+                    db: db.clone(),
                     txn,
                     chain_state,
                     state_meta,

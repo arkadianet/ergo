@@ -462,7 +462,11 @@ mod tests {
             txn.commit().unwrap();
 
             migrate_schema(&db).unwrap();
-            let read = RedbWalletStore::new(db).begin_read().unwrap();
+            // redb ≥ 4.5 closes the storage when the last `Database` handle
+            // drops, even with this read still open — so keep the store (and
+            // its handle) alive for the whole read.
+            let store = RedbWalletStore::new(db);
+            let read = store.begin_read().unwrap();
             assert!(read.scan_invalidated().unwrap());
             assert_eq!(read.scan_cursor().unwrap(), None);
         }
