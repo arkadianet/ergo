@@ -412,6 +412,10 @@ impl WalletStore for RedbWalletStore {
 }
 
 impl WalletStore for Database {
+    /// redb ≥ 4.5 lifetime contract: this variant has no `Arc<Database>` to
+    /// pin, so the caller must keep `self` (the `Database`) alive for as long
+    /// as any transaction returned here is in use. Never call it on a
+    /// temporary. See `docs/compatibility.md#redb--45-handle-lifetime-contract`.
     fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
         Ok(Box::new(RedbWalletRead {
             txn: ReadableDatabase::begin_read(self)?,

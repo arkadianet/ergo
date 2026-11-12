@@ -204,6 +204,27 @@ width tuple keys and legacy wallet tables; unknown schemas fail closed.
 Keep the old data directory and binary for rollback because a database later
 written by redb 4 may contain type metadata unreadable by redb 2.6.
 
+#### redb ≥ 4.5 handle-lifetime contract
+
+Since redb 4.5, closing the storage happens as soon as the **last `Database`
+handle drops**, even while read or write transactions opened from it are still
+in use (≤ 4.4.0 silently kept the storage alive until all transactions were
+dropped). Code that holds a transaction across a scope boundary must therefore
+keep a clone of the `Arc<Database>` (or the owning store) alive for as long as
+that transaction lives. In this tree:
+
+* `ergo_state::store::CommittedSnapshot` pins its own `Arc<Database>` clone — a
+  snapshot handed out can never outlive the storage backing its held read
+  transaction.
+* `RedbWalletStore` keeps the handle for the process lifetime (walletd holds
+  the store), so boxed `WalletRead`/`WalletWrite` transactions are safe.
+* `impl WalletStore for Database` (the bare-`Database` variant in
+  `ergo-wallet-service`) has no `Arc` to pin: its callers must keep the
+  `Database` itself alive while any transaction from it is outstanding. Do not
+  construct it as a temporary.
+* Everywhere else, redb transactions are borrowed (`&ReadTransaction`) from an
+  owner that also owns the handle, which the type system enforces.
+
 ## Known limitations
 
 Areas where parity is incomplete, partial, or deliberately out of scope.

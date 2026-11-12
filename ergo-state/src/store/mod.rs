@@ -2,6 +2,13 @@
 //!
 //! Implements the spec's atomicity invariant: undo_log + AVL mutations +
 //! chain_index + state_meta all in one redb write transaction.
+//!
+//! redb lifetime contract (≥ 4.5): the storage closes as soon as the last
+//! `Database` handle drops, even while transactions opened from it are still
+//! in use. `StateStore` owns an `Arc<Database>` and [`CommittedSnapshot`]
+//! pins its own clone, so a snapshot handed out can never outlive the
+//! storage backing its held read transaction. See
+//! `docs/compatibility.md#redb--45-handle-lifetime-contract`.
 
 use redb::ReadableDatabase;
 use std::collections::{BTreeMap, HashMap};
