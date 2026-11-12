@@ -382,8 +382,8 @@ observer covers the full window; the node-hook and crawler streams
 start later on day one (15:29 / 15:01) and run through the boundary.
 Collection does **not** stop at the boundary — the redeployed binaries
 continue logging; the boundary is marked by the restart times in the
-redeploy section below (step timestamps filled in at execution), not
-by a data cut.
+redeploy section below (step timestamps recorded there), not by a
+data cut.
 
 **Process sessions (`mono_ns` resets).** All five services were
 restarted in a coordinated restart at 2026-11-11 15:38 (node journal
@@ -392,13 +392,15 @@ machine reboot at 16:41:
 
 | stream | session starts (local) |
 |---|---|
-| `mainnet-hook` | 11-10 15:29:22 · 11-11 15:38:03 · 11-11 16:41:49 (mono reset) |
-| `pop-os-mainnet` (standalone) | 11-10 14:02:04 · 11-10 15:01:18 · 11-11 15:38:02 · 11-11 16:41:42 |
-| `pop-os-mainnet-crawler` | 11-10 15:01:18 · 11-11 15:38:02 · 11-11 16:41:43 (mono reset) |
-| `pop-os-testnet-crawler` | 11-10 15:01:19 · 11-11 15:38:03 · 11-11 16:41:43 (mono reset) |
+| `mainnet-hook` | 11-10 15:29:22 · 11-11 15:38:03 · 11-11 16:41:43 (NUL-corrupted line, record recoverable) · 11-12 14:01:12 |
+| `pop-os-mainnet` (standalone) | 11-10 14:02:04 · 11-10 15:01:18 · 11-11 15:38:02 · 11-11 16:41:42 · 11-12 15:26:02 |
+| `pop-os-mainnet-crawler` | 11-10 15:01:18 · 11-11 15:38:02 · 11-11 16:41:43 (NUL-corrupted line, record recoverable) · 11-12 15:26:02 |
+| `pop-os-testnet-crawler` | 11-10 15:01:19 · 11-11 15:38:03 · 11-11 16:41:43 (record truncated) · 11-12 15:26:02 |
 
 (The 11-10 15:01:18 standalone restart is the refactored-build swap
-noted in the partial-data section.)
+noted in the partial-data section. The 11-12 starts are the window-close
+redeploy: the node at step 2 (14:01:12), the observer + both crawlers at
+step 3 (15:26:02).)
 
 **Machine reboot, 2026-11-11 16:41 — all streams, not a redeploy.** A
 system reboot restarted all five services; no binary changed.
@@ -411,21 +413,26 @@ post-reboot `observer_start` (16:41:42) survived, so its restart is
 cleanly marked.
 
 **Torn writes at the reboot boundary.** Exactly one bad line per
-stream in three of the four streams, each at the kill boundary:
+stream in three of the four streams, each at the kill boundary. Two of
+the three are a leading NUL block followed by an intact record — the
+post-reboot `observer_start` is recoverable by stripping the NULs:
 
 | stream | line | damage |
 |---|---|---|
-| `mainnet-hook` | 651161 | 512 NUL bytes; the post-reboot `observer_start` is destroyed — session 3 is identified by the mono reset (3,345.8 s drop at the first post-reboot record, wall 16:41:49) |
-| `pop-os-mainnet-crawler` | 98847 | 512 NUL bytes; post-reboot `observer_start` destroyed (session 3 at 16:41:43 by mono reset) |
-| `pop-os-testnet-crawler` | 103503 | truncated record of the new process (wall `1794379303323` = 16:41:43.323) |
+| `mainnet-hook` | 651161 | 1 650 leading NUL bytes, then the post-reboot `observer_start` with its JSON payload intact (wall 16:41:43.363, mono 12 590) — recoverable; the session-3 start is this record, not the earlier mono-reset estimate (first post-reboot data record, wall 16:41:49) |
+| `pop-os-mainnet-crawler` | 98847 | 3 162 leading NUL bytes, then the post-reboot `observer_start` with its payload intact (wall 16:41:43.163) — recoverable |
+| `pop-os-testnet-crawler` | 103503 | truncated record of the new process (456 bytes, no NULs; wall `1794379303323` = 16:41:43.323) — not recoverable; session 3 from the truncated record's wall / mono reset |
 
-Consequence: `summarize.py` counts one restart per affected stream
-(`restarts=1`) and its line-422 rule flags the post-reboot mono reset
-as an "UNEXPLAINED" regression (2 regressions > 1 counted restart).
-Both regressions are fully explained — 86,706.7 s (the 15:38 restart's
-uptime) and 3,345.8 s (the reboot); the flag is a false positive of
-that rule, which assumes every restart leaves an `observer_start`
-record. The rule fix is in the post-14:02 list.
+Consequence: the NUL blocks survive into `json.loads` and both
+recoverable `observer_start` records are skipped as parse errors, so
+`summarize.py` counts one restart per affected stream (`restarts=1`)
+and its line-422 rule flags the post-reboot mono reset as an
+"UNEXPLAINED" regression (2 regressions > 1 counted restart). Both
+regressions are fully explained — 86,706.7 s (the 15:38 restart's
+uptime) and 3,345.8 s (the reboot); the flag is a false positive caused
+by the tool not seeing the recoverable records. Fix (post-14:02 list):
+strip a leading NUL block before parsing in `load()` so the reboot
+restarts are counted and the mono resets are explained.
 
 **`mono_ns` vs wall: one suspend interval.** `mono_ns` is
 process-relative CLOCK_MONOTONIC and does not advance while the
@@ -470,10 +477,13 @@ report.
 **Empty-V2-era artifacts.** Every pre-boundary observer/crawler record
 (both networks) was collected while presenting the empty V2 SyncInfo —
 the 400-id catch-up storm and early-header RTT composition documented
-in the SyncInfo-fix subsection below. The 14:02 redeploy is the
-boundary: pre-boundary data contains the artifact; post-boundary data
-presents the real tip (one 400-id catch-up per connection, then
-tip-region announces only).
+in the SyncInfo-fix subsection below. The observer/crawler era
+boundary is the step 3 restart (2026-11-12 15:26:02), not the 14:02
+window close: between 14:01:12 (step 2) and 15:26:02 the node ran the
+new build while the observer/crawler still ran the old one, so
+observer/crawler records in that interval still contain the artifact.
+Post-step-3 data presents the real tip (one 400-id catch-up per
+connection, then tip-region announces only).
 
 **Pre-boundary analysis snapshot.** Step-4 metrics were computed on the
 2026-11-12 11:43:59 AEST snapshot of all four streams
@@ -491,8 +501,27 @@ codec fix (`85c1b052`); both take effect only at this redeploy.
 | Step | When | What |
 |---|---|---|
 | 1. Testnet node (canary) | 2026-11-11, executed | Replace the testnet node binary with the current branch build; restart; observe for several hours: handshake outcomes, disconnect reasons, peer-count stability, and the self-connection check (`handshake not admitted` / `SelfConnection` in the node log). |
-| 2. Mainnet node | 2026-11-12 14:02 local | Stop `ergo-rust-archival`, swap in the same build (keeps the `[observer]` hook), start; mark the restart time in this table and in the dataset (the `mono_ns` session boundary). Rollback: `ergo-node.pre-phase0-20261110` + `ergo-node.toml.bak-pre-observer`. |
-| 3. Observer + crawlers | 2026-11-12 14:02 local, after step 2 | Restart `ergo-phase0-observer`, `ergo-phase0-crawler`, `ergo-phase0-crawler-testnet` with the new build (capture flags stay off); mark restart times. From this boundary the observer/crawler present the real tip SyncInfo: expect one 400-id catch-up per connection, then tip-region announces only; early-header RTT rows shrink to the first 64 ids/connection and RTT composition becomes tip-dominated. |
+| 2. Mainnet node | 2026-11-12 14:01:12 AEST (T0, epoch 1794456072) | Stop `ergo-rust-archival`, swap in the same build (keeps the `[observer]` hook), start; mark the restart time in this table and in the dataset (the `mono_ns` session boundary). Rollback: `ergo-node.pre-phase0-20261110` + `ergo-node.toml.bak-pre-observer`. |
+| 3. Observer + crawlers | 2026-11-12 15:26:02 AEST, after step 2 (see execution notes) | Restart `ergo-phase0-observer`, `ergo-phase0-crawler`, `ergo-phase0-crawler-testnet` with the new build (capture flags stay off); mark restart times. From this boundary the observer/crawler present the real tip SyncInfo: expect one 400-id catch-up per connection, then tip-region announces only; early-header RTT rows shrink to the first 64 ids/connection and RTT composition becomes tip-dominated. |
+
+**Execution notes (2026-11-12).** Step 2 ran at 14:01:12 AEST (T0 = 1794456072;
+post-swap sha256 `d1e76de3c0f2…` verified, 10-min debug-window drop-in
+installed). The monitor then crashed at start (rc 127): `swap-node` had
+written `T0_ISO=Thu 2026-11-12 14:01:12 AEST` unquoted into `state.env`, so
+sourcing it executed `2026-11-12` as a command. No trigger was evaluated and
+no rollback ran (runner exit 4; step 3 held per the safety rule). A one-shot
+re-run of all six checkpoint checks at T0+68 min (15:10:04 AEST) was clean:
+service active with 67 gauge lines since T0, peers=60, 0 admission denials /
+0 parse failures, bans=0, tip 1914865→1914891 with the last six heartbeats
+gap=0/healthy, and the T0+10–15 min churn window at peers 59→59. The debug
+drop-in was removed at T0+68 min (the monitor's T0+10 min job never ran).
+The script bug is fixed in `0236c0f7` (quoted `T0_ISO`, state-file
+validation, refusal to run past the T0+16 min window). Step 3 ran at
+15:26:02 AEST after operator go-ahead: all three units active on the staged
+binaries (observer `4033e6a13e21…`, crawlers `1234ba9f92cc…`, post-swap
+hashes verified), fresh `observer_start` records at 15:26:02.8 in all three
+streams, and the crawlers reloaded their persisted frontiers (117 / 12
+tracked addresses).
 
 ### Mainnet rollback triggers (step 2, first 10 minutes)
 
