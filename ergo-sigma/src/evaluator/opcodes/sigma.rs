@@ -26,7 +26,7 @@ use super::super::cost::{add_cost, add_cost_per_item};
 use super::super::dispatch::TraceEntry;
 use super::super::eval_ctx::EvalCtx;
 use super::super::helpers::{count_sigma_nodes, trace_val, unpack_collection};
-use super::super::types::{EvalError, Value};
+use super::super::types::{check_sigma_tree_depth, EvalError, Value};
 
 // EC point decode used by both Exponentiate (0x9F) and MultiplyGroup
 // (0xA0). Cost-free; cost stays in the calling arms. Preserves the
@@ -350,42 +350,55 @@ pub(in crate::evaluator) fn check_pre_jit_xor_lengths(
 /// FalseProp children drop; empty → FalseProp; a lone survivor collapses to
 /// itself. Shared by the SigmaOr collapse and the AtLeast reducer so trivial
 /// folding is identical everywhere a disjunction is normalized.
-fn cor_normalized(children: Vec<SigmaBoolean>) -> SigmaBoolean {
+///
+/// A surviving composite is depth-checked before it is returned: Scala's
+/// `COR.normalized` runs `SigmaBoolean.checkDepth` on the `COR(res)` branch,
+/// so a runtime-built OR cannot grow past `MAX_SIGMA_TREE_DEPTH` without a
+/// typed reject.
+fn cor_normalized(children: Vec<SigmaBoolean>) -> Result<SigmaBoolean, EvalError> {
     if children
         .iter()
         .any(|sb| matches!(sb, SigmaBoolean::TrivialProp(true)))
     {
-        return SigmaBoolean::TrivialProp(true);
+        return Ok(SigmaBoolean::TrivialProp(true));
     }
     let real: Vec<SigmaBoolean> = children
         .into_iter()
         .filter(|sb| !matches!(sb, SigmaBoolean::TrivialProp(false)))
         .collect();
     match real.len() {
-        0 => SigmaBoolean::TrivialProp(false),
-        1 => real.into_iter().next().unwrap(),
-        _ => SigmaBoolean::Cor(real.into()),
+        0 => Ok(SigmaBoolean::TrivialProp(false)),
+        1 => Ok(real.into_iter().next().unwrap()),
+        _ => {
+            let or = SigmaBoolean::Cor(real.into());
+            check_sigma_tree_depth(&or)?;
+            Ok(or)
+        }
     }
 }
 
 /// `sigma.data.CAND.normalized`: a FalseProp child makes the whole AND false;
 /// TrueProp children drop; empty → TrueProp; a lone survivor collapses to
 /// itself. Mirror of [`cor_normalized`] for conjunctions.
-fn cand_normalized(children: Vec<SigmaBoolean>) -> SigmaBoolean {
+fn cand_normalized(children: Vec<SigmaBoolean>) -> Result<SigmaBoolean, EvalError> {
     if children
         .iter()
         .any(|sb| matches!(sb, SigmaBoolean::TrivialProp(false)))
     {
-        return SigmaBoolean::TrivialProp(false);
+        return Ok(SigmaBoolean::TrivialProp(false));
     }
     let real: Vec<SigmaBoolean> = children
         .into_iter()
         .filter(|sb| !matches!(sb, SigmaBoolean::TrivialProp(true)))
         .collect();
     match real.len() {
-        0 => SigmaBoolean::TrivialProp(true),
-        1 => real.into_iter().next().unwrap(),
-        _ => SigmaBoolean::Cand(real.into()),
+        0 => Ok(SigmaBoolean::TrivialProp(true)),
+        1 => Ok(real.into_iter().next().unwrap()),
+        _ => {
+            let and = SigmaBoolean::Cand(real.into());
+            check_sigma_tree_depth(&and)?;
+            Ok(and)
+        }
     }
 }
 
@@ -407,13 +420,18 @@ const AT_LEAST_MAX_CHILDREN: usize = 255;
 /// this code") so it stays auditable line-for-line against the reference. The
 /// per-item AtLeast cost is charged on the full pre-fold child count by the
 /// caller, before this runs.
-fn at_least_reduce(bound: i32, children: Vec<SigmaBoolean>) -> SigmaBoolean {
+///
+/// Depth-bounded like the Scala port: the COR / CAND collapses check inside
+/// their `normalized` ports, and the final direct `CTHRESHOLD` branch is
+/// checked here, mirroring `SigmaBoolean.checkDepth(th)` in Scala
+/// `AtLeast.reduce`.
+fn at_least_reduce(bound: i32, children: Vec<SigmaBoolean>) -> Result<SigmaBoolean, EvalError> {
     let n_children = children.len();
     if bound <= 0 {
-        return SigmaBoolean::TrivialProp(true);
+        return Ok(SigmaBoolean::TrivialProp(true));
     }
     if bound as usize > n_children {
-        return SigmaBoolean::TrivialProp(false);
+        return Ok(SigmaBoolean::TrivialProp(false));
     }
     let mut cur_bound = bound as usize;
     let mut children_left = n_children;
@@ -446,10 +464,12 @@ fn at_least_reduce(bound: i32, children: Vec<SigmaBoolean>) -> SigmaBoolean {
     if cur_bound == children_left {
         return cand_normalized(sigmas);
     }
-    SigmaBoolean::Cthreshold {
+    let th = SigmaBoolean::Cthreshold {
         k: cur_bound as u16,
         children: sigmas.into(),
-    }
+    };
+    check_sigma_tree_depth(&th)?;
+    Ok(th)
 }
 
 // 0x98 AtLeast(bound, children) -> SigmaProp. k-of-n threshold; folds trivial
@@ -492,7 +512,7 @@ pub(in crate::evaluator) fn eval_at_least(
             "AtLeast children count exceeds MaxChildrenCount (255)",
         ));
     }
-    Ok(Value::SigmaProp(at_least_reduce(k, sigma_props)))
+    Ok(Value::SigmaProp(at_least_reduce(k, sigma_props)?))
 }
 
 // 0xEA SigmaAnd (collection form) — short-circuit on TrivialFalse.
@@ -534,7 +554,7 @@ pub(in crate::evaluator) fn eval_sigma_and_collection(
             "SigmaAnd requires nonempty children",
         ));
     }
-    Ok(Value::SigmaProp(cand_normalized(children)))
+    Ok(Value::SigmaProp(cand_normalized(children)?))
 }
 
 // 0xEB SigmaOr (collection form) — short-circuit on TrivialTrue.
@@ -575,7 +595,7 @@ pub(in crate::evaluator) fn eval_sigma_or_collection(
             "SigmaOr requires nonempty children",
         ));
     }
-    Ok(Value::SigmaProp(cor_normalized(children)))
+    Ok(Value::SigmaProp(cor_normalized(children)?))
 }
 
 // 0x74 SubstConstants(script_bytes, positions, new_values).
@@ -695,5 +715,99 @@ pub(in crate::evaluator) fn eval_sigma_prop_bytes(
             expected: "SigmaProp for SigmaPropBytes",
             got: format!("{val:?}"),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ergo_ser::sigma_value::MAX_SIGMA_TREE_DEPTH;
+
+    // ----- helpers -----
+
+    /// On-curve public key (the secp256k1 generator): a GE encoding the
+    /// evaluator's on-curve checks accept.
+    fn test_pk() -> SigmaBoolean {
+        use k256::elliptic_curve::group::GroupEncoding;
+        let point = k256::ProjectivePoint::GENERATOR.to_affine().to_bytes();
+        SigmaBoolean::ProveDlog(GroupElement::from_bytes(point.into()))
+    }
+
+    /// Left-nested CAND chain of the given depth: ((pk && pk) && ...) && pk.
+    fn and_chain(pk: &SigmaBoolean, depth: usize) -> Result<SigmaBoolean, EvalError> {
+        let mut res = pk.clone();
+        for _ in 1..depth {
+            res = cand_normalized(vec![res, pk.clone()])?;
+        }
+        Ok(res)
+    }
+
+    /// Left-nested COR chain of the given depth. Port of `orChain`.
+    fn or_chain(pk: &SigmaBoolean, depth: usize) -> Result<SigmaBoolean, EvalError> {
+        let mut res = pk.clone();
+        for _ in 1..depth {
+            res = cor_normalized(vec![res, pk.clone()])?;
+        }
+        Ok(res)
+    }
+
+    fn expect_depth_exceeded(err: &EvalError, depth: usize) {
+        assert!(
+            matches!(
+                err,
+                EvalError::SigmaTreeDepthExceeded {
+                    depth: d,
+                    max
+                } if *d == depth && *max == MAX_SIGMA_TREE_DEPTH
+            ),
+            "expected SigmaTreeDepthExceeded {{ depth: {depth}, max: {MAX_SIGMA_TREE_DEPTH} }}, got {err:?}"
+        );
+    }
+
+    // ----- construction-time depth bound (ports of the Scala spec) -----
+
+    // "CAND/COR normalized allow trees up to MaxDepth and reject deeper ones".
+    #[test]
+    fn normalized_chains_allow_depth_up_to_max_and_reject_deeper() {
+        let pk = test_pk();
+        let and = and_chain(&pk, MAX_SIGMA_TREE_DEPTH).unwrap();
+        assert_eq!(and.depth(), MAX_SIGMA_TREE_DEPTH);
+        let or = or_chain(&pk, MAX_SIGMA_TREE_DEPTH).unwrap();
+        assert_eq!(or.depth(), MAX_SIGMA_TREE_DEPTH);
+        expect_depth_exceeded(
+            &and_chain(&pk, MAX_SIGMA_TREE_DEPTH + 1).unwrap_err(),
+            MAX_SIGMA_TREE_DEPTH + 1,
+        );
+        expect_depth_exceeded(
+            &or_chain(&pk, MAX_SIGMA_TREE_DEPTH + 1).unwrap_err(),
+            MAX_SIGMA_TREE_DEPTH + 1,
+        );
+    }
+
+    // Mirror of "AtLeast.reduce rejects trees deeper than MaxDepth":
+    // 1 < bound(2) < children(3) so the direct CTHRESHOLD branch is
+    // constructed and depth-checked.
+    #[test]
+    fn at_least_reduce_rejects_deeper_than_max() {
+        let pk = test_pk();
+        let deep = and_chain(&pk, MAX_SIGMA_TREE_DEPTH).unwrap();
+        let err = at_least_reduce(2, vec![deep, pk.clone(), pk]).unwrap_err();
+        expect_depth_exceeded(&err, MAX_SIGMA_TREE_DEPTH + 1);
+    }
+
+    // Boundary: a CTHRESHOLD at exactly MaxDepth is still constructible.
+    #[test]
+    fn at_least_reduce_accepts_threshold_at_max_depth() {
+        let pk = test_pk();
+        let deep = and_chain(&pk, MAX_SIGMA_TREE_DEPTH - 1).unwrap();
+        let th = at_least_reduce(2, vec![deep, pk.clone(), pk]).unwrap();
+        assert_eq!(th.depth(), MAX_SIGMA_TREE_DEPTH);
+        match th {
+            SigmaBoolean::Cthreshold { k, children } => {
+                assert_eq!(k, 2);
+                assert_eq!(children.len(), 3);
+            }
+            other => panic!("expected Cthreshold, got {other:?}"),
+        }
     }
 }

@@ -8,13 +8,16 @@ use super::SigmaBoolean;
 struct Children {
     values: Vec<SigmaBoolean>,
     size: usize,
+    depth: usize,
 }
 
 /// Immutable, shared children of a compound sigma proposition.
 ///
 /// Construct with `Vec<SigmaBoolean>::into()`. Cloning shares the children;
 /// iteration and indexing expose borrowed propositions. The cached logical size
-/// counts repeated occurrences, even when their storage is shared.
+/// counts repeated occurrences, even when their storage is shared. The cached
+/// depth is the longest root-to-leaf path in the compound node's subtree
+/// (leaves have depth 1; an empty child list has depth 1).
 #[derive(Clone)]
 pub struct SigmaChildren {
     // Taken only during iterative destruction. Every observable instance has
@@ -27,8 +30,19 @@ impl From<Vec<SigmaBoolean>> for SigmaChildren {
         let size = values
             .iter()
             .fold(0usize, |sum, value| sum.saturating_add(value.size()));
+        // Scala's maxChildrenDepth is 0 for an empty list, so the compound
+        // depth is always its deepest child's depth + 1, or 1 when empty.
+        let depth = values
+            .iter()
+            .map(|value| value.depth())
+            .max()
+            .map_or(1, |deepest| deepest.saturating_add(1));
         Self {
-            inner: Some(Arc::new(Children { values, size })),
+            inner: Some(Arc::new(Children {
+                values,
+                size,
+                depth,
+            })),
         }
     }
 }
@@ -42,6 +56,13 @@ impl FromIterator<SigmaBoolean> for SigmaChildren {
 impl SigmaChildren {
     pub(super) fn size(&self) -> usize {
         self.inner.as_ref().expect("live proposition children").size
+    }
+
+    pub(super) fn depth(&self) -> usize {
+        self.inner
+            .as_ref()
+            .expect("live proposition children")
+            .depth
     }
 
     /// Storage capacity, which parser tests use to observe child reservation.
@@ -177,6 +198,19 @@ impl SigmaBoolean {
             Self::ProveDHTuple { .. } => 4,
             Self::Cand(children) | Self::Cor(children) | Self::Cthreshold { children, .. } => {
                 children.size().saturating_add(1)
+            }
+        }
+    }
+
+    /// Longest root-to-leaf path, mirroring Scala's `SigmaBoolean.depth`.
+    /// Leaves (TrivialProp, ProveDlog, ProveDHTuple) have depth 1; a compound
+    /// node is its deepest child's depth + 1. Cached on the shared children
+    /// graph, so repeated reads are O(1) and never traverse the tree.
+    pub fn depth(&self) -> usize {
+        match self {
+            Self::TrivialProp(_) | Self::ProveDlog(_) | Self::ProveDHTuple { .. } => 1,
+            Self::Cand(children) | Self::Cor(children) | Self::Cthreshold { children, .. } => {
+                children.depth()
             }
         }
     }
@@ -334,6 +368,59 @@ mod tests {
             .into(),
         );
         assert_eq!(tree.size(), 5);
+    }
+
+    // ----- depth semantics (mirror of Scala's SigmaBoolean.depth) -----
+
+    #[test]
+    fn leaves_all_have_depth_one() {
+        assert_eq!(SigmaBoolean::TrivialProp(true).depth(), 1);
+        assert_eq!(SigmaBoolean::TrivialProp(false).depth(), 1);
+        assert_eq!(
+            SigmaBoolean::ProveDlog(GroupElement::from_bytes([2; 33])).depth(),
+            1
+        );
+        let point = GroupElement::from_bytes([2; 33]);
+        assert_eq!(
+            SigmaBoolean::ProveDHTuple {
+                g: point,
+                h: point,
+                u: point,
+                v: point
+            }
+            .depth(),
+            1
+        );
+    }
+
+    #[test]
+    fn single_child_cand_chain_depth_is_chain_length_plus_one() {
+        let mut tree = SigmaBoolean::ProveDlog(GroupElement::from_bytes([2; 33]));
+        for _ in 0..110 {
+            tree = SigmaBoolean::Cand(vec![tree].into());
+        }
+        assert_eq!(tree.depth(), 111);
+    }
+
+    #[test]
+    fn compound_depth_is_deepest_child_plus_one() {
+        let point = GroupElement::from_bytes([2; 33]);
+        let deep = SigmaBoolean::Cand(
+            vec![
+                SigmaBoolean::Cand(vec![SigmaBoolean::ProveDlog(point)].into()),
+                SigmaBoolean::ProveDlog(point),
+            ]
+            .into(),
+        );
+        let tree = SigmaBoolean::Cor(vec![deep, SigmaBoolean::TrivialProp(true)].into());
+        assert_eq!(tree.depth(), 4);
+    }
+
+    #[test]
+    fn doubling_tree_depth_is_layers_plus_one() {
+        for layers in [0usize, 1, 10, 110, 50_000] {
+            assert_eq!(doubling(layers, 2).depth(), layers + 1);
+        }
     }
 
     #[test]

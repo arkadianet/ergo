@@ -421,6 +421,17 @@ fn reduce_ergo_tree_inner(
         Err(e) => return Err(VerifySpendingError::Reduction(e)),
     };
 
+    // Bound the depth of the REDUCED proposition, mirroring
+    // `SigmaBoolean.checkDepth(res.value)` in Scala `Interpreter.fullReduction`.
+    // Parsed trees are already depth-bounded by the deserializer, but runtime
+    // construction (e.g. a `Fold` over a long context-extension collection
+    // building `acc && pk`) can produce a `CAND` chain as deep as the input.
+    // The construction-time checks in the evaluator (`CAND.normalized` /
+    // `COR.normalized` / `AtLeast.reduce` ports) reject most over-deep
+    // intermediates, but this final check is the consensus guarantee on the
+    // reduced value itself for BOTH verification and signing.
+    super::evaluator::check_sigma_tree_depth(&proposition).map_err(VerifySpendingError::Eval)?;
+
     // Match Scala's per-input toBlockCost truncation: drop the JitCost
     // remainder from evaluation before adding crypto cost.
     #[cfg(feature = "cost-trace")]
@@ -1572,6 +1583,7 @@ mod evaluated_value_reduce_parity_tests {
 #[cfg(test)]
 mod soft_fork_condition_tests {
     use super::*;
+    use crate::evaluator::EvalError;
     use ergo_primitives::reader::VlqReader;
 
     // ----- helpers -----
@@ -1779,6 +1791,217 @@ mod soft_fork_condition_tests {
                 ),
             }
         }
+    }
+
+    // ----- runtime SigmaBoolean depth bound at the consensus entry points -----
+    //
+    // The full prover/verifier round-trip at this depth lives in ergo-wallet
+    // (proving_internal_consistency.rs); here the entries both sides share
+    // are pinned: `reduce_ergo_tree_with_context_and_cost` is the prover-side
+    // reduction and `verify_spending_proof_with_context_and_cost` the
+    // verifier-side.
+
+    /// A `Fold` over a context-extension `Coll[Byte]` as an in-memory AST:
+    /// each fold step appends the fixed `pk` to the accumulating `CAND`, so
+    /// the reduced tree's depth is `extension length + 1`.
+    fn fold_and_chain_tree(pk: &SigmaBoolean) -> ErgoTree {
+        let sigma_and = Expr::Op(IrNode {
+            opcode: 0xEA, // SigmaAnd
+            payload: Payload::SigmaCollection {
+                items: vec![
+                    // acc — the first field of the fold's (acc, item) tuple.
+                    Expr::Op(IrNode {
+                        opcode: 0x8C, // SelectField
+                        payload: Payload::SelectField {
+                            input: Box::new(Expr::Op(IrNode {
+                                opcode: 0x72, // ValUse
+                                payload: Payload::ValUse { id: 1 },
+                            })),
+                            field_idx: 1,
+                        },
+                    }),
+                    Expr::Const {
+                        tpe: SigmaType::SSigmaProp,
+                        val: SigmaValue::SigmaProp(pk.clone()),
+                    },
+                ],
+            },
+        });
+        ErgoTree {
+            version: 0,
+            has_size: false,
+            constant_segregation: false,
+            reserved_header_bits: 0,
+            constants: Vec::new(),
+            body: Expr::Op(IrNode {
+                opcode: 0xB0, // Fold
+                payload: Payload::Three(
+                    Box::new(Expr::Op(IrNode {
+                        opcode: 0xE4, // OptionGet
+                        payload: Payload::One(Box::new(Expr::Op(IrNode {
+                            opcode: 0xE3, // GetVar
+                            payload: Payload::GetVar {
+                                var_id: 1,
+                                tpe: SigmaType::SColl(Box::new(SigmaType::SByte)),
+                            },
+                        }))),
+                    })),
+                    Box::new(Expr::Const {
+                        tpe: SigmaType::SSigmaProp,
+                        val: SigmaValue::SigmaProp(pk.clone()),
+                    }),
+                    Box::new(Expr::Op(IrNode {
+                        opcode: 0xD9, // FuncValue
+                        payload: Payload::FuncValue {
+                            // Single (acc, item) tuple parameter, as the
+                            // reference compiler emits for `{(acc, b) => ...}`.
+                            args: vec![(
+                                1,
+                                Some(SigmaType::STuple(vec![
+                                    SigmaType::SSigmaProp,
+                                    SigmaType::SByte,
+                                ])),
+                            )],
+                            body: Box::new(sigma_and),
+                        },
+                    })),
+                ),
+            }),
+        }
+    }
+
+    fn fold_tree_context(ext_len: usize) -> crate::evaluator::ReductionContext<'static> {
+        use ergo_ser::sigma_value::CollValue;
+        let mut ctx = crate::evaluator::ReductionContext::minimal(0, 0);
+        ctx.ergo_tree_version = 0; // v0 tree; keep <= activated
+        ctx.extension.insert(
+            1,
+            (
+                SigmaType::SColl(Box::new(SigmaType::SByte)),
+                SigmaValue::Coll(CollValue::Bytes(vec![0u8; ext_len])),
+            ),
+        );
+        // The tree inlines its own `pk` constant (the generator); the context
+        // only supplies the extension the fold walks.
+        ctx
+    }
+
+    #[test]
+    fn fold_chain_at_max_depth_reduces_and_beyond_max_rejects() {
+        use ergo_ser::sigma_value::MAX_SIGMA_TREE_DEPTH;
+
+        let pk = {
+            use k256::elliptic_curve::group::GroupEncoding;
+            let point = k256::ProjectivePoint::GENERATOR.to_affine().to_bytes();
+            SigmaBoolean::ProveDlog(ergo_primitives::group_element::GroupElement::from_bytes(
+                point.into(),
+            ))
+        };
+        let tree = fold_and_chain_tree(&pk);
+
+        // Extension length 109 → depth 110 = MaxDepth: the prover-side
+        // consensus entry reduces it, keeping trees legal at exactly the
+        // Scala limit.
+        let ctx = fold_tree_context(MAX_SIGMA_TREE_DEPTH - 1);
+        let reduced = reduce_ergo_tree_with_context_and_cost(
+            &tree,
+            &ctx,
+            &mut CostAccumulator::recording_only(),
+        )
+        .expect("depth 110 == MaxDepth must reduce");
+        assert_eq!(reduced.depth(), MAX_SIGMA_TREE_DEPTH);
+
+        // Extension length 110 → depth 111: rejected deterministically with
+        // the typed depth error, on BOTH the prover-side and verifier-side
+        // entries (the construction-time check in `CAND.normalized` fires
+        // during the fold).
+        let ctx = fold_tree_context(MAX_SIGMA_TREE_DEPTH);
+        let err = reduce_ergo_tree_with_context_and_cost(
+            &tree,
+            &ctx,
+            &mut CostAccumulator::recording_only(),
+        )
+        .expect_err("depth 111 > MaxDepth must be rejected");
+        assert!(
+            matches!(
+                &err,
+                VerifySpendingError::Eval(EvalError::SigmaTreeDepthExceeded {
+                    depth,
+                    max,
+                }) if *depth == MAX_SIGMA_TREE_DEPTH + 1 && *max == MAX_SIGMA_TREE_DEPTH
+            ),
+            "expected SigmaTreeDepthExceeded, got {err:?}"
+        );
+        let err = verify_spending_proof_with_context_and_cost(
+            &tree,
+            &[],
+            &[],
+            &ctx,
+            &mut CostAccumulator::recording_only(),
+        )
+        .expect_err("depth 111 > MaxDepth must be rejected");
+        assert!(
+            matches!(
+                &err,
+                VerifySpendingError::Eval(EvalError::SigmaTreeDepthExceeded {
+                    depth,
+                    max,
+                }) if *depth == MAX_SIGMA_TREE_DEPTH + 1 && *max == MAX_SIGMA_TREE_DEPTH
+            ),
+            "expected SigmaTreeDepthExceeded, got {err:?}"
+        );
+    }
+
+    // The verdicts hold on a limited thread stack: the reduced depth-110
+    // tree reduces fine and the depth-111 tree rejects with the typed error,
+    // even on a 256 KiB stack. Guards against a future recursive depth walk
+    // regressing the cached O(1) depth.
+    #[test]
+    fn fold_chain_depth_verdicts_hold_on_a_limited_stack() {
+        use ergo_ser::sigma_value::MAX_SIGMA_TREE_DEPTH;
+
+        let pk = {
+            use k256::elliptic_curve::group::GroupEncoding;
+            let point = k256::ProjectivePoint::GENERATOR.to_affine().to_bytes();
+            SigmaBoolean::ProveDlog(ergo_primitives::group_element::GroupElement::from_bytes(
+                point.into(),
+            ))
+        };
+        let tree = fold_and_chain_tree(&pk);
+
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                let ctx = fold_tree_context(MAX_SIGMA_TREE_DEPTH - 1);
+                let reduced = reduce_ergo_tree_with_context_and_cost(
+                    &tree,
+                    &ctx,
+                    &mut CostAccumulator::recording_only(),
+                )
+                .expect("depth 110 must reduce on a small stack");
+                assert_eq!(reduced.depth(), MAX_SIGMA_TREE_DEPTH);
+
+                let ctx = fold_tree_context(MAX_SIGMA_TREE_DEPTH);
+                let err = reduce_ergo_tree_with_context_and_cost(
+                    &tree,
+                    &ctx,
+                    &mut CostAccumulator::recording_only(),
+                )
+                .expect_err("depth 111 must reject on a small stack");
+                assert!(
+                    matches!(
+                        &err,
+                        VerifySpendingError::Eval(EvalError::SigmaTreeDepthExceeded {
+                            depth: 111,
+                            max: 110,
+                        })
+                    ),
+                    "expected the typed depth reject, got {err:?}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
 

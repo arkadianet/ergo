@@ -370,4 +370,27 @@ mod tests {
             ValidationError::ScriptError { .. }
         ));
     }
+
+    #[test]
+    fn sigma_tree_depth_exceeded_routes_to_script_error() {
+        // The runtime-construction depth reject surfaces as the generic
+        // ScriptError envelope — an invalid-input verdict, not a distinct
+        // consensus category — and the reference-mirrored message survives
+        // the boundary.
+        let envelope = VerifySpendingError::Eval(EvalError::SigmaTreeDepthExceeded {
+            depth: 111,
+            max: 110,
+        });
+        match classify_verify_error(envelope, 5) {
+            ValidationError::ScriptError { index, reason } => {
+                assert_eq!(index, 5);
+                assert!(
+                    reason.contains("SigmaBoolean tree depth 111 exceeds allowed maximum 110"),
+                    "the reference-mirrored depth message must survive the boundary, \
+                     reason was {reason}"
+                );
+            }
+            other => panic!("SigmaTreeDepthExceeded must stay ScriptError, got {other:?}"),
+        }
+    }
 }

@@ -85,7 +85,12 @@ pub fn write_sigma_boolean(w: &mut VlqWriter, sb: &SigmaBoolean) -> Result<(), W
 /// that bound here so a deeply nested `Cand`/`Cor`/`Cthreshold` chain from peer
 /// data (a box register or context-extension `SigmaProp` constant) is rejected
 /// rather than overflowing the worker-thread stack.
-pub(super) const MAX_SIGMA_TREE_DEPTH: usize = 110;
+///
+/// The evaluator enforces the same bound on RUNTIME-constructed trees: any
+/// `SigmaBoolean` whose depth exceeds it is rejected
+/// (`SigmaTreeDepthExceeded`), so a `Fold`-built `CAND`/`COR` chain cannot
+/// grow past 110. Mirrors Scala's `SigmaBoolean.MaxDepth`.
+pub const MAX_SIGMA_TREE_DEPTH: usize = 110;
 
 pub(super) fn read_sigma_boolean_at_depth(
     r: &mut VlqReader,
@@ -187,6 +192,10 @@ fn read_sigma_boolean_node(r: &mut VlqReader, depth: usize) -> Result<SigmaBoole
 
 /// Serialize a standalone proposition only after bounding its expanded wire size
 /// and reference reader depth. Shared child graphs are measured without expansion.
+///
+/// Depth is checked once on the root: it is cached on the shared children graph
+/// and monotone (a compound node's depth is its deepest child's depth + 1), so
+/// the root alone carries the bound.
 pub fn write_sigma_boolean_bounded(
     w: &mut VlqWriter,
     sigma: &SigmaBoolean,
@@ -198,7 +207,12 @@ pub fn write_sigma_boolean_bounded(
     }
     let invalid =
         || WriteError::InvalidData("sigma proposition exceeds wire size/depth bound".into());
-    let mut sizes = std::collections::HashMap::<*const SigmaBoolean, (usize, usize)>::new();
+    if sigma.depth() > MAX_SIGMA_TREE_DEPTH {
+        return Err(invalid());
+    }
+    // Post-order walk of the shared graph: a compound node is measured only
+    // after all of its children, so each shared subtree is measured once.
+    let mut sizes = std::collections::HashMap::<*const SigmaBoolean, usize>::new();
     let mut pending = vec![(sigma, false)];
     while let Some((node, ready)) = pending.pop() {
         let key = node as *const SigmaBoolean;
@@ -221,7 +235,6 @@ pub fn write_sigma_boolean_bounded(
                 continue;
             }
         }
-        let mut depth = 1;
         let mut bytes = match node {
             SigmaBoolean::TrivialProp(_) => 1,
             SigmaBoolean::ProveDlog(_) => 34,
@@ -236,15 +249,15 @@ pub fn write_sigma_boolean_bounded(
         };
         if let Some(children) = children {
             for child in children.iter() {
-                let (n, d) = sizes[&(child as *const SigmaBoolean)];
-                bytes = bytes.checked_add(n).ok_or_else(invalid)?;
-                depth = depth.max(d + 1);
+                bytes = bytes
+                    .checked_add(sizes[&(child as *const SigmaBoolean)])
+                    .ok_or_else(invalid)?;
             }
         }
-        if bytes > max_bytes || depth > MAX_SIGMA_TREE_DEPTH {
+        if bytes > max_bytes {
             return Err(invalid());
         }
-        sizes.insert(key, (bytes, depth));
+        sizes.insert(key, bytes);
     }
     write_sigma_boolean(w, sigma)
 }
@@ -575,5 +588,26 @@ mod tests {
         let data = w.result();
         assert_eq!(data[0], 0xCD);
         assert_eq!(data.len(), 1 + 33);
+    }
+
+    #[test]
+    fn write_sigma_boolean_bounded_pins_the_depth_bound() {
+        let chain = |n: usize| {
+            let mut sb = SigmaBoolean::TrivialProp(true);
+            for _ in 0..n {
+                sb = SigmaBoolean::Cand(vec![sb].into());
+            }
+            sb
+        };
+        // depth 110 = the limit: serializes at the bound.
+        let mut w = VlqWriter::new();
+        write_sigma_boolean_bounded(&mut w, &chain(MAX_SIGMA_TREE_DEPTH - 1), 4096).unwrap();
+        assert!(!w.result().is_empty());
+        // depth 111: rejected before any bytes are written.
+        let mut w = VlqWriter::new();
+        let err =
+            write_sigma_boolean_bounded(&mut w, &chain(MAX_SIGMA_TREE_DEPTH), 4096).unwrap_err();
+        assert!(matches!(err, WriteError::InvalidData(_)), "got {err:?}");
+        assert!(w.result().is_empty());
     }
 }

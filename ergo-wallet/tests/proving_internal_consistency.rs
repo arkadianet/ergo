@@ -1190,3 +1190,50 @@ fn generated_leaf_responses_are_canonical_scalars() {
         }
     }
 }
+
+// ----- depth-boundary round-trip -----
+
+/// A CAND chain exactly at the consensus depth bound (leaves have depth 1;
+/// a compound node is its deepest child + 1) must still prove and verify:
+/// the bound admits trees at the limit, and the full round-trip holds on a
+/// limited thread stack as well.
+#[test]
+fn cand_chain_at_max_depth_proves_and_verifies() {
+    use ergo_ser::sigma_value::MAX_SIGMA_TREE_DEPTH;
+
+    let secret = bip32_v1_secret();
+    let pk = pubkey_from_scalar(&secret);
+    let leaf = dlog_proposition(&pk);
+    let mut prop = leaf.clone();
+    for _ in 0..MAX_SIGMA_TREE_DEPTH - 1 {
+        prop = cand(vec![prop, leaf.clone()]);
+    }
+    assert_eq!(prop.depth(), MAX_SIGMA_TREE_DEPTH);
+
+    let message = b"depth-boundary round-trip";
+    let mut rng = deterministic_rng(b"max_depth");
+    let (proof, _) = prove_sigma(
+        &prop,
+        &registry_with_dlog(&pk, secret),
+        message,
+        &HintsBag::empty(),
+        &mut rng,
+    )
+    .expect("prove_sigma at the depth limit should succeed");
+    assert!(
+        verify_sigma_proof(&prop, &proof, message).expect("verify should not error"),
+        "proof at the depth limit must verify"
+    );
+
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            assert!(
+                verify_sigma_proof(&prop, &proof, message).expect("verify should not error"),
+                "proof at the depth limit must verify on a limited stack"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

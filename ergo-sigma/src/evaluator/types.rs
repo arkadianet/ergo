@@ -2,7 +2,7 @@ use ergo_primitives::cost::{CostError, JitCostError};
 use ergo_ser::opcode::Expr;
 use ergo_ser::register::RegisterValue;
 use ergo_ser::sigma_type::SigmaType;
-use ergo_ser::sigma_value::SigmaBoolean;
+use ergo_ser::sigma_value::{SigmaBoolean, MAX_SIGMA_TREE_DEPTH};
 use num_traits::Zero;
 use thiserror::Error;
 
@@ -1017,6 +1017,29 @@ pub enum EvalError {
         tree_version: u8,
         activated_script_version: i8,
     },
+    /// A RUNTIME-constructed `SigmaBoolean` grew past the consensus depth bound
+    /// (`MAX_SIGMA_TREE_DEPTH` = Scala `SigmaConstants.MaxTreeDepth` = 110).
+    /// Mirrors Scala's `SigmaTreeDepthExceeded`: a `Fold`/`And`/`Or` over a
+    /// long runtime collection can build a `CAND`/`COR` chain as deep as the
+    /// collection, unbounded by the parser limit that caps only PARSED trees.
+    /// Scala throws it from `CAND.normalized` / `COR.normalized` /
+    /// `AtLeast.reduce` / `fullReduction`; the exception is caught by the
+    /// interpreter's `Try` → an invalid input.
+    #[error("SigmaBoolean tree depth {depth} exceeds allowed maximum {max}")]
+    SigmaTreeDepthExceeded { depth: usize, max: usize },
+}
+
+/// Reject a runtime-constructed `SigmaBoolean` deeper than the consensus bound
+/// (`MAX_SIGMA_TREE_DEPTH`). Depth is cached on the shared children graph, so
+/// this is O(1) and stack-safe regardless of tree shape.
+pub fn check_sigma_tree_depth(sb: &SigmaBoolean) -> Result<(), EvalError> {
+    if sb.depth() > MAX_SIGMA_TREE_DEPTH {
+        return Err(EvalError::SigmaTreeDepthExceeded {
+            depth: sb.depth(),
+            max: MAX_SIGMA_TREE_DEPTH,
+        });
+    }
+    Ok(())
 }
 
 // `?` propagation for the cost API. Both impls preserve the typed
