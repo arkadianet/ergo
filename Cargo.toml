@@ -147,7 +147,7 @@ tokio-tungstenite = "0.29"
 futures-util      = "0.3"
 
 # OpenAPI — derive-based spec generation for the Rust-native /api/v1/* surface.
-utoipa          = { version = "5", features = ["axum_extras", "yaml"] }
+utoipa          = { version = "6", features = ["axum_extras", "yaml"] }
 
 # CLI / config
 clap = "4"
