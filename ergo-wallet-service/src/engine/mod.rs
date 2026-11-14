@@ -65,6 +65,7 @@ mod hints_codec;
 pub mod jobs;
 mod keys;
 pub mod mempool;
+pub mod message_sign;
 mod multisig;
 mod nonce_custody;
 mod nonce_vault;

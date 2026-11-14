@@ -32,6 +32,7 @@ async-trait          = { workspace = true }
 parking_lot          = { workspace = true }
 # External-secret scalar decoding and private-key export.
 k256                 = { workspace = true, features = ["arithmetic"] }
+blake2               = { workspace = true }
 zeroize              = { workspace = true }
 # Seed-directory publication (`wallet::handoff`): report hashes and a private
 # assembly directory beside the destination.
@@ -52,6 +53,9 @@ tempfile = { workspace = true }
 # decoder the node uses in production. Kept out of the normal graph so the
 # service (and the daemon) never pull in the REST JSON layer.
 ergo-rest-json = { workspace = true }
+# TEST-ONLY: run the contracts' message-signature checks through the compiler
+# and evaluator.
+ergo-compiler = { workspace = true }
 
 [[test]]
 name = "it"

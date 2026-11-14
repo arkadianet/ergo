@@ -148,6 +148,10 @@ pub struct SecuritySection {
     /// caller (the Scala-compatible secret hex).
     #[serde(default)]
     pub multisig_nonces: NonceHolder,
+    /// Serve `POST /api/v1/wallet/messages/sign`, which signs Kadia maker
+    /// quotes and Rosen Intents quotes with a wallet key. Off by default.
+    #[serde(default)]
+    pub message_signing: bool,
 }
 
 /// Holder of multisig signing nonces.
@@ -167,6 +171,7 @@ impl Default for SecuritySection {
             lock_memory: false,
             unseal_key_file: None,
             multisig_nonces: NonceHolder::Daemon,
+            message_signing: false,
         }
     }
 }
@@ -412,6 +417,8 @@ pub struct Config {
     pub lock_memory: bool,
     pub unseal_key_file: Option<PathBuf>,
     pub multisig_nonces: NonceHolder,
+    /// `[security] message_signing`.
+    pub message_signing: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -628,6 +635,7 @@ impl Config {
             lock_memory: file.security.lock_memory,
             unseal_key_file: file.security.unseal_key_file.clone(),
             multisig_nonces: file.security.multisig_nonces,
+            message_signing: file.security.message_signing,
         })
     }
 }

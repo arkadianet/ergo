@@ -147,6 +147,9 @@ pub(crate) fn open(
         if config.multisig_nonces == crate::config::NonceHolder::Caller {
             host.allow_caller_nonces();
         }
+        if config.message_signing {
+            host.allow_message_signing();
+        }
         Some(host)
     } else {
         None
@@ -806,6 +809,7 @@ mod tests {
             lock_memory: false,
             unseal_key_file: None,
             multisig_nonces: crate::config::NonceHolder::Daemon,
+            message_signing: false,
         };
         let daemon = crate::prepare(crate::config::LoadedConfig {
             config,

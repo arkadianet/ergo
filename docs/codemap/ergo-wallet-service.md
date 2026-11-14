@@ -86,6 +86,10 @@ transitional `ergo-state -> ergo-wallet-service` integration
     single-use, input- and commitment-bound signing-nonce handles and
     `nonce_vault.rs` the in-memory default (1 h expiry, 4096 cap); a host opts
     into caller-supplied nonces with `WalletEngine::allow_caller_nonces`.
+  - `message_sign.rs` — native `messages/sign`: the `kadia-maker-quote-v1`
+    and `rosen-intents-quote-v1` schemes (message checks, deterministic
+    Schnorr nonces, verifiers) and the tracked-key lookup with its spend-key
+    refusal.
   - `keys.rs` — `deriveKey` / `deriveNextKey` / `getPrivateKey` and
     `WalletBootService` (unlock + hydrate + unlock-time key derivation +
     change-address backfill).

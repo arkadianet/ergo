@@ -284,6 +284,7 @@ mod tests {
             lock_memory: false,
             unseal_key_file: None,
             multisig_nonces: crate::config::NonceHolder::Daemon,
+            message_signing: false,
         };
         let daemon = crate::prepare(crate::config::LoadedConfig {
             config,

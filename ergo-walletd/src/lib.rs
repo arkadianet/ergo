@@ -730,6 +730,7 @@ mod review_tests {
                 lock_memory: false,
                 unseal_key_file: None,
                 multisig_nonces: crate::config::NonceHolder::Daemon,
+                message_signing: false,
             },
             service,
             syncer,

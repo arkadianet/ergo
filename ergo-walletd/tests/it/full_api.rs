@@ -224,6 +224,12 @@ fn context(store: Arc<dyn WalletStore>, chain: Arc<dyn ChainClient>) -> ApiConte
     }
 }
 fn app(dir: &tempfile::TempDir) -> (Router, Arc<SpendingSpy>, Arc<dyn WalletStore>) {
+    app_with(dir, false)
+}
+fn app_with(
+    dir: &tempfile::TempDir,
+    message_signing: bool,
+) -> (Router, Arc<SpendingSpy>, Arc<dyn WalletStore>) {
     let store: Arc<dyn WalletStore> = Arc::new(
         RedbWalletStore::open_standalone(dir.path().join("wallet.redb"))
             .unwrap()
@@ -245,6 +251,9 @@ fn app(dir: &tempfile::TempDir) -> (Router, Arc<SpendingSpy>, Arc<dyn WalletStor
         Network::Testnet,
     )
     .unwrap();
+    if message_signing {
+        host.allow_message_signing();
+    }
     (
         seed_router(context, host, ApiKey::from_test(KEY.as_bytes().to_vec())),
         spy,
@@ -730,4 +739,221 @@ async fn status_and_confirmed_balance_reuse_the_first_node_refresh() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(spy.refreshes.load(Ordering::SeqCst), 2);
+}
+
+/// The Rosen Intents reference sample quote (testnet, 384 bytes).
+fn rosen_quote() -> Vec<u8> {
+    let mut b = b"rosen-intents/quote".to_vec();
+    b.extend_from_slice(&[1, 0x10]);
+    b.extend_from_slice(&[0x11; 32]);
+    b.push(0);
+    b.extend_from_slice(&100_000_000u64.to_be_bytes());
+    b.extend_from_slice(&1_793_000_000_000u64.to_be_bytes());
+    for fill in [0x22, 0x33, 0x44] {
+        b.extend_from_slice(&[fill; 32]);
+    }
+    b.extend_from_slice(&100_000_000u64.to_be_bytes());
+    b.extend_from_slice(&290_000_000_000u64.to_be_bytes());
+    b.extend_from_slice(&15u16.to_be_bytes());
+    b.extend_from_slice(&[0x55; 32]);
+    b.extend_from_slice(&1u64.to_be_bytes());
+    for s in ["ethereum", "0x11", "0xdac1", "monero", "4AdU", "native"] {
+        b.extend_from_slice(&(s.len() as u16).to_be_bytes());
+        b.extend_from_slice(s.as_bytes());
+    }
+    b
+}
+
+fn maker_message() -> Value {
+    json!({"vaultBoxId": "01".repeat(32), "side": 0, "priceNum": 1005, "priceDen": 2000,
+           "minIn": 1000, "maxIn": 1_000_000_000, "expiryHeight": 1_200_010, "execFee": 1_000_000})
+}
+
+fn hex_n<const N: usize>(v: &Value) -> [u8; N] {
+    hex::decode(v.as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn message_signing_is_off_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let (app, _, _) = app(&dir);
+    let body = json!({"scheme": "kadia-maker-quote-v1", "key": {"path": "m/44'/429'/0'/0/0"},
+                      "message": maker_message(), "allowSpendKey": true});
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/wallet/messages/sign",
+        Some(KEY),
+        &body.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["reason"], "sensitive_op_disabled");
+    assert!(body["detail"].as_str().unwrap().contains("message_signing"));
+}
+
+#[tokio::test]
+async fn message_signing_signs_named_schemes_with_tracked_keys_only() {
+    use ergo_wallet_service::engine::message_sign::{
+        verify_maker_quote, verify_rosen_quote, MakerQuote, SchnorrSig,
+    };
+    const SIGN: &str = "/api/v1/wallet/messages/sign";
+    let dir = tempfile::tempdir().unwrap();
+    let (app, spy, _) = app_with(&dir, true);
+    let sign = |body: Value| {
+        let app = app.clone();
+        async move { request(&app, "POST", SIGN, Some(KEY), &body.to_string()).await }
+    };
+    let maker = |key: Value, allow: bool| json!({"scheme": "kadia-maker-quote-v1", "key": key, "message": maker_message(), "allowSpendKey": allow});
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/v1/wallet/restore",
+        Some(KEY),
+        &json!({"mnemonic":MNEMONIC,"pass":PASSWORD,"derivation":{"type":"eip3"}}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Locked.
+    let (status, body) = sign(maker(json!({"path": "m/44'/429'/0'/0/0"}), true)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["reason"], "wallet_locked");
+    // An unknown scheme is refused before any key is touched, even locked.
+    let (status, body) =
+        sign(json!({"scheme": "raw", "key": {"path": "m"}, "message": "00"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["detail"]
+        .as_str()
+        .unwrap()
+        .contains("unknown signing scheme"));
+
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/v1/wallet/unlock",
+        Some(KEY),
+        &json!({"pass": PASSWORD}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, addresses) = request(&app, "GET", "/api/v1/wallet/addresses", Some(KEY), "").await;
+    let first = addresses["items"][0]["address"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // The first key holds the funds: refused without allowSpendKey.
+    let (status, body) = sign(maker(json!({"address": first}), false)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body["detail"].as_str().unwrap().contains("allowSpendKey"));
+    let (status, body) = sign(maker(json!({"address": first}), true)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["address"], first);
+    let quote = MakerQuote {
+        vault_box_id: [1; 32],
+        side: 0,
+        price_num: 1005,
+        price_den: 2000,
+        min_in: 1000,
+        max_in: 1_000_000_000,
+        expiry_height: 1_200_010,
+        exec_fee: 1_000_000,
+    };
+    let q: [u8; 33] = hex_n(&body["publicKey"]);
+    let sig = SchnorrSig {
+        a: hex_n(&body["a"]),
+        z: hex_n(&body["z"]),
+    };
+    assert!(verify_maker_quote(&q, &quote, &sig));
+    assert_eq!(body["signedMessage"], hex::encode(quote.message()));
+    let mut moved = quote;
+    moved.vault_box_id = [2; 32];
+    assert!(!verify_maker_quote(&q, &moved, &sig));
+
+    // A separate derived key signs without the flag, named by its path.
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/wallet/deriveKey",
+        Some(KEY),
+        &json!({"derivationPath": "m/44'/429'/0'/0/1", "fresh": true}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let quote_key = body["address"].as_str().unwrap().to_owned();
+    let path = json!({"path": "m/44'/429'/0'/0/1"});
+    let rosen = rosen_quote();
+    let (status, body) = sign(json!({"scheme": "rosen-intents-quote-v1", "key": path,
+        "message": {"quote": hex::encode(&rosen)}}))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["address"], quote_key);
+    let q2: [u8; 33] = hex_n(&body["publicKey"]);
+    assert_ne!(q2, q, "a different key from the first address");
+    let h: [u8; 32] = hex_n(&body["signedMessage"]);
+    let sig: [u8; 65] = hex_n(&body["signature"]);
+    let sig = SchnorrSig {
+        a: sig[..33].try_into().unwrap(),
+        z: sig[33..].try_into().unwrap(),
+    };
+    assert!(verify_rosen_quote(&q2, &h, &sig));
+    assert!(!verify_rosen_quote(&q, &h, &sig), "the wrong key");
+
+    // A bare hash, a quote with another domain, a mainnet quote: refused.
+    let mut domain = rosen.clone();
+    domain[0] ^= 1;
+    let mut mainnet = rosen.clone();
+    mainnet[20] = 0;
+    for bad in [h.to_vec(), domain, mainnet] {
+        let (status, body) = sign(json!({"scheme": "rosen-intents-quote-v1", "key": path,
+            "message": {"quote": hex::encode(bad)}}))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+    // A maker message with an unknown field, or of the other scheme.
+    let mut extra = maker_message();
+    extra["raw"] = json!("00");
+    for (scheme, message) in [
+        ("kadia-maker-quote-v1", extra),
+        (
+            "kadia-maker-quote-v1",
+            json!({"quote": hex::encode(&rosen)}),
+        ),
+    ] {
+        let (status, body) = sign(json!({"scheme": scheme, "key": path, "message": message})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+    // Keys the wallet does not track, and ambiguous key selectors.
+    let (status, body) = sign(maker(json!({"path": "m/44'/429'/0'/0/7"}), true)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    // The secp256k1 generator: a valid key no wallet derives.
+    let generator: [u8; 33] =
+        hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .unwrap()
+            .try_into()
+            .unwrap();
+    let stranger =
+        ergo_wallet::address::pubkey_to_p2pk_address(&generator, Network::Testnet.prefix())
+            .unwrap();
+    let (status, body) = sign(maker(json!({"address": stranger}), true)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body) = sign(maker(
+        json!({"address": first, "path": "m/44'/429'/0'/0/1"}),
+        true,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // Locked again: refused.
+    let (status, _) = request(&app, "POST", "/api/v1/wallet/lock", Some(KEY), "").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = sign(json!({"scheme": "rosen-intents-quote-v1", "key": path,
+        "message": {"quote": hex::encode(&rosen)}}))
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(spy.submissions.load(Ordering::SeqCst), 0);
 }
