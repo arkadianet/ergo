@@ -119,13 +119,13 @@ dependencies = [
 
 [[package]]
 name = "argon2"
-version = "0.5.3"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+checksum = "134c52ddac6d63c576bef8168db10c83c49c26444ecbc68060fef078925a901c"
 dependencies = [
  "base64ct",
- "blake2",
- "cpufeatures 0.2.17",
+ "blake2 0.11.0",
+ "cpufeatures 0.3.0",
  "password-hash",
  "zeroize",
 ]
@@ -315,6 +315,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
 dependencies = [
  "digest 0.10.7",
+]
+
+[[package]]
+name = "blake2"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b5d4d889834ee8ecfc0f8426ad30faf7cdcb10f741a8e6d7224d95325479f6f"
+dependencies = [
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -796,7 +805,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
- "blake2",
+ "blake2 0.10.6",
  "bs58",
  "ergo-compiler",
  "ergo-indexer",
@@ -840,7 +849,7 @@ version = "0.13.1"
 dependencies = [
  "anyhow",
  "base16",
- "blake2",
+ "blake2 0.10.6",
  "byteorder",
  "bytes",
  "ergo_avltree_rust",
@@ -877,7 +886,7 @@ dependencies = [
 name = "ergo-crypto"
 version = "0.13.1"
 dependencies = [
- "blake2",
+ "blake2 0.10.6",
  "ergo-chain-spec",
  "ergo-primitives",
  "ergo-ser",
@@ -1061,7 +1070,7 @@ dependencies = [
 name = "ergo-primitives"
 version = "0.13.1"
 dependencies = [
- "blake2",
+ "blake2 0.10.6",
  "hex",
  "proptest",
  "serde",
@@ -1129,7 +1138,7 @@ name = "ergo-state"
 version = "0.13.1"
 dependencies = [
  "bincode",
- "blake2",
+ "blake2 0.10.6",
  "bytes",
  "crossbeam-channel",
  "ergo-avltree",
@@ -1338,7 +1347,7 @@ checksum = "040e68223ab3775e54463c0f97b340d8fe6b4080acc5236fb4c19da477650668"
 dependencies = [
  "anyhow",
  "base16",
- "blake2",
+ "blake2 0.10.6",
  "byteorder",
  "bytes",
  "rand 0.8.6",
@@ -2156,13 +2165,11 @@ dependencies = [
 
 [[package]]
 name = "password-hash"
-version = "0.5.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+checksum = "aab41826031698d6ffcd9cff78ef56ef998e39dc7e5067cdfebe373842d4723b"
 dependencies = [
- "base64ct",
- "rand_core 0.6.4",
- "subtle",
+ "phc",
 ]
 
 [[package]]
@@ -2180,6 +2187,16 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "phc"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44dc769b75f93afdddd8c7fa12d685292ddeff1e66f7f0f3a234cf1818afe892"
+dependencies = [
+ "base64ct",
+ "ctutils",
+]
 
 [[package]]
 name = "pin-project-lite"
@@ -3089,7 +3106,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
