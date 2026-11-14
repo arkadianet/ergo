@@ -25,7 +25,7 @@ mod shared;
 mod sigma_boolean;
 
 pub use shared::{SigmaChildren, SigmaChildrenIntoIter};
-pub use sigma_boolean::{write_sigma_boolean, write_sigma_boolean_bounded};
+pub use sigma_boolean::{write_sigma_boolean, write_sigma_boolean_bounded, MAX_SIGMA_TREE_DEPTH};
 
 use avl_tree::{read_avl_tree, write_avl_tree};
 use bigint::{
