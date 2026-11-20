@@ -975,6 +975,185 @@ mod tests {
         assert_eq!(submitter.0.lock().unwrap().len(), 1);
     }
 
+    /// Compat `/wallet/transaction/sign` for a transaction spending an
+    /// unconfirmed output. It used to answer 500 ("input 0 box … not found in
+    /// UTXO set"): the route ignored the caller's `inputs` box bytes and
+    /// resolved inputs from the committed UTXO set only. It now resolves from
+    /// the pool, as the native sign does, and from supplied serialized boxes.
+    #[tokio::test]
+    async fn compat_sign_spends_an_unconfirmed_parent_from_the_pool_or_supplied_bytes() {
+        use ergo_ser::{address::NetworkPrefix, ergo_box::serialize_ergo_box};
+        use ergo_wallet_protocol::scala::sending::{TransactionSignRequest, UnsignedTxDto};
+        use ergo_wallet_protocol::WalletAdminError;
+        use std::{
+            collections::{HashMap, HashSet},
+            sync::{Arc, Mutex},
+        };
+
+        struct Pool(Mutex<ergo_wallet_service::engine::mempool::MempoolBoxSnapshot>);
+        impl ergo_wallet_service::engine::MempoolOverlay for Pool {
+            fn is_spent_by_pool(&self, id: &Digest32) -> bool {
+                self.0.lock().unwrap().spent_box_ids.contains(id)
+            }
+            fn pool_spending_tx(&self, _: &Digest32) -> Option<Digest32> {
+                None
+            }
+            fn pool_outputs(&self) -> Arc<HashMap<Digest32, ErgoBox>> {
+                self.0.lock().unwrap().outputs.clone()
+            }
+            fn box_snapshot(
+                &self,
+                _: &[Digest32],
+            ) -> ergo_wallet_service::engine::mempool::MempoolBoxSnapshot {
+                self.0.lock().unwrap().clone()
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&directory.path().join("state.redb")).unwrap();
+        let db = store.db_arc();
+        let mut storage =
+            ergo_wallet::storage::SecretStorage::open(directory.path().join("wallet"));
+        storage
+            .restore(
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+                "",
+                "test",
+                false,
+            )
+            .unwrap();
+        let mut wallet = ergo_wallet_service::state::WalletState::empty(false);
+        ergo_wallet_service::engine::WalletBootService::unlock_and_sync(
+            &mut storage,
+            &mut wallet,
+            &ergo_wallet_service::RedbWalletStore::new(db.clone()),
+            NetworkPrefix::Mainnet,
+            "test",
+        )
+        .unwrap();
+        let address = wallet.change_address().unwrap().to_owned();
+        let pubkey =
+            ergo_ser::address::decode_p2pk_address(&address, NetworkPrefix::Mainnet).unwrap();
+        let tree_bytes = ergo_ser::address::build_p2pk_tree_bytes(&pubkey).unwrap();
+        let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(&tree_bytes)).unwrap();
+        // The change of a transaction still in the pool.
+        let change = ErgoBox {
+            candidate: ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                10_000_000,
+                tree,
+                1,
+                vec![],
+                Default::default(),
+            )
+            .unwrap(),
+            transaction_id: ModifierId::from_bytes([0x46; 32]),
+            index: 1,
+        };
+        let change_id = change.box_id().unwrap();
+        let mut unrelated = change.clone();
+        unrelated.transaction_id = ModifierId::from_bytes([0x47; 32]);
+        store
+            .initialize_genesis(&[(
+                *unrelated.box_id().unwrap().as_bytes(),
+                serialize_ergo_box(&unrelated).unwrap(),
+            )])
+            .unwrap();
+        apply_headers(&mut store, 5);
+        let accessor = super::super::ChainStateAccessorImpl::chain_only(
+            ergo_state::reader::ChainStoreReader::new_from_db(db.clone()),
+            false,
+            None,
+        );
+        let pool = Arc::new(Pool(Mutex::new(
+            ergo_wallet_service::engine::mempool::MempoolBoxSnapshot {
+                outputs: Arc::new(HashMap::new()),
+                spent_box_ids: HashSet::new(),
+            },
+        )));
+        let engine = pool_test_engine(
+            Arc::new(parking_lot::RwLock::new(storage)),
+            Arc::new(parking_lot::RwLock::new(wallet)),
+            db,
+            Arc::new(accessor),
+            pool.clone(),
+            Arc::new(NoPoolSubmit),
+        );
+        let unsigned = ergo_ser::transaction::UnsignedTransaction {
+            inputs: vec![ergo_ser::input::UnsignedInput {
+                box_id: change_id,
+                extension: ergo_ser::input::ContextExtension::empty(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![change.candidate.clone()],
+        };
+        let mut writer = ergo_primitives::writer::VlqWriter::new();
+        ergo_ser::transaction::write_unsigned_transaction(&mut writer, &unsigned).unwrap();
+        let unsigned_hex = hex::encode(writer.result());
+        let request = |inputs: Option<Vec<String>>| TransactionSignRequest {
+            unsigned_tx: UnsignedTxDto {
+                bytes: unsigned_hex.clone(),
+            },
+            external_secrets: None,
+            hints: None,
+            inputs,
+            data_inputs: None,
+        };
+        let signed_input =
+            |response: ergo_wallet_protocol::scala::sending::TransactionSignResponse| {
+                let bytes = hex::decode(response.transaction.bytes).unwrap();
+                let tx =
+                    ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap();
+                assert!(!tx.inputs[0].spending_proof.proof.is_empty());
+                tx.inputs[0].box_id
+            };
+        let change_hex = hex::encode(serialize_ergo_box(&change).unwrap());
+
+        // Parent neither confirmed nor in this daemon's pool view: unresolvable
+        // without the caller's bytes (still the old error, not a new one) ...
+        assert!(engine.transaction_sign(request(None)).is_err());
+        // ... and signed with them, as Scala's `inputsRaw`.
+        let response = engine
+            .transaction_sign(request(Some(vec![change_hex.clone()])))
+            .unwrap();
+        assert_eq!(signed_input(response), change_id);
+        // A box id entry keeps meaning "look it up".
+        assert!(engine
+            .transaction_sign(request(Some(vec![hex::encode(change_id.as_bytes())])))
+            .is_err());
+
+        // Supplied bytes must be the input's own box: tampered bytes hash to
+        // another id, and an unrelated box is refused.
+        let mut tampered = change.clone();
+        tampered.candidate.value += 1;
+        for bad in [&tampered, &unrelated] {
+            assert!(matches!(
+                engine.transaction_sign(request(Some(vec![hex::encode(
+                    serialize_ergo_box(bad).unwrap()
+                )]))),
+                Err(WalletAdminError::BadRequest(m)) if m.contains("is not an input of this transaction")
+            ));
+        }
+        assert!(matches!(
+            engine.transaction_sign(request(Some(vec!["00ff".into()]))),
+            Err(WalletAdminError::BadRequest(_))
+        ));
+
+        // Parent in the pool (the reported case): signed with or without bytes.
+        pool.0.lock().unwrap().outputs = Arc::new(HashMap::from([(change_id, change.clone())]));
+        assert_eq!(
+            signed_input(engine.transaction_sign(request(None)).unwrap()),
+            change_id
+        );
+        assert_eq!(
+            signed_input(
+                engine
+                    .transaction_sign(request(Some(vec![change_hex])))
+                    .unwrap()
+            ),
+            change_id
+        );
+    }
+
     /// #684: walletd signs a contract input against the context this node's
     /// mempool admits with. The contract is
     /// `sigmaProp(CONTEXT.preHeader.minerPk == groupGenerator) && proveDlog(groupGenerator)`:
