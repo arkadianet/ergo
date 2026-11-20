@@ -256,6 +256,13 @@ const RUST_EXCLUSIVE_ROUTES: &[RouteRowStatic] = &[
         path: "/blockchain/storageRent/maturesInRange",
         phase: Phase::P2,
     },
+    // Additive box-lineage walk. No Scala counterpart yet; like the other
+    // extra-index reads it is available whenever the indexer is plumbed.
+    RouteRowStatic {
+        methods: &["GET"],
+        path: "/blockchain/box/lineage/{X}",
+        phase: Phase::P5,
+    },
 ];
 
 /// `const`-friendly twin of [`RouteRow`]. Uses borrowed slices instead

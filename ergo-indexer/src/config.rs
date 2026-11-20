@@ -13,6 +13,9 @@ pub struct IndexerConfig {
     /// File name (relative to the node data directory) for the
     /// indexer's redb database.
     pub db_filename: String,
+    /// Allow the `includeTxs=1` response amplifier. Off by default; operators
+    /// should also rate-limit this route at the reverse proxy.
+    pub lineage_include_txs: bool,
     /// Undo-retention window (max serviceable rollback depth). Node boot
     /// mirrors `[node] keep_versions` here so the indexer can follow any
     /// reorg the state store performs. Default 200 (Scala keepVersions).
@@ -25,6 +28,7 @@ impl Default for IndexerConfig {
             enabled: false,
             poll_idle_ms: 1000,
             db_filename: "indexer.redb".to_string(),
+            lineage_include_txs: false,
             rollback_window: crate::store::ROLLBACK_WINDOW,
         }
     }
