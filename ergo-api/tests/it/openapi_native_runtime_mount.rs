@@ -562,6 +562,7 @@ fn always_mounted_scala_blockchain_operations() -> std::collections::BTreeSet<Ro
         ("/blockchain/tokens", "post"),
         ("/blockchain/box/byTokenId/{tokenId}", "get"),
         ("/blockchain/box/unspent/byTokenId/{tokenId}", "get"),
+        ("/blockchain/box/lineage/{seedBoxId}", "get"),
     ]
     .into_iter()
     .map(|(path, method)| RouteOperation::new(path, method))
@@ -675,7 +676,7 @@ async fn canonical_family_inventories_are_bidirectional_and_fully_mounted() {
             .lines()
             .count()
     );
-    assert_eq!(inventory.scala.len(), 92);
+    assert_eq!(inventory.scala.len(), 93);
     assert!(inventory.rust.is_disjoint(&inventory.scala));
 
     let app = app.layer(axum::middleware::from_fn(mark_matched_route));

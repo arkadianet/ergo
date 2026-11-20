@@ -9,15 +9,15 @@ use ergo_ser::address::NetworkPrefix;
 use crate::api_family::ApiFamily;
 use crate::blockchain::{
     balance_for_address_handler, balance_post_handler, block_by_header_id_handler,
-    blocks_by_header_ids_handler, box_by_id_handler, box_by_index_handler, box_range_get_handler,
-    box_range_post_handler, boxes_by_address_get_handler, boxes_by_address_post_handler,
-    boxes_by_ergo_tree_post_handler, boxes_by_template_hash_handler, boxes_by_token_id_handler,
-    boxes_unspent_by_address_get_handler, boxes_unspent_by_address_post_handler,
-    boxes_unspent_by_ergo_tree_post_handler, boxes_unspent_by_template_hash_handler,
-    boxes_unspent_by_token_id_handler, enforce_status_gate, indexed_height_handler,
-    token_by_id_handler, tokens_by_ids_handler, transaction_range_get_handler,
-    transaction_range_post_handler, tx_by_id_handler, tx_by_index_handler,
-    txs_by_address_get_handler, txs_by_address_post_handler, BlockchainState,
+    blocks_by_header_ids_handler, box_by_id_handler, box_by_index_handler, box_lineage_handler,
+    box_range_get_handler, box_range_post_handler, boxes_by_address_get_handler,
+    boxes_by_address_post_handler, boxes_by_ergo_tree_post_handler, boxes_by_template_hash_handler,
+    boxes_by_token_id_handler, boxes_unspent_by_address_get_handler,
+    boxes_unspent_by_address_post_handler, boxes_unspent_by_ergo_tree_post_handler,
+    boxes_unspent_by_template_hash_handler, boxes_unspent_by_token_id_handler, enforce_status_gate,
+    indexed_height_handler, token_by_id_handler, tokens_by_ids_handler,
+    transaction_range_get_handler, transaction_range_post_handler, tx_by_id_handler,
+    tx_by_index_handler, txs_by_address_get_handler, txs_by_address_post_handler, BlockchainState,
 };
 use crate::compat::handlers::{
     block_by_id_handler, block_by_ids_handler, block_ids_at_height_handler,
@@ -216,6 +216,12 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
             "/blockchain/box/byIndex/{boxIndex}",
             &["get"],
             get(box_by_index_handler),
+        )
+        .route(
+            "/blockchain/box/lineage/{seed_box_id}",
+            "/blockchain/box/lineage/{seedBoxId}",
+            &["get"],
+            get(box_lineage_handler),
         )
         .route(
             "/blockchain/balance",

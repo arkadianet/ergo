@@ -9,6 +9,7 @@ get /blockchain/box/byId/{boxId}
 get /blockchain/box/byIndex/{boxIndex}
 get /blockchain/box/byTemplateHash/{hash}
 get /blockchain/box/byTokenId/{tokenId}
+get /blockchain/box/lineage/{seedBoxId}
 get /blockchain/box/range
 post /blockchain/box/range
 post /blockchain/box/unspent/byAddress

@@ -538,7 +538,7 @@ fn assert_operation_inventory_matches_fixture(
 fn canonical_scala_and_rust_operation_inventories_are_disjoint() {
     let scala = scala_openapi_operations();
     let rust = openapi_operations(&rust_openapi().expect("canonical RUST OpenAPI must merge"));
-    assert_eq!(scala.len(), 92);
+    assert_eq!(scala.len(), 93);
     assert_eq!(
         rust.len(),
         include_str!("../fixtures/api_family_rust_operations.txt")

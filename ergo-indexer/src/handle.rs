@@ -1,5 +1,8 @@
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, RwLock,
+};
 
 use crate::config::IndexerConfig;
 use crate::error::IndexerError;
@@ -66,6 +69,8 @@ struct HandleInner {
     /// Retain observed read corruption until the handle is reopened. An
     /// unrelated successful query cannot establish that the index is healthy.
     read_error: RwLock<Option<IndexerReadError>>,
+    /// `[indexer] lineage_include_txs`; set once at boot.
+    lineage_include_txs: AtomicBool,
 }
 
 impl IndexerHandle {
@@ -158,7 +163,10 @@ impl IndexerHandle {
                                 &e,
                             );
                         }
-                        return Some(Self::halted(e.halt_reason()));
+                        return Some(
+                            Self::halted(e.halt_reason())
+                                .with_lineage_include_txs(config.lineage_include_txs),
+                        );
                     }
                 };
                 if outcome == OpenOutcome::MigrationPending {
@@ -169,9 +177,12 @@ impl IndexerHandle {
                         .pending_migration
                         .write()
                         .unwrap_or_else(|p| p.into_inner()) = Some(store);
-                    Some(handle)
+                    Some(handle.with_lineage_include_txs(config.lineage_include_txs))
                 } else {
-                    Some(Self::with_store(store, meta.indexed_height))
+                    Some(
+                        Self::with_store(store, meta.indexed_height)
+                            .with_lineage_include_txs(config.lineage_include_txs),
+                    )
                 }
             }
             Err(IndexerError::SchemaCorruption) => {
@@ -179,7 +190,10 @@ impl IndexerHandle {
                     reason = ?IndexerHaltReason::SchemaCorruption,
                     "indexer halted: schema_version key missing",
                 );
-                Some(Self::halted(IndexerHaltReason::SchemaCorruption))
+                Some(
+                    Self::halted(IndexerHaltReason::SchemaCorruption)
+                        .with_lineage_include_txs(config.lineage_include_txs),
+                )
             }
             Err(e) => {
                 tracing::error!(
@@ -190,7 +204,10 @@ impl IndexerHandle {
                 if e.is_storage_error() {
                     report_indexer_storage_failure(Some(&path), "indexer_store_open", None, &e);
                 }
-                Some(Self::halted(e.halt_reason()))
+                Some(
+                    Self::halted(e.halt_reason())
+                        .with_lineage_include_txs(config.lineage_include_txs),
+                )
             }
         }
     }
@@ -206,6 +223,7 @@ impl IndexerHandle {
                 store: RwLock::new(None),
                 pending_migration: RwLock::new(None),
                 read_error: RwLock::new(None),
+                lineage_include_txs: AtomicBool::new(false),
             }),
         }
     }
@@ -221,6 +239,7 @@ impl IndexerHandle {
                 store: RwLock::new(None),
                 pending_migration: RwLock::new(None),
                 read_error: RwLock::new(None),
+                lineage_include_txs: AtomicBool::new(false),
             }),
         }
     }
@@ -235,8 +254,17 @@ impl IndexerHandle {
                 store: RwLock::new(Some(Arc::new(store))),
                 pending_migration: RwLock::new(None),
                 read_error: RwLock::new(None),
+                lineage_include_txs: AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Apply the `[indexer] lineage_include_txs` switch at boot.
+    pub fn with_lineage_include_txs(self, include_txs: bool) -> Self {
+        self.inner
+            .lineage_include_txs
+            .store(include_txs, Ordering::Relaxed);
+        self
     }
 
     /// Read-only access to the backing store (used by the polling
@@ -298,6 +326,10 @@ impl IndexerHandle {
 }
 
 impl IndexerQuery for IndexerHandle {
+    fn lineage_include_txs(&self) -> bool {
+        self.inner.lineage_include_txs.load(Ordering::Relaxed)
+    }
+
     fn indexed_height(&self) -> u64 {
         // Recover from a poisoned lock rather than propagating the
         // poison panic — a poisoned status lock means a prior writer

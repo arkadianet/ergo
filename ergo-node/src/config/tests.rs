@@ -1371,6 +1371,23 @@ fn archive_with_extra_index_accepted() {
 }
 
 #[test]
+fn lineage_include_txs_defaults_off_and_loads_from_toml() {
+    let base = "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+                [node]\nblocks_to_keep = -1\n\
+                [indexer]\nenabled = true\n";
+    let file = write_toml(base);
+    let cli = minimal_cli(Some(file.path()));
+    let cfg = NodeConfig::load(cli).expect("archive + indexer must load");
+    assert!(!cfg.indexer_config.lineage_include_txs);
+
+    let enabled = format!("{base}lineage_include_txs = true\n");
+    let file = write_toml(&enabled);
+    let cli = minimal_cli(Some(file.path()));
+    let cfg = NodeConfig::load(cli).expect("lineage flag must parse");
+    assert!(cfg.indexer_config.lineage_include_txs);
+}
+
+#[test]
 fn pruned_without_extra_index_loads_after_phase4() {
     // The activation gate is lifted. blocks_to_keep = 1024
     // (above the rollback floor) without extra-index loads

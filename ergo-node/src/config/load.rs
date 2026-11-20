@@ -959,6 +959,9 @@ impl NodeConfig {
             enabled: ti.enabled.unwrap_or(idx_def.enabled),
             poll_idle_ms: ti.poll_idle_ms.unwrap_or(idx_def.poll_idle_ms),
             db_filename: ti.db_filename.clone().unwrap_or(idx_def.db_filename),
+            lineage_include_txs: ti
+                .lineage_include_txs
+                .unwrap_or(idx_def.lineage_include_txs),
             // Mirrors `[node] keep_versions`: the indexer must be able to
             // follow any reorg the state store performs, so the two undo
             // windows stay equal by construction (no separate knob).

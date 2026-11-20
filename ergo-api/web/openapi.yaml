@@ -493,6 +493,75 @@ components:
         amount:
           type: integer
           format: int64
+    LineageResponse:
+      type: object
+      description: |
+        Paginated result of following the `spendingTransactionId` chain forward
+        from a seed box, keeping only successors with the requested full-tree
+        ergoTree hash (`blake2b256` of the serialized tree bytes, **not** the
+        constants-stripped template hash) and optional token/R6 filters.
+      required:
+        - items
+        - count
+        - seedBoxId
+        - script
+        - indexedHeight
+        - terminated
+      properties:
+        items:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/IndexedErgoBox'
+              - type: object
+                properties:
+                  spendingTx:
+                    type: object
+                    description: Present only with `includeTxs=1`; the transaction that spent this box.
+                    properties:
+                      id:
+                        $ref: '#/components/schemas/ModifierId'
+                      inputs:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            boxId:
+                              $ref: '#/components/schemas/ModifierId'
+                            ergoTree:
+                              type: string
+                            value:
+                              type: integer
+                              format: int64
+                            additionalRegisters:
+                              type: object
+                              additionalProperties:
+                                type: string
+                            extension:
+                              type: object
+                              additionalProperties:
+                                type: string
+        count:
+          type: integer
+          format: int64
+        nextCursor:
+          type: string
+          nullable: true
+        seedBoxId:
+          $ref: '#/components/schemas/ModifierId'
+        script:
+          type: string
+          description: Full-tree ergoTree hash the chain is scoped to (64 lowercase hex chars).
+        indexedHeight:
+          type: integer
+          format: int64
+        terminated:
+          type: string
+          enum:
+            - limit
+            - unspent
+            - no-successor
+            - tip
     IndexedErgoBox:
       allOf:
         - $ref: '#/components/schemas/ErgoTransactionOutput'
@@ -7523,6 +7592,106 @@ paths:
                 $ref: '#/components/schemas/IndexedErgoBox'
         '404':
           description: No box found with wanted id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /blockchain/box/lineage/{seedBoxId}:
+    get:
+      summary: Follow a box chain forward under a fixed ergoTree template
+      description: |
+        Requires `[indexer] enabled = true` (the route is part of the extra-index
+        surface, like the other `/blockchain/*` reads). Starts at a known seed
+        box and follows its spending transaction forward, emitting only
+        successors whose **full serialized
+        ergoTree hash** equals `script`, plus optional token-id and R6-index
+        filters. Multiple matching successors are resolved by lowest output
+        index. `nextCursor` is an opaque, filter-bound cursor. This route is
+        additive and does not enumerate token holders: a transfer to a different
+        script (e.g. another P2PK key) terminates the chain. Traversal is also
+        bounded by a hop budget: `terminated=limit` with `count=0` means the
+        budget was spent on boxes filtered out by `fromHeight`, and `nextCursor`
+        must be used to continue.
+      operationId: getBoxLineage
+      tags:
+        - blockchain
+      parameters:
+        - in: path
+          name: seedBoxId
+          required: true
+          description: Id of the known seed box (64 lowercase hex chars).
+          schema:
+            $ref: '#/components/schemas/ModifierId'
+        - in: query
+          name: script
+          required: true
+          description: blake2b256 of the serialized ergoTree bytes (full-tree hash, not template hash).
+          schema:
+            type: string
+        - in: query
+          name: tokenId
+          required: false
+          description: Only follow boxes carrying this token.
+          schema:
+            $ref: '#/components/schemas/ModifierId'
+        - in: query
+          name: index
+          required: false
+          description: Only follow boxes whose R6 register decodes to this Int.
+          schema:
+            type: integer
+            format: int32
+        - in: query
+          name: after
+          required: false
+          description: Opaque cursor from a previous response's nextCursor.
+          schema:
+            type: string
+        - in: query
+          name: fromHeight
+          required: false
+          description: Skip boxes whose creationHeight is below this value.
+          schema:
+            type: integer
+            format: int32
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - in: query
+          name: includeTxs
+          required: false
+          description: Set to 1 to include spending-transaction inputs; requires `[indexer] lineage_include_txs = true`.
+          schema:
+            type: integer
+            enum: [0, 1]
+            default: 0
+      responses:
+        '200':
+          description: A page of the box chain.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LineageResponse'
+        '400':
+          description: Bad query parameter, malformed cursor, or stale cursor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: No indexed box exists with the requested seed id.
           content:
             application/json:
               schema:

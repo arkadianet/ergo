@@ -149,6 +149,7 @@ pub(super) struct TomlIndexer {
     pub(super) enabled: Option<bool>,
     pub(super) poll_idle_ms: Option<u64>,
     pub(super) db_filename: Option<String>,
+    pub(super) lineage_include_txs: Option<bool>,
 }
 
 /// `[api]` TOML section: operator HTTP API.

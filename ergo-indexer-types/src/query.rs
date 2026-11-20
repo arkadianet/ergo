@@ -75,6 +75,11 @@ pub trait IndexerQuery: Send + Sync + 'static {
         matches!(self.status(), IndexerStatus::CaughtUp)
     }
 
+    /// Whether `?includeTxs=1` is permitted on the lineage route. Default off.
+    fn lineage_include_txs(&self) -> bool {
+        false
+    }
+
     fn box_by_id(&self, box_id: &BoxId) -> Result<Option<IndexedBoxDto>, IndexerReadError>;
 
     fn try_box_by_id(&self, box_id: &BoxId) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
